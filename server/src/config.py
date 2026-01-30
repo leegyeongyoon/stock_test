@@ -32,6 +32,10 @@ class Settings(BaseSettings):
         default=False,
         description="True일 때만 실제 주문 실행. 기본값 False (Paper 모드)",
     )
+    futures_only_mode: bool = Field(
+        default=True,
+        description="True면 Core 전략에서 Spot 대신 Futures Long 사용 (테스트용). Live 전환 시 False로 변경",
+    )
 
     # === 데이터베이스 ===
     database_url: str = Field(

@@ -16,6 +16,7 @@ from src.models.schemas import (
     ModeSchema,
     OrderSchema,
     OrderSide,
+    OrderType,
     PositionSchema,
     SummarySchema,
     TradingMode,
@@ -129,8 +130,32 @@ async def get_orders(
     limit: int = Query(100, le=500),
 ):
     """주문 목록 조회"""
-    # TODO: 실제 주문 조회 구현
-    return []
+    engine = get_engine()
+    orders = engine.get_orders(limit=limit)
+
+    result = []
+    for o in orders:
+        # status 필터
+        if status and o.get("status") != status.upper():
+            continue
+
+        result.append(
+            OrderSchema(
+                order_id=o["order_id"],
+                symbol=o["symbol"],
+                strategy=o["strategy"],
+                side=OrderSide(o["side"]),
+                order_type=OrderType(o["order_type"]),
+                quantity=o["quantity"],
+                price=o.get("price"),
+                status=o["status"],
+                filled_quantity=o.get("filled_quantity", 0),
+                avg_fill_price=o.get("avg_fill_price"),
+                created_at=datetime.fromisoformat(o["created_at"]),
+            )
+        )
+
+    return result
 
 
 @router.get("/events", response_model=list[EventSchema])
@@ -168,6 +193,7 @@ async def get_config():
 
     return ConfigSchema(
         is_paper_mode=settings.is_paper_mode,
+        futures_only_mode=settings.futures_only_mode,
         daily_loss_limit_safe=settings.daily_loss_limit_safe,
         daily_loss_limit_halt=settings.daily_loss_limit_halt,
         reconcile_interval_sec=settings.reconcile_interval_sec,
@@ -315,4 +341,195 @@ async def get_market_data():
         },
         "core_strategy_enabled": engine.core_strategy._enabled,
         "satellite_strategy_enabled": engine.satellite_strategy._enabled,
+    }
+
+
+@router.get("/balance")
+async def get_balance():
+    """Spot/Perp 잔고 조회"""
+    engine = get_engine()
+
+    spot_balance = await engine.spot_exchange.get_balance("USDT")
+    perp_balance = await engine.perp_exchange.get_balance("USDT")
+
+    return {
+        "spot": {
+            "total": spot_balance.total if spot_balance else 0,
+            "free": spot_balance.free if spot_balance else 0,
+            "locked": spot_balance.locked if spot_balance else 0,
+        },
+        "perp": {
+            "total": perp_balance.total if perp_balance else 0,
+            "free": perp_balance.free if perp_balance else 0,
+            "locked": perp_balance.locked if perp_balance else 0,
+        },
+    }
+
+
+@router.post("/bot/close-unhedged")
+async def close_unhedged_positions(confirm: bool = False):
+    """헤지되지 않은 Perp 포지션 청산
+
+    이 엔드포인트는 Spot 잔고 부족 등으로 인해 헤지되지 않은
+    Perp 포지션만 있는 경우에 사용합니다.
+    """
+    settings = get_settings()
+    engine = get_engine()
+
+    if not settings.is_paper_mode and not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Live mode requires confirm=true to close positions",
+        )
+
+    # Perp 포지션 조회
+    perp_positions = await engine.perp_exchange.get_positions()
+
+    if not perp_positions:
+        return {
+            "success": True,
+            "message": "No positions to close",
+            "closed": [],
+        }
+
+    closed_positions = []
+    errors = []
+
+    for position in perp_positions:
+        symbol = position.symbol
+        side = position.side  # LONG or SHORT
+        quantity = position.quantity
+
+        # 포지션 청산을 위한 반대 주문
+        close_side = OrderSide.SELL if side == "LONG" else OrderSide.BUY
+
+        result = await engine.perp_exchange.place_order(
+            symbol=symbol,
+            side=close_side,
+            order_type=OrderType.MARKET,
+            quantity=abs(quantity),
+            reduce_only=True,
+        )
+
+        if result.success:
+            closed_positions.append({
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "close_price": result.avg_price,
+            })
+            engine.add_event(
+                level="INFO",
+                event_type="ORDER",
+                message=f"Closed unhedged position: {symbol} {side} {quantity}",
+                details={
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "price": result.avg_price,
+                },
+            )
+        else:
+            errors.append({
+                "symbol": symbol,
+                "error": result.error,
+            })
+
+    return {
+        "success": len(errors) == 0,
+        "message": f"Closed {len(closed_positions)} positions" if closed_positions else "No positions closed",
+        "closed": closed_positions,
+        "errors": errors if errors else None,
+    }
+
+
+@router.post("/test/buy")
+async def test_buy(symbol: str = "BTCUSDT", quantity: float = 0.001):
+    """테스트 매수 (FUTURES_ONLY 모드: Long + Short 헤지)
+
+    테스트넷에서 수동으로 포지션을 열어 대시보드 확인용
+    """
+    settings = get_settings()
+    engine = get_engine()
+
+    if not settings.is_paper_mode:
+        raise HTTPException(status_code=400, detail="Only available in paper mode")
+
+    results = {"long": None, "short": None, "errors": []}
+
+    # FUTURES_ONLY 모드: Long + Short
+    if settings.futures_only_mode:
+        # 1. Futures Long
+        long_result = await engine.perp_exchange.place_order(
+            symbol=symbol,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=quantity,
+        )
+
+        # 주문 기록 추가
+        engine.add_order(
+            symbol=symbol,
+            strategy="CORE",
+            side="BUY",
+            order_type="MARKET",
+            quantity=quantity,
+            status="FILLED" if long_result.success else "REJECTED",
+            filled_qty=long_result.filled_qty if long_result.success else 0,
+            avg_fill_price=long_result.avg_price if long_result.success else None,
+        )
+
+        if long_result.success:
+            results["long"] = {
+                "filled_qty": long_result.filled_qty,
+                "avg_price": long_result.avg_price,
+            }
+        else:
+            results["errors"].append(f"Long failed: {long_result.error}")
+            return results
+
+        # 2. Futures Short (헤지)
+        short_result = await engine.perp_exchange.place_order(
+            symbol=symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            quantity=quantity,
+        )
+
+        # 주문 기록 추가
+        engine.add_order(
+            symbol=symbol,
+            strategy="CORE",
+            side="SELL",
+            order_type="MARKET",
+            quantity=quantity,
+            status="FILLED" if short_result.success else "REJECTED",
+            filled_qty=short_result.filled_qty if short_result.success else 0,
+            avg_fill_price=short_result.avg_price if short_result.success else None,
+        )
+
+        if short_result.success:
+            results["short"] = {
+                "filled_qty": short_result.filled_qty,
+                "avg_price": short_result.avg_price,
+            }
+        else:
+            results["errors"].append(f"Short failed: {short_result.error}")
+
+    else:
+        # Spot + Perp 모드
+        results["errors"].append("Spot+Perp mode requires Spot balance")
+
+    engine.add_event(
+        level="INFO",
+        event_type="ORDER",
+        message=f"Test buy executed: {symbol}",
+        details=results,
+    )
+
+    return {
+        "success": len(results["errors"]) == 0,
+        "symbol": symbol,
+        "quantity": quantity,
+        "results": results,
     }

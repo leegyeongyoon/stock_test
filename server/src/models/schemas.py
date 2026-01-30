@@ -152,6 +152,7 @@ class ConfigSchema(BaseModel):
     """설정 정보 (readonly)"""
 
     is_paper_mode: bool
+    futures_only_mode: bool = Field(description="Futures만으로 Core 전략 테스트 (Spot 불필요)")
     daily_loss_limit_safe: float
     daily_loss_limit_halt: float
     reconcile_interval_sec: int

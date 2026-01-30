@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router, set_engine as set_routes_engine
 from src.api.routes_analytics import router as analytics_router
+from src.api.routes_position import router as position_router, set_engine as set_position_engine
+from src.api.routes_risk import router as risk_router, set_engine as set_risk_engine
 from src.api.websocket import websocket_router, set_engine as set_ws_engine
 from src.config import get_settings
 from src.engine.core import TradingEngine
@@ -58,6 +60,8 @@ async def lifespan(app: FastAPI):
     engine = TradingEngine()
     set_routes_engine(engine)
     set_ws_engine(engine)
+    set_position_engine(engine)
+    set_risk_engine(engine)
 
     try:
         await engine.start()
@@ -98,6 +102,8 @@ app.add_middleware(
 # 라우터 등록
 app.include_router(router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
+app.include_router(position_router, prefix="/api")
+app.include_router(risk_router, prefix="/api")
 app.include_router(websocket_router)
 
 

@@ -1,6 +1,14 @@
-"""Execution Engine - 주문 실행 및 관리"""
+"""Execution Engine - 주문 실행 및 관리
+
+실행 리스크 관리:
+- 슬리피지 버퍼 적용
+- 주문 실패/지연 추적
+- ExecHealth에 결과 보고
+- 자동 SAFE 모드 트리거
+"""
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -11,6 +19,7 @@ import structlog
 from src.config import get_settings
 from src.execution.order_state import OrderStateMachine, OrderStateError
 from src.models.schemas import OrderSide, OrderStatus, OrderType, StrategyType
+from src.risk.exec_health import get_exec_health_monitor
 
 if TYPE_CHECKING:
     from src.exchange.base import BaseExchange
@@ -18,6 +27,16 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+# Exec Health Monitor (싱글톤)
+_exec_health = None
+
+
+def get_exec_health():
+    global _exec_health
+    if _exec_health is None:
+        _exec_health = get_exec_health_monitor()
+    return _exec_health
 
 
 class OrderUrgency(str, Enum):
@@ -197,7 +216,7 @@ class ExecutionEngine:
         is_spot: bool = True,
         urgency: OrderUrgency = OrderUrgency.LOW,
     ) -> bool:
-        """주문 제출"""
+        """주문 제출 (ExecHealth 레이턴시 추적 포함)"""
         if not self.risk.can_open_position and order.side == OrderSide.BUY:
             logger.warning(
                 "Cannot submit order: risk engine blocked",
@@ -208,6 +227,10 @@ class ExecutionEngine:
         exchange = self.spot if is_spot else self.perp
         policy = self._get_policy_for_strategy(order.strategy, urgency)
 
+        # 레이턴시 추적 시작
+        start_time = time.time()
+        exec_health = get_exec_health()
+
         try:
             result = await self._execute_with_policy(
                 exchange=exchange,
@@ -215,18 +238,37 @@ class ExecutionEngine:
                 policy=policy,
             )
 
+            # 레이턴시 계산 및 ExecHealth 보고
+            latency_ms = (time.time() - start_time) * 1000
+            exec_health.record_order_result(success=result, latency_ms=latency_ms)
+
             if result:
                 self.risk.on_order_success()
+                logger.debug(
+                    "Order executed successfully",
+                    order_id=order.order_id,
+                    latency_ms=round(latency_ms, 2),
+                )
                 return True
             else:
                 self.risk.on_order_failure()
+                logger.warning(
+                    "Order execution failed",
+                    order_id=order.order_id,
+                    latency_ms=round(latency_ms, 2),
+                )
                 return False
 
         except Exception as e:
+            # 실패 시에도 레이턴시 기록
+            latency_ms = (time.time() - start_time) * 1000
+            exec_health.record_order_result(success=False, latency_ms=latency_ms)
+
             logger.error(
                 "Order submission failed",
                 order_id=order.order_id,
                 error=str(e),
+                latency_ms=round(latency_ms, 2),
             )
             self.risk.on_order_failure()
             return False
@@ -744,3 +786,74 @@ class ExecutionEngine:
             # 이력은 최대 10000개
             if len(self._order_history) > 10000:
                 self._order_history = self._order_history[-10000:]
+
+    def get_execution_stats(self) -> dict:
+        """
+        실행 통계 종합 (슬리피지 + ExecHealth)
+
+        Returns:
+            dict: 실행 상태 종합 정보
+        """
+        exec_health = get_exec_health()
+        health = exec_health.get_health()
+        should_safe, safe_reason = exec_health.should_enter_safe()
+
+        return {
+            "health": {
+                "is_healthy": health.is_healthy,
+                "ws_latency_ms": health.ws_latency_ms,
+                "order_ack_latency_ms": health.order_ack_latency_ms,
+                "order_failure_rate": health.order_failure_rate,
+                "last_reconcile_drift": health.last_reconcile_drift,
+                "should_enter_safe": should_safe,
+                "safe_reason": safe_reason if should_safe else None,
+            },
+            "slippage": {
+                "top3_symbols": self.get_slippage_top3(),
+                "by_symbol": {
+                    symbol: self.get_avg_slippage_bps(symbol)
+                    for symbol in self._slippage_history.keys()
+                },
+            },
+            "hedge_recovery": self.get_hedge_recovery_stats(),
+            "orders": {
+                "active_count": len([o for o in self._active_orders.values() if o.is_active]),
+                "history_count": len(self._order_history),
+            },
+        }
+
+    def is_execution_healthy(self) -> tuple[bool, str]:
+        """
+        실행 건강도 체크
+
+        Returns:
+            tuple[bool, str]: (건강 여부, 사유)
+        """
+        exec_health = get_exec_health()
+        health = exec_health.get_health()
+
+        if not health.is_healthy:
+            should_safe, reason = exec_health.should_enter_safe()
+            return (False, reason)
+
+        return (True, "OK")
+
+    def record_ws_latency(self, latency_ms: float) -> None:
+        """
+        WebSocket 레이턴시 기록 (외부에서 호출)
+
+        Args:
+            latency_ms: WebSocket 메시지 지연 (ms)
+        """
+        exec_health = get_exec_health()
+        exec_health.record_ws_latency(latency_ms)
+
+    def record_reconcile_drift(self, drift: float) -> None:
+        """
+        리콘실 드리프트 기록 (외부에서 호출)
+
+        Args:
+            drift: 잔고/포지션 불일치율
+        """
+        exec_health = get_exec_health()
+        exec_health.record_reconcile_drift(drift)
