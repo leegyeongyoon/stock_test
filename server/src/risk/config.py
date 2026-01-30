@@ -285,8 +285,8 @@ class RiskOverlayConfig(BaseSettings):
 
     # === Core Strategy Safety ===
     core_allowed_symbols: str = Field(
-        default="BTCUSDT,ETHUSDT",
-        description="Core 허용 심볼 (쉼표 구분)",
+        default="ALL",
+        description="Core 허용 심볼 (ALL=전체, 또는 쉼표 구분 목록)",
     )
     core_min_funding_rate: float = Field(
         default=-0.0001,
@@ -318,7 +318,14 @@ class RiskOverlayConfig(BaseSettings):
     @property
     def core_symbols_list(self) -> list[str]:
         """Core 허용 심볼 리스트"""
+        if self.core_allowed_symbols.upper() == "ALL":
+            return []  # 빈 리스트 = 전체 허용
         return [s.strip() for s in self.core_allowed_symbols.split(",")]
+
+    @property
+    def core_allow_all(self) -> bool:
+        """Core 전체 심볼 허용 여부"""
+        return self.core_allowed_symbols.upper() == "ALL"
 
     class Config:
         env_prefix = ""

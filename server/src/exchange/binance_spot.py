@@ -360,3 +360,95 @@ class BinanceSpotExchange(BaseExchange):
             "bids": [(float(p), float(q)) for p, q in data.get("bids", [])],
             "asks": [(float(p), float(q)) for p, q in data.get("asks", [])],
         }
+
+    # ========== 일괄 조회 API (동적 심볼 관리용) ==========
+
+    async def get_exchange_info(self) -> Optional[dict]:
+        """
+        거래소 정보 조회 (전체 심볼, 거래규칙, 정밀도)
+        GET /api/v3/exchangeInfo (weight: 20)
+        """
+        data = await self._request("GET", "/api/v3/exchangeInfo")
+        return data
+
+    async def get_all_usdt_symbols(self) -> list[str]:
+        """
+        USDT 페어 + TRADING 상태 심볼 목록
+
+        Returns:
+            USDT 페어 심볼 목록 (예: ["BTCUSDT", "ETHUSDT", ...])
+        """
+        data = await self.get_exchange_info()
+        if not data:
+            return []
+
+        symbols = []
+        for symbol_info in data.get("symbols", []):
+            # USDT 페어만 + TRADING 상태만 + Spot만
+            if (
+                symbol_info.get("quoteAsset") == "USDT"
+                and symbol_info.get("status") == "TRADING"
+            ):
+                symbols.append(symbol_info["symbol"])
+
+        logger.info(
+            "Fetched USDT spot symbols",
+            count=len(symbols),
+        )
+        return symbols
+
+    async def get_all_tickers(self) -> dict[str, dict]:
+        """
+        전체 심볼 24h 티커 일괄 조회
+        GET /api/v3/ticker/24hr (weight: 40 for all)
+
+        Returns:
+            심볼별 티커 데이터 {symbol: {last, bid, ask, volume, quoteVolume, ...}}
+        """
+        data = await self._request("GET", "/api/v3/ticker/24hr")
+        if not data:
+            return {}
+
+        result = {}
+        for ticker in data:
+            symbol = ticker.get("symbol", "")
+            if symbol:
+                result[symbol] = {
+                    "symbol": symbol,
+                    "last": float(ticker.get("lastPrice", 0)),
+                    "bid": float(ticker.get("bidPrice", 0)),
+                    "ask": float(ticker.get("askPrice", 0)),
+                    "volume": float(ticker.get("volume", 0)),
+                    "quoteVolume": float(ticker.get("quoteVolume", 0)),
+                    "priceChange": float(ticker.get("priceChange", 0)),
+                    "priceChangePercent": float(ticker.get("priceChangePercent", 0)),
+                    "highPrice": float(ticker.get("highPrice", 0)),
+                    "lowPrice": float(ticker.get("lowPrice", 0)),
+                }
+
+        return result
+
+    async def get_all_book_tickers(self) -> dict[str, dict]:
+        """
+        전체 심볼 호가 일괄 조회
+        GET /api/v3/ticker/bookTicker (weight: 4 for all)
+
+        Returns:
+            심볼별 호가 {symbol: {bid, ask, bidQty, askQty}}
+        """
+        data = await self._request("GET", "/api/v3/ticker/bookTicker")
+        if not data:
+            return {}
+
+        result = {}
+        for ticker in data:
+            symbol = ticker.get("symbol", "")
+            if symbol:
+                result[symbol] = {
+                    "bid": float(ticker.get("bidPrice", 0)),
+                    "ask": float(ticker.get("askPrice", 0)),
+                    "bidQty": float(ticker.get("bidQty", 0)),
+                    "askQty": float(ticker.get("askQty", 0)),
+                }
+
+        return result

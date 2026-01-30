@@ -8,6 +8,7 @@ import structlog
 
 from src.config import get_settings
 from src.data.candle_manager import get_candle_manager
+from src.data.symbol_manager import init_symbol_manager, get_symbol_manager
 from src.engine.command_queue import Command, CommandQueue, CommandType
 from src.exchange.binance_perp import BinancePerpExchange
 from src.exchange.binance_spot import BinanceSpotExchange
@@ -24,9 +25,6 @@ from src.strategies.satellite import Regime, SatelliteStrategy
 
 logger = structlog.get_logger()
 settings = get_settings()
-
-# 모니터링할 심볼 리스트
-WATCH_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 
 
 class TradingEngine:
@@ -52,6 +50,12 @@ class TradingEngine:
             api_key=settings.futures_api_key,
             secret=settings.futures_secret,
             testnet=settings.is_paper_mode,
+        )
+
+        # 동적 심볼 관리자
+        self.symbol_manager = init_symbol_manager(
+            perp_exchange=self.perp_exchange,
+            spot_exchange=self.spot_exchange,
         )
 
         # 핵심 컴포넌트
@@ -133,6 +137,15 @@ class TradingEngine:
         if not spot_connected or not perp_connected:
             logger.error("Failed to connect to exchanges")
             raise RuntimeError("Exchange connection failed")
+
+        # 동적 심볼 목록 초기화
+        qualified_symbols = await self.symbol_manager.refresh()
+        logger.info(
+            "Symbol Manager initialized",
+            total=self.symbol_manager._total_symbols,
+            qualified=len(qualified_symbols),
+            symbols=qualified_symbols[:10],  # 상위 10개만 로그
+        )
 
         # Risk Engine 시작
         await self.risk_engine.start()
@@ -253,42 +266,92 @@ class TradingEngine:
             return {"success": False, "error": "Unknown command"}
 
     async def _update_market_data(self) -> None:
-        """시장 데이터 업데이트"""
+        """시장 데이터 업데이트 (동적 심볼 + 일괄 조회)"""
         try:
-            for symbol in WATCH_SYMBOLS:
-                # Spot 시세
-                spot_ticker = await self.spot_exchange.get_ticker(symbol)
-                # Futures 시세
-                perp_ticker = await self.perp_exchange.get_ticker(symbol)
-                # 펀딩비
-                funding_rate = await self.perp_exchange.get_funding_rate(symbol)
+            # 심볼 목록 갱신 필요 시 (1시간마다)
+            if self.symbol_manager.needs_refresh():
+                qualified = await self.symbol_manager.refresh()
+                logger.info(
+                    "Symbol list refreshed",
+                    qualified=len(qualified),
+                )
 
-                if spot_ticker and perp_ticker:
+            # 동적 심볼 목록
+            watch_symbols = self.symbol_manager.get_qualified_symbols()
+
+            if not watch_symbols:
+                logger.warning("No qualified symbols to monitor")
+                return
+
+            # 일괄 조회 (개별 조회 대비 API 호출 90% 절감)
+            perp_tickers = await self.perp_exchange.get_all_tickers()
+            perp_books = await self.perp_exchange.get_all_book_tickers()
+            funding_rates = await self.perp_exchange.get_all_funding_rates()
+
+            # Spot도 일괄 조회 (FUTURES_ONLY 모드가 아닌 경우)
+            spot_tickers = {}
+            spot_books = {}
+            if not settings.futures_only_mode:
+                spot_tickers = await self.spot_exchange.get_all_tickers()
+                spot_books = await self.spot_exchange.get_all_book_tickers()
+
+            # 심볼별 데이터 업데이트
+            for symbol in watch_symbols:
+                perp_ticker = perp_tickers.get(symbol, {})
+                perp_book = perp_books.get(symbol, {})
+                spot_ticker = spot_tickers.get(symbol, {})
+                spot_book = spot_books.get(symbol, {})
+                funding_rate = funding_rates.get(symbol, 0)
+
+                perp_last = perp_ticker.get("last", 0)
+                spot_last = spot_ticker.get("last", perp_last)  # Spot 없으면 Perp 사용
+
+                if perp_last > 0:
+                    # 24h 고점/저점 (돌파 기준)
+                    high_24h = perp_ticker.get("highPrice", perp_last * 1.005)
+                    low_24h = perp_ticker.get("lowPrice", perp_last * 0.995)
+
+                    # RVOL 계산: 가격 변동률 기반 추정
+                    # priceChangePercent가 큰 경우 거래량도 높다고 추정
+                    price_change_pct = abs(perp_ticker.get("priceChangePercent", 0))
+                    # 3% 변동 = RVOL 3.0 (돌파 조건 충족)
+                    estimated_rvol = 1.0 + (price_change_pct / 1.5)
+
+                    # VWAP 근사: (고점+저점+종가) / 3
+                    vwap_approx = (high_24h + low_24h + perp_last) / 3
+
+                    # ClosePos 계산: (현재가 - 저점) / (고점 - 저점)
+                    price_range = high_24h - low_24h
+                    close_pos = (perp_last - low_24h) / price_range if price_range > 0 else 0.5
+
                     self._market_data[symbol] = {
                         "symbol": symbol,
-                        "spot_price": spot_ticker.last,
-                        "perp_price": perp_ticker.last,
-                        "spot_bid": spot_ticker.bid,
-                        "spot_ask": spot_ticker.ask,
-                        "perp_bid": perp_ticker.bid,
-                        "perp_ask": perp_ticker.ask,
-                        "funding_rate": funding_rate or 0,
-                        "price": perp_ticker.last,  # Satellite용
-                        "high_20": perp_ticker.last * 1.005,  # 임시 (실제로는 캔들 데이터 필요)
-                        "low_20": perp_ticker.last * 0.995,
-                        "rvol": 1.0,  # 임시 (실제로는 거래량 비교 필요)
-                        "vwap": perp_ticker.last,  # 임시
+                        "spot_price": spot_last,
+                        "perp_price": perp_last,
+                        "spot_bid": spot_book.get("bid", spot_last),
+                        "spot_ask": spot_book.get("ask", spot_last),
+                        "perp_bid": perp_book.get("bid", perp_last),
+                        "perp_ask": perp_book.get("ask", perp_last),
+                        "funding_rate": funding_rate,
+                        "price": perp_last,  # Satellite용
+                        "volume_24h": perp_ticker.get("quoteVolume", 0),
+                        "high_20": high_24h,
+                        "low_20": low_24h,
+                        "highest_12_5m": high_24h,  # 24h 고점을 돌파 기준으로
+                        "lowest_12_5m": low_24h,    # 24h 저점을 돌파 기준으로
+                        "rvol": estimated_rvol,
+                        "vwap": vwap_approx,
+                        "close_pos": close_pos,
+                        "price_change_pct": price_change_pct,
                         "timestamp": datetime.utcnow(),
                     }
 
                     # Core Safety Guard에 펀딩 레이트 업데이트
-                    if funding_rate is not None:
-                        self.core_safety.update_funding_rate(symbol, funding_rate)
+                    self.core_safety.update_funding_rate(symbol, funding_rate)
 
             # BTC 레짐 계산 (간단 버전)
             btc_data = self._market_data.get("BTCUSDT", {})
             if btc_data:
-                btc_price = btc_data.get("perp_price", 0)
                 btc_funding = btc_data.get("funding_rate", 0)
 
                 # 펀딩비 기반 레짐 판단
@@ -484,9 +547,20 @@ class TradingEngine:
                 return
 
             # 심볼별 최소 수량 및 정밀도 처리
+            pre_round_qty = quantity
             quantity = self._round_quantity(symbol, quantity)
 
+            logger.info(
+                "Quantity after rounding",
+                symbol=symbol,
+                pre_round=pre_round_qty,
+                post_round=quantity,
+                current_price=current_price,
+                notional=quantity * current_price if current_price > 0 else 0,
+            )
+
             if quantity <= 0:
+                logger.warning("Quantity is zero after rounding", symbol=symbol)
                 return
 
             # Core 전략: 현물 매수 + 선물 매도 (캐시앤캐리)
@@ -763,51 +837,12 @@ class TradingEngine:
         )
 
     def _round_quantity(self, symbol: str, quantity: float) -> float:
-        """심볼별 수량 정밀도 처리 (현물용)"""
-        # 심볼별 최소 수량 및 정밀도 (Binance Spot 규칙)
-        precision_map = {
-            "BTCUSDT": (0.00001, 5),  # 최소 0.00001 BTC
-            "ETHUSDT": (0.0001, 4),   # 최소 0.0001 ETH
-            "SOLUSDT": (0.01, 2),     # 최소 0.01 SOL
-            "BNBUSDT": (0.001, 3),    # 최소 0.001 BNB
-            "XRPUSDT": (0.1, 1),      # 최소 0.1 XRP
-        }
-
-        min_qty, decimals = precision_map.get(symbol, (0.001, 3))
-
-        # 정밀도 맞추기
-        rounded = round(quantity, decimals)
-
-        # 최소 수량 체크
-        if rounded < min_qty:
-            return 0
-
-        return rounded
+        """심볼별 수량 정밀도 처리 (SymbolManager 사용)"""
+        return self.symbol_manager.round_quantity(symbol, quantity)
 
     def _round_quantity_for_perp(self, symbol: str, quantity: float) -> float:
-        """선물용 수량 정밀도 처리 (Binance Futures는 더 낮은 정밀도)"""
-        # 심볼별 최소 수량 및 정밀도 (Binance Futures 규칙)
-        precision_map = {
-            "BTCUSDT": (0.001, 3),    # 최소 0.001 BTC
-            "ETHUSDT": (0.001, 3),    # 최소 0.001 ETH
-            "SOLUSDT": (1, 0),        # 최소 1 SOL (정수)
-            "BNBUSDT": (0.01, 2),     # 최소 0.01 BNB
-            "XRPUSDT": (1, 0),        # 최소 1 XRP (정수)
-        }
-
-        min_qty, decimals = precision_map.get(symbol, (0.001, 3))
-
-        # 정밀도 맞추기 (내림)
-        if decimals == 0:
-            rounded = int(quantity)
-        else:
-            rounded = round(quantity, decimals)
-
-        # 최소 수량 체크
-        if rounded < min_qty:
-            return 0
-
-        return rounded
+        """선물용 수량 정밀도 처리 (SymbolManager 사용)"""
+        return self.symbol_manager.round_quantity(symbol, quantity)
 
     async def _manage_positions(self) -> None:
         """포지션 관리"""

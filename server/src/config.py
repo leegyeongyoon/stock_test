@@ -103,12 +103,12 @@ class Settings(BaseSettings):
         description="타임스톱 (30분)",
     )
     satellite_rvol_threshold: float = Field(
-        default=2.5,
-        description="RVOL 임계값 (2.5배)",
+        default=2.0,
+        description="RVOL 임계값 (2.0배) - 추정치 사용으로 완화",
     )
     satellite_close_pos_threshold: float = Field(
-        default=0.75,
-        description="ClosePos 임계값 (0.75)",
+        default=0.70,
+        description="ClosePos 임계값 (0.70) - 상단 70% 이상",
     )
     satellite_confirmation_entry: bool = Field(
         default=True,

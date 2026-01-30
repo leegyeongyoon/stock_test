@@ -336,12 +336,62 @@ async def get_market_data():
                 "perp_price": data.get("perp_price"),
                 "funding_rate": data.get("funding_rate"),
                 "edge_pct": (data.get("spot_price", 0) - data.get("perp_price", 0)) / data.get("spot_price", 1) if data.get("spot_price") else 0,
+                # Satellite 디버그용 추가 필드
+                "rvol": data.get("rvol", 0),
+                "close_pos": data.get("close_pos", 0),
+                "highest_12_5m": data.get("highest_12_5m", 0),
+                "lowest_12_5m": data.get("lowest_12_5m", 0),
+                "vwap": data.get("vwap", 0),
+                "price_change_pct": data.get("price_change_pct", 0),
             }
             for symbol, data in engine._market_data.items()
         },
         "core_strategy_enabled": engine.core_strategy._enabled,
         "satellite_strategy_enabled": engine.satellite_strategy._enabled,
     }
+
+
+@router.get("/satellite-status")
+async def get_satellite_status():
+    """Satellite 전략 상세 상태 조회 (디버그용)"""
+    engine = get_engine()
+    sat = engine.satellite_strategy
+    return {
+        "enabled": sat._enabled,
+        "btc_regime": sat._btc_regime.value,
+        "btc_is_volatile": sat._btc_is_volatile,
+        "confirmation_enabled": sat.confirmation_enabled,
+        "rvol_threshold": sat.rvol_threshold,
+        "close_pos_threshold": sat.close_pos_threshold,
+        "pending_signals": {
+            sym: {
+                "side": sig.side.value,
+                "status": sig.status.value,
+                "detected_at": sig.detected_at.isoformat(),
+            }
+            for sym, sig in sat._pending_signals.items()
+        },
+        "active_positions": len(sat._active_positions),
+    }
+
+
+@router.get("/symbol-info/{symbol}")
+async def get_symbol_info(symbol: str):
+    """심볼 정보 조회 (디버그용)"""
+    engine = get_engine()
+    info = engine.symbol_manager.get_symbol_info(symbol)
+    if info:
+        return {
+            "symbol": info.symbol,
+            "price_precision": info.price_precision,
+            "quantity_precision": info.quantity_precision,
+            "min_notional": info.min_notional,
+            "step_size": info.step_size,
+            "tick_size": info.tick_size,
+            "volume_24h": info.volume_24h,
+            "in_qualified_list": engine.symbol_manager.is_qualified(symbol),
+        }
+    return {"error": f"Symbol {symbol} not found in SymbolManager cache"}
 
 
 @router.get("/balance")

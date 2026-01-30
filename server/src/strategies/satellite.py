@@ -65,27 +65,22 @@ class SatellitePosition:
 
 class SatelliteStrategy(BaseStrategy):
     """
-    Satellite 전략 - 5분봉 모멘텀/돌파 (강화 버전)
+    Satellite 전략 - 5분봉 모멘텀/돌파 (v2: 코인별 독립 판단)
 
-    개선사항:
-    1. 레짐 필터: 1h MA50 + ATR 기반 (VOLATILE 레짐 추가)
-    2. 확인 진입: 2단계 확인 (시그널 → 다음 5m 봉 확인)
-    3. 청산 조건 강화: -0.8% 하드손절, +1% 후 0.6% 트레일링, 30분 타임스톱
+    v2 변경사항:
+    - BTC Regime 의존 제거 → 각 코인별 독립적 돌파 조건만 체크
+    - VOLATILE일 때만 신규 진입 차단 (안전장치)
+    - 롱/숏 모두 개별 코인 돌파 기준으로 판단
 
     진입 조건 (Phase 1 - 시그널 감지):
-    - RVOL_5m >= 2.5
-    - close > highest(high, 12개 5m)
-    - close >= VWAP_5m
-    - ClosePos >= 0.75
+    - RVOL_5m >= 2.5 (거래량 2.5배 폭증)
+    - ClosePos >= 0.75 (봉 상단 75% 위치 마감)
+    - 롱: price > 최근 12개 5m 고점 AND price >= VWAP
+    - 숏: price < 최근 12개 5m 저점 AND price <= VWAP
 
-    진입 조건 (Phase 2 - 확인):
-    - 다음 5m 봉에서 돌파 레벨 위 유지
-    - 거래량 유지
-
-    레짐 필터:
-    - BTC 1h 레짐이 BULLISH일 때만 롱
-    - BTC 1h 레짐이 BEARISH일 때만 숏
-    - NEUTRAL/VOLATILE이면 진입 안 함
+    진입 조건 (Phase 2 - 확인, 5분 후):
+    - 돌파 레벨 위/아래 유지
+    - RVOL >= 1.25 유지
 
     청산 조건:
     - 하드 손절: -0.8%
@@ -154,6 +149,8 @@ class SatelliteStrategy(BaseStrategy):
         """
         5분봉 스캐너 시그널 생성 (확인 진입 포함)
 
+        v2: 각 코인별 독립 돌파 조건 체크 (BTC Regime 의존 제거)
+
         market_data:
             symbol: str
             price: float
@@ -166,12 +163,11 @@ class SatelliteStrategy(BaseStrategy):
         if not self._enabled:
             return None
 
-        # 레짐 업데이트
+        # 레짐 업데이트 (청산 조건용으로만 사용)
         self._check_regime_from_feature_engine()
 
-        # 레짐 필터 - NEUTRAL/VOLATILE이면 진입 안 함
-        if self._btc_regime in [Regime.NEUTRAL, Regime.VOLATILE]:
-            # 대기 중인 시그널 취소
+        # VOLATILE일 때만 신규 진입 차단 (급변장 안전장치)
+        if self._btc_regime == Regime.VOLATILE or self._btc_is_volatile:
             symbol = market_data.get("symbol")
             if symbol in self._pending_signals:
                 self._pending_signals.pop(symbol)
@@ -222,12 +218,24 @@ class SatelliteStrategy(BaseStrategy):
         if close_pos < self.close_pos_threshold:
             return False
 
-        # 돌파 체크 (롱)
-        if (
-            self._btc_regime == Regime.BULLISH
-            and price > highest_12
-            and price >= vwap
-        ):
+        # 디버그 로그 - 조건 통과 코인
+        logger.info(
+            "Satellite breakout candidate",
+            symbol=symbol,
+            price=price,
+            rvol=f"{rvol:.2f}",
+            close_pos=f"{close_pos:.2f}",
+            highest_12=highest_12,
+            lowest_12=lowest_12,
+            vwap=f"{vwap:.2f}",
+            at_high=price >= highest_12,
+            at_low=price <= lowest_12,
+        )
+
+        # 돌파 체크 (롱) - 코인별 독립 판단
+        # 24h 고점의 99% 이상이면 돌파 근접으로 인정
+        breakout_threshold_high = highest_12 * 0.99 if highest_12 > 0 else 0
+        if price >= breakout_threshold_high > 0 and price >= vwap:
             self._pending_signals[symbol] = PendingSignal(
                 symbol=symbol,
                 side=OrderSide.BUY,
@@ -242,15 +250,14 @@ class SatelliteStrategy(BaseStrategy):
                 side="BUY",
                 breakout_level=highest_12,
                 rvol=rvol,
+                close_pos=close_pos,
             )
             return True
 
-        # 돌파 체크 (숏)
-        if (
-            self._btc_regime == Regime.BEARISH
-            and price < lowest_12
-            and price <= vwap
-        ):
+        # 돌파 체크 (숏) - 코인별 독립 판단
+        # 24h 저점의 101% 이하면 돌파 근접으로 인정
+        breakout_threshold_low = lowest_12 * 1.01 if lowest_12 > 0 else float("inf")
+        if price <= breakout_threshold_low < float("inf") and price <= vwap:
             self._pending_signals[symbol] = PendingSignal(
                 symbol=symbol,
                 side=OrderSide.SELL,
@@ -265,6 +272,7 @@ class SatelliteStrategy(BaseStrategy):
                 side="SELL",
                 breakout_level=lowest_12,
                 rvol=rvol,
+                close_pos=1 - close_pos,
             )
             return True
 
@@ -357,12 +365,9 @@ class SatelliteStrategy(BaseStrategy):
         if close_pos < self.close_pos_threshold:
             return None
 
-        # 고점 돌파 (롱)
-        if (
-            self._btc_regime == Regime.BULLISH
-            and price > highest_12
-            and price >= vwap
-        ):
+        # 고점 돌파 (롱) - 코인별 독립 판단
+        breakout_threshold_high = highest_12 * 0.99 if highest_12 > 0 else 0
+        if price >= breakout_threshold_high > 0 and price >= vwap:
             return Signal(
                 strategy=StrategyType.SATELLITE,
                 signal_type=SignalType.ENTRY,
@@ -374,12 +379,9 @@ class SatelliteStrategy(BaseStrategy):
                 confidence=min(1.0, rvol / self.rvol_threshold),
             )
 
-        # 저점 돌파 (숏)
-        if (
-            self._btc_regime == Regime.BEARISH
-            and price < lowest_12
-            and price <= vwap
-        ):
+        # 저점 돌파 (숏) - 코인별 독립 판단
+        breakout_threshold_low = lowest_12 * 1.01 if lowest_12 > 0 else float("inf")
+        if price <= breakout_threshold_low < float("inf") and price <= vwap:
             return Signal(
                 strategy=StrategyType.SATELLITE,
                 signal_type=SignalType.ENTRY,
@@ -519,34 +521,8 @@ class SatelliteStrategy(BaseStrategy):
                     reason=f"Time stop: {elapsed.total_seconds()/60:.0f}min",
                 )
 
-        # 4. BTC 레짐 악화
-        if is_long and self._btc_regime == Regime.BEARISH:
-            logger.warning(
-                "Satellite regime exit - long in bearish",
-                symbol=symbol,
-            )
-            return Signal(
-                strategy=StrategyType.SATELLITE,
-                signal_type=SignalType.EXIT,
-                symbol=symbol,
-                side=OrderSide.SELL,
-                quantity=quantity,
-                reason="Regime changed to BEARISH",
-            )
-
-        if not is_long and self._btc_regime == Regime.BULLISH:
-            logger.warning(
-                "Satellite regime exit - short in bullish",
-                symbol=symbol,
-            )
-            return Signal(
-                strategy=StrategyType.SATELLITE,
-                signal_type=SignalType.EXIT,
-                symbol=symbol,
-                side=OrderSide.BUY,
-                quantity=quantity,
-                reason="Regime changed to BULLISH",
-            )
+        # v2: BTC 레짐 기반 청산 제거 (개별 코인 독립 판단)
+        # VOLATILE 청산만 유지 (위에서 처리됨)
 
         return None
 

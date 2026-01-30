@@ -118,11 +118,13 @@ class CoreSafetyGuard:
         self._edge_history: dict[str, list[float]] = {}
 
     def is_allowed_symbol(self, symbol: str) -> bool:
-        """허용된 심볼인지 확인"""
+        """허용된 심볼인지 확인 (ALL이면 유동성 통과 심볼 모두 허용)"""
+        if self.config.core_allow_all:
+            return True  # 유동성 필터는 SymbolManager에서 이미 적용됨
         return symbol in self.config.core_symbols_list
 
     def get_allowed_symbols(self) -> list[str]:
-        """허용 심볼 목록 반환"""
+        """허용 심볼 목록 반환 (ALL이면 빈 리스트)"""
         return self.config.core_symbols_list
 
     def update_funding_rate(self, symbol: str, funding_rate: float) -> FundingState:
