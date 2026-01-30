@@ -7,6 +7,11 @@
 - EXTREME: Climax - aggressive profit taking
 
 Uses Hard Rules + Score-based hybrid decision system with hysteresis.
+
+DD-Tier Aware:
+- Tier 3+ (2% DD): 더 엄격한 WEAK 진입
+- Tier 4+ (3.5% DD): 강제 WEAK + 빠른 청산
+- Tier 6 (5% DD): HALT
 """
 
 from datetime import datetime
@@ -29,6 +34,7 @@ if TYPE_CHECKING:
     from src.data.candle_manager import CandleManager
     from src.features.feature_engine import FeatureEngine
     from src.risk.risk_engine import RiskEngine
+    from src.risk.risk_overlay import RiskOverlay
 
 logger = structlog.get_logger()
 
@@ -51,10 +57,12 @@ class PositionStateMachine:
         feature_engine: "FeatureEngine",
         candle_manager: "CandleManager",
         risk_engine: Optional["RiskEngine"] = None,
+        risk_overlay: Optional["RiskOverlay"] = None,
     ):
         self.feature_engine = feature_engine
         self.candle_manager = candle_manager
         self.risk_engine = risk_engine
+        self.risk_overlay = risk_overlay
         self.config = get_psm_config()
 
         # Score calculator
@@ -65,6 +73,10 @@ class PositionStateMachine:
 
         # Active managed positions
         self._positions: Dict[str, ManagedPosition] = {}
+
+    def set_risk_overlay(self, risk_overlay: "RiskOverlay") -> None:
+        """Risk Overlay 설정 (나중에 주입)"""
+        self.risk_overlay = risk_overlay
 
     def create_position(
         self,
@@ -301,6 +313,8 @@ class PositionStateMachine:
         2. Risk engine in SAFE mode
         3. Structure break (lower low + 2x below VWAP for LONG)
         4. Near initial stop (-0.8R)
+        5. DD Tier 4+ (3.5% DD): 강제 WEAK
+        6. Soft DD with losing position
         """
         # 1. BTC RISK-OFF
         btc_regime = self.feature_engine.check_btc_regime()
@@ -318,11 +332,31 @@ class PositionStateMachine:
             if hasattr(self.risk_engine, "mode") and self.risk_engine.mode != "NORMAL":
                 return f"Risk engine in {self.risk_engine.mode} mode"
 
-        # 3. Structure break
+        # 3. DD-Tier aware WEAK rules (MDD 5% 강화)
+        if self.risk_overlay:
+            decision = self.risk_overlay.get_decision()
+            if decision:
+                # Tier 4+ (3.5~4.5% DD): 강제 WEAK
+                if decision.dd_tier >= 4:
+                    return f"DD Tier {decision.dd_tier}: Forced WEAK (DD >= 3.5%)"
+
+                # Soft DD + 손실 포지션: 강제 WEAK
+                if decision.is_soft_dd:
+                    r_pnl = position.calc_r_pnl(current_price)
+                    if r_pnl < 0:
+                        return f"Soft DD + losing position (R={r_pnl:.2f})"
+
+                # Tier 3 (2~3.5% DD) + 손실 -0.5R 이상: 강제 WEAK
+                if decision.dd_tier >= 3:
+                    r_pnl = position.calc_r_pnl(current_price)
+                    if r_pnl <= -0.5:
+                        return f"DD Tier {decision.dd_tier} + losing (R={r_pnl:.2f})"
+
+        # 4. Structure break
         if self.score_calculator.check_structure_break(symbol, position.side):
             return "Structure break detected"
 
-        # 4. Near initial stop (-0.8R)
+        # 5. Near initial stop (-0.8R)
         r_pnl = position.calc_r_pnl(current_price)
         if r_pnl <= -0.8:
             return f"Near initial stop (R={r_pnl:.2f})"
@@ -492,3 +526,67 @@ class PositionStateMachine:
             return min(c.low for c in candles)
         else:
             return max(c.high for c in candles)
+
+    def should_force_close(self, symbol: str) -> tuple[bool, str]:
+        """
+        Hard DD로 인한 강제 청산 필요 여부
+
+        Returns:
+            tuple[bool, str]: (필요 여부, 사유)
+        """
+        if not self.risk_overlay:
+            return False, ""
+
+        decision = self.risk_overlay.get_decision()
+        if not decision:
+            return False, ""
+
+        # Hard DD (5%): 전량 청산
+        if decision.is_hard_dd:
+            return True, f"Hard DD Tier {decision.dd_tier}: Force close all"
+
+        # Position Reducer가 실행 중이면 확인
+        if decision.is_reducing and decision.reduce_pct >= 1.0:
+            return True, "Position reducer: Force close"
+
+        return False, ""
+
+    def get_dd_adjusted_threshold(self, base_threshold: float, adjustment_type: str) -> float:
+        """
+        DD Tier에 따른 조정된 임계값 반환
+
+        Args:
+            base_threshold: 기본 임계값
+            adjustment_type: "stop" (손절 엄격화), "tp" (익절 빠르게)
+
+        Returns:
+            조정된 임계값
+        """
+        if not self.risk_overlay:
+            return base_threshold
+
+        decision = self.risk_overlay.get_decision()
+        if not decision:
+            return base_threshold
+
+        dd_tier = decision.dd_tier
+
+        if adjustment_type == "stop":
+            # DD Tier가 높을수록 손절 엄격화 (-0.8R → -0.6R → -0.4R)
+            if dd_tier >= 5:
+                return base_threshold * 0.5  # 50% 타이트
+            elif dd_tier >= 4:
+                return base_threshold * 0.7  # 30% 타이트
+            elif dd_tier >= 3:
+                return base_threshold * 0.85  # 15% 타이트
+
+        elif adjustment_type == "tp":
+            # DD Tier가 높을수록 익절 빠르게 (1R → 0.7R → 0.5R)
+            if dd_tier >= 5:
+                return base_threshold * 0.5
+            elif dd_tier >= 4:
+                return base_threshold * 0.7
+            elif dd_tier >= 3:
+                return base_threshold * 0.85
+
+        return base_threshold

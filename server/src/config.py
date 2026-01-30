@@ -52,14 +52,14 @@ class Settings(BaseSettings):
     port: int = Field(default=8000)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
 
-    # === Risk 파라미터 ===
+    # === Risk 파라미터 (강화) ===
     daily_loss_limit_safe: float = Field(
-        default=-0.015,
-        description="SAFE 모드 전환 일손실 임계값 (-1.5%)",
+        default=-0.01,
+        description="SAFE 모드 전환 일손실 임계값 (-1.0%)",
     )
     daily_loss_limit_halt: float = Field(
-        default=-0.030,
-        description="HALT 모드 전환 일손실 임계값 (-3.0%)",
+        default=-0.015,
+        description="HALT 모드 전환 일손실 임계값 (-1.5%)",
     )
     reconcile_interval_sec: int = Field(
         default=10,

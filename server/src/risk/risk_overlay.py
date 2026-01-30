@@ -8,6 +8,11 @@
 5. SIGNAL ENGINE     → 진입 신호 (가장 마지막)
 
 원칙: 신호가 아무리 좋아도 1~3에서 위험이면 절대 진입 금지
+
+MDD 5% 방어:
+- 6-Tier DD Multiplier
+- Portfolio Risk Management
+- Position Reducer (Reduce & Stay)
 """
 
 from dataclasses import dataclass, field
@@ -21,6 +26,16 @@ from src.risk.config import get_risk_config
 from src.risk.correlation import CorrelationGuard, GuardAction
 from src.risk.dd_tracker import DrawdownTracker, get_dd_tracker
 from src.risk.exec_health import ExecHealthMonitor, get_exec_health_monitor
+from src.risk.portfolio_risk import (
+    MarketCondition,
+    PortfolioRiskManager,
+    get_portfolio_risk_manager,
+)
+from src.risk.position_reducer import (
+    PositionReducer,
+    ReduceTrigger,
+    get_position_reducer,
+)
 
 if TYPE_CHECKING:
     from src.data.candle_manager import CandleManager
@@ -60,6 +75,9 @@ class RiskDecision:
     max_exposure_pct: float = 1.0  # 0.0 ~ 1.0
     sizing_multiplier: float = 1.0  # 0.0 ~ 1.0
 
+    # v3.1: Core 동적 비중 (30~60%)
+    core_allocation_pct: float = 0.50  # 기본 50%
+
     # 헤지
     hedge_required: bool = False
 
@@ -72,6 +90,23 @@ class RiskDecision:
     tail_risk_ok: bool = True
     regime_ok: bool = True
 
+    # DD 6-Tier 상태
+    dd_tier: int = 1
+    is_soft_dd: bool = False  # 3.5% DD
+    is_hard_dd: bool = False  # 5% DD
+    is_combined_safe: bool = False  # v3.1: 조합 트리거
+
+    # Portfolio Risk 상태
+    open_positions: int = 0
+    max_positions: int = 5
+    total_risk_pct: float = 0.0
+    available_risk_pct: float = 0.015
+
+    # Position Reducer 상태
+    is_reducing: bool = False
+    reduce_pct: float = 0.0
+    hard_dd_phase: int = 0  # v3.1: Hard DD 분할 청산 단계 (0=none, 1-3)
+
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -82,12 +117,24 @@ class RiskDecision:
             "core_allowed": self.core_allowed,
             "max_exposure_pct": self.max_exposure_pct,
             "sizing_multiplier": self.sizing_multiplier,
+            "core_allocation_pct": round(self.core_allocation_pct * 100, 1),
             "hedge_required": self.hedge_required,
             "primary_reason": self.primary_reason,
             "all_reasons": self.all_reasons,
             "system_safety_ok": self.system_safety_ok,
             "tail_risk_ok": self.tail_risk_ok,
             "regime_ok": self.regime_ok,
+            "dd_tier": self.dd_tier,
+            "is_soft_dd": self.is_soft_dd,
+            "is_hard_dd": self.is_hard_dd,
+            "is_combined_safe": self.is_combined_safe,
+            "open_positions": self.open_positions,
+            "max_positions": self.max_positions,
+            "total_risk_pct": round(self.total_risk_pct * 100, 3),
+            "available_risk_pct": round(self.available_risk_pct * 100, 3),
+            "is_reducing": self.is_reducing,
+            "reduce_pct": round(self.reduce_pct * 100, 1),
+            "hard_dd_phase": self.hard_dd_phase,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -118,6 +165,10 @@ class RiskOverlay:
             CorrelationGuard(candle_manager) if candle_manager else None
         )
 
+        # 신규 컴포넌트 (MDD 5% 강화)
+        self.portfolio_risk = get_portfolio_risk_manager()
+        self.position_reducer = get_position_reducer()
+
         # 상태
         self._current_mode: RiskMode = RiskMode.NORMAL
         self._last_decision: Optional[RiskDecision] = None
@@ -141,6 +192,10 @@ class RiskOverlay:
         decision = RiskDecision()
         reasons = []
 
+        # Portfolio Risk에 equity 업데이트
+        if current_equity is not None:
+            self.portfolio_risk.update_equity(current_equity)
+
         # === 1. SYSTEM SAFETY (최우선) ===
         system_ok, system_reason = self._check_system_safety()
         decision.system_safety_ok = system_ok
@@ -153,10 +208,19 @@ class RiskOverlay:
             decision.max_exposure_pct = 0.0
             decision.sizing_multiplier = 0.0
 
-        # === 2. TAIL RISK ===
+        # === 2. TAIL RISK (6-Tier DD 포함) ===
         if decision.mode != RiskMode.HALT:
             tail_ok, tail_reason, tail_action = self._check_tail_risk(current_equity)
             decision.tail_risk_ok = tail_ok
+
+            # DD 상태 업데이트
+            dd_state = self.dd_tracker.get_state()
+            if dd_state:
+                decision.dd_tier = dd_state.dd_tier
+                decision.is_soft_dd = dd_state.is_soft_dd
+                decision.is_hard_dd = dd_state.is_hard_dd
+                decision.is_combined_safe = dd_state.is_combined_safe
+                decision.sizing_multiplier = dd_state.sizing_multiplier
 
             if not tail_ok:
                 reasons.append(f"TAIL: {tail_reason}")
@@ -171,30 +235,52 @@ class RiskOverlay:
                     if decision.mode != RiskMode.HALT:
                         decision.mode = RiskMode.SAFE
                     decision.satellite_allowed = False
-                    decision.sizing_multiplier = min(
-                        decision.sizing_multiplier,
-                        self.dd_tracker.get_sizing_multiplier(),
-                    )
+
+            # Soft DD (3.5%+): Satellite 신규진입 OFF (기존 관리만)
+            if decision.is_soft_dd and not decision.is_hard_dd:
+                decision.satellite_allowed = False
+                reasons.append(f"Soft DD Tier{decision.dd_tier}: Satellite new entry OFF")
 
         # === 3. MARKET REGIME ===
-        if decision.mode == RiskMode.NORMAL:
-            regime, regime_ok, regime_reason = self._check_market_regime()
-            decision.regime = regime
-            decision.regime_ok = regime_ok
+        regime, regime_ok, regime_reason = self._check_market_regime()
+        decision.regime = regime
+        decision.regime_ok = regime_ok
 
-            if not regime_ok:
-                reasons.append(f"REGIME: {regime_reason}")
+        if not regime_ok:
+            reasons.append(f"REGIME: {regime_reason}")
 
-            # 레짐에 따른 조정
-            if regime == MarketRegime.RISK_OFF:
-                decision.satellite_allowed = False
-                decision.max_exposure_pct = 0.3
-                decision.hedge_required = True
-            elif regime == MarketRegime.NEUTRAL:
-                decision.max_exposure_pct = 0.7
-                decision.sizing_multiplier = min(decision.sizing_multiplier, 0.7)
+        # 레짐에 따른 조정 및 Market Condition 설정
+        # v3.1: Core 비중 동적 조절 (30~60%)
+        cfg = self.config
+        if regime == MarketRegime.RISK_OFF:
+            decision.satellite_allowed = False
+            decision.max_exposure_pct = 0.3
+            decision.hedge_required = True
+            decision.core_allocation_pct = cfg.core_allocation_min  # 30%
+            self.portfolio_risk.set_market_condition(MarketCondition.RISKY)
+        elif regime == MarketRegime.NEUTRAL:
+            decision.max_exposure_pct = 0.7
+            decision.sizing_multiplier = min(decision.sizing_multiplier, 0.7)
+            decision.core_allocation_pct = cfg.core_allocation_default  # 50%
+            self.portfolio_risk.set_market_condition(MarketCondition.NORMAL)
+        else:  # RISK_ON
+            decision.core_allocation_pct = cfg.core_allocation_max  # 60%
+            self.portfolio_risk.set_market_condition(MarketCondition.NORMAL)
+
+        # DD 티어에 따른 Core 비중 추가 조절
+        if decision.dd_tier >= 4:  # 3.5%+ DD
+            decision.core_allocation_pct = min(
+                decision.core_allocation_pct, cfg.core_allocation_min
+            )
+        elif decision.dd_tier >= 3:  # 2%+ DD
+            decision.core_allocation_pct = min(
+                decision.core_allocation_pct, cfg.core_allocation_default
+            )
 
         # === 상관 가드 체크 ===
+        corr_shock = False
+        corr_severity = 0.0
+
         if self.correlation_guard:
             corr_state = self.correlation_guard.get_guard_action()
 
@@ -202,9 +288,42 @@ class RiskOverlay:
                 decision.satellite_allowed = False
                 decision.hedge_required = True
                 reasons.append(f"CORR: {corr_state.action.value}")
+                corr_shock = True
+                corr_severity = min(1.0, corr_state.avg_correlation / 0.9)
+                self.portfolio_risk.set_market_condition(MarketCondition.RISKY)
             elif corr_state.action == GuardAction.REDUCE:
                 decision.max_exposure_pct = min(decision.max_exposure_pct, 0.3)
                 reasons.append("CORR: REDUCE exposure")
+                corr_shock = True
+                corr_severity = 0.5
+
+        # === Position Reducer 체크 ===
+        reduce_state = self.position_reducer.get_state()
+        decision.is_reducing = reduce_state.is_reducing
+        decision.reduce_pct = reduce_state.reduce_pct
+
+        # Reduce & Stay 기간 중 신규 진입 제한
+        if reduce_state.is_reducing:
+            can_expand, expand_reason = self.position_reducer.can_expand_position()
+            if not can_expand:
+                decision.satellite_allowed = False
+                reasons.append(f"REDUCER: {expand_reason}")
+
+        # === Portfolio Risk 상태 업데이트 ===
+        portfolio_state = self.portfolio_risk.get_state()
+        decision.open_positions = portfolio_state.open_positions
+        decision.max_positions = portfolio_state.max_positions
+        decision.total_risk_pct = portfolio_state.total_risk_pct
+        decision.available_risk_pct = portfolio_state.available_risk_pct
+
+        # 포지션 수 제한 체크
+        if not portfolio_state.can_open_new:
+            if "Max positions" in portfolio_state.block_reason:
+                decision.satellite_allowed = False
+                reasons.append(f"PORTFOLIO: {portfolio_state.block_reason}")
+            elif "Insufficient risk" in portfolio_state.block_reason:
+                decision.satellite_allowed = False
+                reasons.append(f"PORTFOLIO: {portfolio_state.block_reason}")
 
         # === 최종 결정 ===
         decision.all_reasons = reasons
@@ -241,39 +360,83 @@ class RiskOverlay:
         """
         테일 리스크 체크 (우선순위 2)
 
-        - Drawdown
-        - 일손실
-        - 상관 급증
-        - 급변장
+        v3.1 6-Tier DD 시스템:
+        - Tier 1-2: NORMAL (1% DD → 0.8x, 신규 제한 없음)
+        - Tier 3-4: Soft DD (2%+ → SAFE, 3.5%+ → Satellite OFF)
+        - Tier 5-6: Hard DD (5%+ → HALT, 분할 청산)
+
+        v3.1 SAFE 트리거:
+        - 2%+ DD 단독
+        - 1% DD + 상관충격 조합
+        - 1% DD + 일손실 -0.5% 조합
 
         Returns:
             (is_ok, reason, action: "HALT" | "SAFE" | "WARN")
         """
         reasons = []
         action = "OK"
+        cfg = self.config
 
-        # DD 체크
+        # DD 체크 (6-Tier)
+        dd_state = None
         if current_equity is not None:
             dd_state = self.dd_tracker.update(current_equity)
 
-            if dd_state.is_halt_trigger:
-                reasons.append(f"DD {dd_state.drawdown_pct:.2%} >= HALT threshold")
-                action = "HALT"
-            elif dd_state.is_safe_trigger:
-                reasons.append(f"DD {dd_state.drawdown_pct:.2%} >= SAFE threshold")
-                if action != "HALT":
-                    action = "SAFE"
-
-        # 상관 급증 + BTC 충격
-        if self.correlation_guard:
-            corr_state = self.correlation_guard.get_guard_action()
-
-            if corr_state.is_spike and corr_state.is_btc_shock:
+            # Hard DD (5%): HALT + 분할 청산
+            if dd_state.is_hard_dd:
                 reasons.append(
-                    f"Correlation spike ({corr_state.avg_correlation:.2f}) + BTC shock"
+                    f"Hard DD Tier{dd_state.dd_tier}: {dd_state.drawdown_pct:.2%} >= 5%"
+                )
+                action = "HALT"
+
+            # Soft DD (3.5%): SAFE + Satellite OFF
+            elif dd_state.is_soft_dd:
+                reasons.append(
+                    f"Soft DD Tier{dd_state.dd_tier}: {dd_state.drawdown_pct:.2%} >= 3.5%"
                 )
                 if action != "HALT":
                     action = "SAFE"
+
+            # v3.1: Pure SAFE (2%+ DD)
+            elif dd_state.is_safe_trigger and not dd_state.is_combined_safe:
+                reasons.append(
+                    f"DD Tier{dd_state.dd_tier}: {dd_state.drawdown_pct:.2%} >= 2%"
+                )
+                if action != "HALT":
+                    action = "SAFE"
+
+            # 일손실 강화 체크 (-1.0% SAFE, -1.5% HALT)
+            if dd_state.daily_pnl_pct <= cfg.daily_loss_halt:
+                reasons.append(f"Daily loss HALT: {dd_state.daily_pnl_pct:.2%}")
+                action = "HALT"
+            elif dd_state.daily_pnl_pct <= cfg.daily_loss_safe:
+                if action != "HALT":
+                    reasons.append(f"Daily loss SAFE: {dd_state.daily_pnl_pct:.2%}")
+                    action = "SAFE"
+
+        # 상관 가드 체크
+        corr_shock = False
+        if self.correlation_guard:
+            corr_state = self.correlation_guard.get_guard_action()
+
+            # 상관 급증 + BTC 충격
+            if corr_state.is_spike and corr_state.is_btc_shock:
+                reasons.append(
+                    f"Corr spike ({corr_state.avg_correlation:.2f}) + BTC shock"
+                )
+                corr_shock = True
+                if action != "HALT":
+                    action = "SAFE"
+
+            # v3.1: 1% DD + 상관 충격 → SAFE (조합 트리거)
+            elif corr_state.is_spike and dd_state:
+                if dd_state.drawdown_pct >= cfg.risk_dd_safe_combined_threshold:
+                    reasons.append(
+                        f"Combined: DD {dd_state.drawdown_pct:.2%} + Corr {corr_state.avg_correlation:.2f}"
+                    )
+                    corr_shock = True
+                    if action != "HALT":
+                        action = "SAFE"
 
         is_ok = action == "OK"
         reason = "; ".join(reasons) if reasons else ""
@@ -342,6 +505,11 @@ class RiskOverlay:
         decision = self._last_decision or self.evaluate()
         return decision.max_exposure_pct
 
+    def get_core_allocation(self) -> float:
+        """v3.1: Core 동적 비중 (30~60%)"""
+        decision = self._last_decision or self.evaluate()
+        return decision.core_allocation_pct
+
     def is_hedge_required(self) -> bool:
         """헤지 필요 여부"""
         decision = self._last_decision or self.evaluate()
@@ -366,8 +534,25 @@ class RiskOverlay:
             "core_allowed": decision.core_allowed,
             "sizing_multiplier": decision.sizing_multiplier,
             "max_exposure_pct": decision.max_exposure_pct,
+            # v3.1: Core 동적 비중
+            "core_allocation_pct": round(decision.core_allocation_pct * 100, 1),
             "hedge_required": decision.hedge_required,
             "primary_reason": decision.primary_reason,
+            # 6-Tier DD 상태
+            "dd_tier": decision.dd_tier,
+            "is_soft_dd": decision.is_soft_dd,
+            "is_hard_dd": decision.is_hard_dd,
+            "is_combined_safe": decision.is_combined_safe,
+            # Portfolio Risk 상태
+            "open_positions": decision.open_positions,
+            "max_positions": decision.max_positions,
+            "total_risk_pct": round(decision.total_risk_pct * 100, 3),
+            "available_risk_pct": round(decision.available_risk_pct * 100, 3),
+            # Position Reducer 상태
+            "is_reducing": decision.is_reducing,
+            "reduce_pct": round(decision.reduce_pct * 100, 1),
+            "hard_dd_phase": decision.hard_dd_phase,
+            # 컴포넌트 상태
             "exec_health": self.exec_health.get_summary(),
             "dd_state": (
                 self.dd_tracker.get_state().to_dict()
@@ -379,7 +564,69 @@ class RiskOverlay:
                 if self.correlation_guard and self.correlation_guard.get_last_state()
                 else None
             ),
+            "portfolio_risk": self.portfolio_risk.get_state().to_dict(),
+            "reducer_state": self.position_reducer.get_state().to_dict(),
         }
+
+    def get_portfolio_risk(self) -> PortfolioRiskManager:
+        """Portfolio Risk Manager 반환"""
+        return self.portfolio_risk
+
+    def get_position_reducer(self) -> PositionReducer:
+        """Position Reducer 반환"""
+        return self.position_reducer
+
+    def trigger_reduce(
+        self,
+        trigger: ReduceTrigger,
+        positions: dict[str, float],
+        severity: float = 1.0,
+    ) -> list:
+        """
+        포지션 축소 트리거
+
+        Args:
+            trigger: 축소 트리거
+            positions: 현재 포지션 (symbol -> quantity)
+            severity: 심각도 (corr_shock 시 사용)
+
+        Returns:
+            축소 주문 목록
+        """
+        return self.position_reducer.trigger_reduce(trigger, positions, severity)
+
+    def should_force_close(self) -> tuple[bool, str, int]:
+        """
+        강제 청산 필요 여부 (v3.1: 분할 청산 지원)
+
+        Returns:
+            tuple[bool, str, int]: (필요 여부, 사유, 분할 청산 단계)
+            - phase 0: 즉시 전량 청산
+            - phase 1-3: 분할 청산 단계
+        """
+        cfg = self.config
+        dd_state = self.dd_tracker.get_state()
+
+        # 일손실 HALT 도달 → 즉시 전량 청산 (분할 없음)
+        if dd_state and dd_state.daily_pnl_pct <= cfg.daily_loss_halt:
+            return True, f"Daily loss HALT: {dd_state.daily_pnl_pct:.2%}", 0
+
+        # Hard DD (5%) 도달
+        is_hard, reason = self.dd_tracker.is_hard_dd()
+        if is_hard:
+            if cfg.hard_dd_gradual_close_enabled:
+                # v3.1: 분할 청산 1단계부터 시작
+                return True, f"Hard DD: {reason}", 1
+            return True, f"Hard DD: {reason}", 0
+
+        return False, "", 0
+
+    def get_hard_dd_phase(self) -> int:
+        """현재 Hard DD 분할 청산 단계"""
+        decision = self._last_decision
+        if decision:
+            return decision.hard_dd_phase
+        return 0
 
     def force_mode(self, mode: RiskMode, reason: str) -> None:
         """수동 모드 강제 설정"""

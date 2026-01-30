@@ -49,7 +49,7 @@ class ExposureInfo:
 
 class RiskEngine:
     """
-    Risk Engine - 최상위 권한
+    Risk Engine - 최상위 권한 (MDD 5% 강화)
 
     책임:
     1. 모드 관리 (NORMAL/SAFE/HALT)
@@ -62,13 +62,13 @@ class RiskEngine:
     - WS 데이터 지연 > 2초가 10초 이상 지속
     - 최근 60초 주문 실패율 > 20%
     - 한쪽 체결 후 헤지 실패
-    - 일손실 -1.5%
+    - 일손실 -1.0% (강화됨)
     - BTC 1h ATR% 급증(1.8배) + 급락 동시
 
     HALT 트리거:
     - Reconcile 실패 (drift 임계 초과)
     - 인증 오류 반복 (3회)
-    - 일손실 -3.0%
+    - 일손실 -1.5% (강화됨)
     - liquidation_distance < 2.5%
     """
 
@@ -102,9 +102,10 @@ class RiskEngine:
         # Satellite 비활성화 플래그 (주간 손실)
         self._satellite_disabled_by_weekly_loss: bool = False
 
-        # 설정값
-        self._daily_loss_limit_safe = settings.daily_loss_limit_safe
-        self._daily_loss_limit_halt = settings.daily_loss_limit_halt
+        # 설정값 (MDD 5% 강화)
+        # 새로운 일손실 제한: -1.0% SAFE, -1.5% HALT
+        self._daily_loss_limit_safe = settings.daily_loss_limit_safe  # -0.01
+        self._daily_loss_limit_halt = settings.daily_loss_limit_halt  # -0.015
         self._weekly_loss_limit = settings.weekly_loss_limit
         self._max_order_failure_rate = 0.20  # 20%
         self._ws_latency_threshold = 2.0  # 2초
@@ -115,6 +116,12 @@ class RiskEngine:
         self._max_reconcile_failures = 3
         self._min_liquidation_distance = settings.min_liquidation_distance
         self._max_gross_exposure = settings.max_gross_exposure
+
+        logger.info(
+            "Risk Engine initialized with MDD 5% limits",
+            daily_loss_safe=f"{self._daily_loss_limit_safe:.1%}",
+            daily_loss_halt=f"{self._daily_loss_limit_halt:.1%}",
+        )
 
         # 모니터링 태스크
         self._monitor_task: Optional[asyncio.Task] = None

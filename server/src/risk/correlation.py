@@ -206,47 +206,64 @@ class CorrelationGuard:
 
     def get_guard_action(self) -> CorrelationState:
         """
-        상관 가드 액션 결정
+        상관 가드 액션 결정 (v3.1: 2단계 임계값)
+
+        Stage 1 (WARN): corr >= 0.70 → 필터 강화
+        Stage 2 (ACTION): corr >= 0.80 → REDUCE/BLOCK
 
         Returns:
             CorrelationState with recommended action
         """
         avg_corr = self.calculate_rolling_correlation()
-        is_spike = avg_corr >= self.config.corr_spike_threshold
+        cfg = self.config
+
+        # v3.1: 2단계 임계값
+        is_warn_level = avg_corr >= cfg.corr_warn_threshold  # 0.70+
+        is_action_level = avg_corr >= cfg.corr_action_threshold  # 0.80+
+        is_spike = is_action_level  # 하위호환
+
         is_btc_shock, btc_return, volatility_ratio = self.check_btc_shock()
 
-        # 액션 결정
+        # 액션 결정 (v3.1: 2단계)
         action = GuardAction.NONE
 
-        if is_spike and is_btc_shock:
-            # 최악의 조합: 상관 급증 + BTC 충격
+        if is_action_level and is_btc_shock:
+            # 최악의 조합: 상관 급증(0.80+) + BTC 충격
             action = GuardAction.HEDGE
             logger.warning(
-                "Correlation guard: HEDGE required",
+                "Correlation guard: HEDGE required (Stage 2 + BTC shock)",
                 avg_correlation=avg_corr,
                 btc_return=btc_return,
                 volatility_ratio=volatility_ratio,
             )
-        elif is_spike:
-            # 상관 급증만
+        elif is_action_level:
+            # Stage 2: 상관 급증(0.80+) → REDUCE
             action = GuardAction.REDUCE
             logger.warning(
-                "Correlation guard: REDUCE exposure",
+                "Correlation guard: REDUCE exposure (Stage 2)",
                 avg_correlation=avg_corr,
             )
-        elif is_btc_shock:
-            # BTC 충격만
+        elif is_warn_level and is_btc_shock:
+            # Stage 1 + BTC 충격 → BLOCK
             action = GuardAction.BLOCK
             logger.warning(
-                "Correlation guard: BLOCK new entries",
+                "Correlation guard: BLOCK new entries (Stage 1 + BTC shock)",
+                avg_correlation=avg_corr,
+                btc_return=btc_return,
+            )
+        elif is_btc_shock:
+            # BTC 충격만 → BLOCK
+            action = GuardAction.BLOCK
+            logger.warning(
+                "Correlation guard: BLOCK new entries (BTC shock)",
                 btc_return=btc_return,
                 volatility_ratio=volatility_ratio,
             )
-        elif avg_corr >= self.config.corr_spike_threshold * 0.8:
-            # 경고 수준
+        elif is_warn_level:
+            # Stage 1: 상관 경고(0.70+) → WARN (필터 강화)
             action = GuardAction.WARN
             logger.info(
-                "Correlation guard: WARN",
+                "Correlation guard: WARN (Stage 1 - tighten filters)",
                 avg_correlation=avg_corr,
             )
 
