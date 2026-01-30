@@ -2,6 +2,8 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import FastAPI
@@ -16,6 +18,16 @@ from src.config import get_settings
 from src.engine.core import TradingEngine
 from src.models.database import init_db
 
+# 한국 시간대
+KST = ZoneInfo("Asia/Seoul")
+
+
+def kst_timestamper(logger, method_name, event_dict):
+    """한국 시간(KST)으로 타임스탬프 추가"""
+    event_dict["timestamp"] = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
+    return event_dict
+
+
 # structlog 설정
 structlog.configure(
     processors=[
@@ -23,7 +35,7 @@ structlog.configure(
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
+        kst_timestamper,  # 한국 시간 사용
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
