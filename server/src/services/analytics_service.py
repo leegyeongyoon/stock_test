@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.analytics_schemas import (
@@ -123,7 +123,7 @@ class AnalyticsService:
                 TradeModel.strategy,
                 func.sum(TradeModel.realized_pnl).label("realized_pnl"),
                 func.count().label("trades_count"),
-                func.sum(func.iif(TradeModel.realized_pnl > 0, 1, 0)).label("wins"),
+                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
             )
             .where(
                 TradeModel.executed_at >= start_date,
@@ -187,7 +187,7 @@ class AnalyticsService:
         core_trades_stmt = (
             select(
                 func.count().label("count"),
-                func.sum(func.iif(TradeModel.realized_pnl > 0, 1, 0)).label("wins"),
+                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
             )
             .where(
                 TradeModel.executed_at >= start_date,
@@ -199,7 +199,7 @@ class AnalyticsService:
         satellite_trades_stmt = (
             select(
                 func.count().label("count"),
-                func.sum(func.iif(TradeModel.realized_pnl > 0, 1, 0)).label("wins"),
+                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
             )
             .where(
                 TradeModel.executed_at >= start_date,
@@ -242,10 +242,10 @@ class AnalyticsService:
         """시간대별 수익 조회"""
         start_date, end_date = self._get_date_range(period)
 
-        # TradeModel에서 시간대별 집계 (SQLite 용)
+        # TradeModel에서 시간대별 집계 (PostgreSQL 호환)
         stmt = (
             select(
-                func.strftime("%H", TradeModel.executed_at).label("hour"),
+                func.extract('hour', TradeModel.executed_at).label("hour"),
                 func.sum(TradeModel.realized_pnl).label("pnl"),
                 func.count().label("trades_count"),
             )
@@ -253,7 +253,7 @@ class AnalyticsService:
                 TradeModel.executed_at >= start_date,
                 TradeModel.executed_at <= end_date,
             )
-            .group_by(func.strftime("%H", TradeModel.executed_at))
+            .group_by(func.extract('hour', TradeModel.executed_at))
         )
 
         result = await self._session.execute(stmt)
