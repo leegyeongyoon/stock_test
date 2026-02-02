@@ -58,8 +58,8 @@ USER_MODE_CONFIGS: Dict[UserMode, UserModeConfig] = {
         execute_trades=True,
     ),
     UserMode.AGGRESSIVE: UserModeConfig(
-        max_position_pct=0.08,         # 8%
-        max_concurrent_positions=5,
+        max_position_pct=0.50,         # 50% (잔고 전체 사용 가능)
+        max_concurrent_positions=10,   # 동시 10개
         leverage_max=10,
         dd_halt_threshold=0.07,        # 7%
         daily_loss_limit=0.03,         # 3%

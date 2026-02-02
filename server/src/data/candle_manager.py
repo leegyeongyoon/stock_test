@@ -82,8 +82,10 @@ class CandleManager:
     - 심볼/인터벌별 캔들 캐싱
     """
 
-    # Binance Kline intervals
+    # Kline intervals
+    INTERVAL_1M = "1m"
     INTERVAL_5M = "5m"
+    INTERVAL_15M = "15m"
     INTERVAL_1H = "1h"
 
     def __init__(self) -> None:
@@ -424,6 +426,212 @@ class CandleManager:
         else:
             lowest = min(c.low for c in historical)
             return current.close < lowest
+
+    # === v4.0 Ignition Strategy용 추가 지표 ===
+
+    def calc_bb_width(
+        self, symbol: str, interval: str, period: int = 20, std_mult: float = 2.0
+    ) -> Optional[float]:
+        """
+        볼린저 밴드 폭 계산 (변동성 수축 감지용)
+        BB Width = (Upper - Lower) / Middle
+        """
+        closes = self.get_closes(symbol, interval, period)
+        if len(closes) < period:
+            return None
+
+        sma = sum(closes) / len(closes)
+        variance = sum((c - sma) ** 2 for c in closes) / len(closes)
+        std = variance ** 0.5
+
+        upper = sma + std_mult * std
+        lower = sma - std_mult * std
+
+        if sma <= 0:
+            return None
+
+        return (upper - lower) / sma
+
+    def calc_bb_width_percentile(
+        self, symbol: str, interval: str, period: int = 20, lookback: int = 50
+    ) -> Optional[float]:
+        """
+        현재 BB Width가 최근 N봉 중 몇 번째 백분위인지 (0~100)
+        낮을수록 변동성 수축
+        """
+        candles = self.get_candles(symbol, interval, lookback + period)
+        if len(candles) < lookback:
+            return None
+
+        widths = []
+        for i in range(lookback):
+            end_idx = len(candles) - lookback + i + period
+            if end_idx > len(candles):
+                break
+            subset = [c.close for c in candles[end_idx - period : end_idx]]
+            if len(subset) < period:
+                continue
+
+            sma = sum(subset) / len(subset)
+            variance = sum((c - sma) ** 2 for c in subset) / len(subset)
+            std = variance ** 0.5
+            if sma > 0:
+                widths.append((sma + 2 * std - (sma - 2 * std)) / sma)
+
+        if not widths:
+            return None
+
+        current_width = self.calc_bb_width(symbol, interval, period)
+        if current_width is None:
+            return None
+
+        rank = sum(1 for w in widths if w < current_width)
+        return (rank / len(widths)) * 100
+
+    def calc_volume_ma(
+        self, symbol: str, interval: str, period: int = 20
+    ) -> Optional[float]:
+        """거래량 이동평균"""
+        volumes = self.get_volumes(symbol, interval, period)
+        if len(volumes) < period:
+            return None
+        return sum(volumes) / len(volumes)
+
+    def calc_obv_trend(
+        self, symbol: str, interval: str, period: int = 20
+    ) -> Optional[str]:
+        """
+        OBV 추세 판단 (UP/DOWN/FLAT)
+        매집 구조 감지용
+        """
+        candles = self.get_candles(symbol, interval, period)
+        if len(candles) < period:
+            return None
+
+        obv = 0.0
+        obv_values = []
+
+        for i in range(1, len(candles)):
+            if candles[i].close > candles[i - 1].close:
+                obv += candles[i].quote_volume
+            elif candles[i].close < candles[i - 1].close:
+                obv -= candles[i].quote_volume
+            obv_values.append(obv)
+
+        if len(obv_values) < 5:
+            return "FLAT"
+
+        # 최근 5개 OBV 추세
+        recent = obv_values[-5:]
+        first_half = sum(recent[:2]) / 2
+        second_half = sum(recent[-2:]) / 2
+
+        change_pct = (second_half - first_half) / abs(first_half) if first_half != 0 else 0
+
+        if change_pct > 0.1:
+            return "UP"
+        elif change_pct < -0.1:
+            return "DOWN"
+        return "FLAT"
+
+    def calc_higher_lows_count(
+        self, symbol: str, interval: str, period: int = 10
+    ) -> int:
+        """
+        Higher Low 패턴 카운트 (매집 구조 감지용)
+        연속으로 저점이 높아지는 횟수
+        """
+        candles = self.get_candles(symbol, interval, period)
+        if len(candles) < 3:
+            return 0
+
+        count = 0
+        for i in range(2, len(candles)):
+            if candles[i].low > candles[i - 1].low:
+                count += 1
+            else:
+                count = 0  # 연속 끊기면 리셋
+
+        return count
+
+    def calc_avg_close_position(
+        self, symbol: str, interval: str, period: int = 10
+    ) -> Optional[float]:
+        """
+        평균 Close Position (매집 구조 감지용)
+        0.5 이상이면 상단 마감 경향
+        """
+        candles = self.get_candles(symbol, interval, period)
+        if not candles:
+            return None
+
+        positions = []
+        for c in candles:
+            range_hl = c.high - c.low
+            if range_hl > 0:
+                positions.append((c.close - c.low) / range_hl)
+
+        if not positions:
+            return None
+
+        return sum(positions) / len(positions)
+
+    def calc_range_position(
+        self, symbol: str, interval: str, period: int = 24
+    ) -> Optional[float]:
+        """
+        현재가의 레인지 내 위치 (0~1)
+        1에 가까울수록 레인지 상단
+        """
+        candles = self.get_candles(symbol, interval, period)
+        if not candles:
+            return None
+
+        highest = max(c.high for c in candles)
+        lowest = min(c.low for c in candles)
+        current = candles[-1].close
+
+        range_hl = highest - lowest
+        if range_hl <= 0:
+            return 0.5
+
+        return (current - lowest) / range_hl
+
+    def calc_range_high_low(
+        self, symbol: str, interval: str, period: int = 24
+    ) -> tuple[Optional[float], Optional[float]]:
+        """
+        최근 N봉의 레인지 (고점, 저점) 반환
+        """
+        candles = self.get_candles(symbol, interval, period)
+        if not candles:
+            return None, None
+
+        highest = max(c.high for c in candles)
+        lowest = min(c.low for c in candles)
+
+        return highest, lowest
+
+    def calc_range_touch_count(
+        self, symbol: str, interval: str, period: int = 24, threshold: float = 0.02
+    ) -> int:
+        """
+        레인지 상단 터치 횟수 (돌파 압박 감지용)
+        threshold: 상단에서 몇 % 이내를 터치로 간주
+        """
+        candles = self.get_candles(symbol, interval, period)
+        if len(candles) < period:
+            return 0
+
+        highest = max(c.high for c in candles)
+        touch_zone = highest * (1 - threshold)
+
+        count = 0
+        for c in candles:
+            if c.high >= touch_zone:
+                count += 1
+
+        return count
 
 
 # 싱글톤 인스턴스

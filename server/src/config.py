@@ -509,6 +509,166 @@ class Settings(BaseSettings):
         description="동일 종목 재진입 쿨다운 (60분)",
     )
 
+    # === v4.0 Ignition 전략 설정 (Pre-Breakout Setup + Ignition) ===
+    ignition_mode: Literal["OFF", "NORMAL", "ATTACK"] = Field(
+        default="NORMAL",
+        description="점화 전략 모드 (OFF/NORMAL/ATTACK)",
+    )
+
+    # Setup Engine 설정
+    ignition_setup_min_score: float = Field(
+        default=70.0,
+        description="Setup 최소 점수 (Watchlist 진입 기준)",
+    )
+    ignition_setup_scan_interval_min: int = Field(
+        default=15,
+        description="Setup 스캔 주기 (분)",
+    )
+    ignition_watchlist_max: int = Field(
+        default=20,
+        description="Watchlist 최대 종목 수",
+    )
+    ignition_watchlist_ttl_hours: float = Field(
+        default=2.0,
+        description="Watchlist 항목 TTL (시간)",
+    )
+
+    # Setup Score 가중치 (S1~S5)
+    ignition_s1_weight: float = Field(
+        default=20.0,
+        description="S1 변동성 수축 가중치",
+    )
+    ignition_s2_weight: float = Field(
+        default=20.0,
+        description="S2 거래량 건조 가중치",
+    )
+    ignition_s3_weight: float = Field(
+        default=25.0,
+        description="S3 매집 구조 가중치",
+    )
+    ignition_s4_weight: float = Field(
+        default=20.0,
+        description="S4 상대강도 가중치",
+    )
+    ignition_s5_weight: float = Field(
+        default=15.0,
+        description="S5 레인지 압박 가중치",
+    )
+
+    # Setup 개별 조건 임계값
+    ignition_bb_width_pct_max: float = Field(
+        default=20.0,
+        description="S1: BB Width 백분위 최대 (낮을수록 수축)",
+    )
+    ignition_volume_dryup_ratio: float = Field(
+        default=0.5,
+        description="S2: 거래량 건조 비율 (평균 대비)",
+    )
+    ignition_higher_lows_min: int = Field(
+        default=3,
+        description="S3: Higher Lows 최소 횟수",
+    )
+    ignition_avg_close_pos_min: float = Field(
+        default=0.55,
+        description="S3: 평균 Close Position 최소값",
+    )
+    ignition_range_position_min: float = Field(
+        default=0.70,
+        description="S5: 레인지 내 위치 최소값 (상단 30%)",
+    )
+    ignition_range_touch_min: int = Field(
+        default=3,
+        description="S5: 레인지 상단 터치 최소 횟수",
+    )
+
+    # Ignition Engine 설정
+    ignition_range_break_atr_mult: float = Field(
+        default=0.15,
+        description="돌파 버퍼 = ATR * 이 값",
+    )
+    ignition_volume_expansion_mult: float = Field(
+        default=1.6,
+        description="점화 거래량 = 평균 * 이 값",
+    )
+    ignition_max_extension_atr_mult: float = Field(
+        default=0.8,
+        description="진입 허용 최대 확장폭 (ATR 기준)",
+    )
+
+    # Anti-Chase Gate 설정
+    ignition_entry_window_sec: int = Field(
+        default=180,
+        description="점화 후 진입 허용 시간 (초, 3분)",
+    )
+    ignition_over_extension_atr_mult: float = Field(
+        default=1.2,
+        description="과확장 차단 기준 (ATR 기준)",
+    )
+    ignition_max_spread_bps: float = Field(
+        default=10.0,
+        description="최대 허용 스프레드 (bps)",
+    )
+    ignition_distribution_wick_pct: float = Field(
+        default=0.30,
+        description="분배 캔들 윗꼬리 비율 임계값",
+    )
+
+    # Position Sizing 설정
+    ignition_risk_normal: float = Field(
+        default=0.004,
+        description="NORMAL 모드 트레이드당 리스크 (0.4%)",
+    )
+    ignition_risk_attack: float = Field(
+        default=0.010,
+        description="ATTACK 모드 트레이드당 리스크 (1.0%)",
+    )
+    ignition_initial_position_pct: float = Field(
+        default=0.20,
+        description="초기 진입 비율 (목표의 20%)",
+    )
+    ignition_add_trigger_r: str = Field(
+        default="0.5,1.0,1.5",
+        description="증액 트리거 R배수 (콤마 구분)",
+    )
+    ignition_add_position_pct: str = Field(
+        default="0.20,0.20,0.20",
+        description="각 증액 단계 비율 (콤마 구분)",
+    )
+    ignition_max_add_steps_normal: int = Field(
+        default=2,
+        description="NORMAL 모드 최대 증액 횟수",
+    )
+    ignition_max_add_steps_attack: int = Field(
+        default=3,
+        description="ATTACK 모드 최대 증액 횟수",
+    )
+
+    # Exit 설정
+    ignition_time_stop_min: int = Field(
+        default=5,
+        description="확장 실패시 타임스톱 (분)",
+    )
+    ignition_profit_protection_r: float = Field(
+        default=1.0,
+        description="+1R 도달시 일부 익절",
+    )
+    ignition_profit_protection_pct: float = Field(
+        default=0.50,
+        description="Profit Protection 익절 비율 (50%)",
+    )
+    ignition_trailing_trigger_r: float = Field(
+        default=2.0,
+        description="트레일링 발동 R배수",
+    )
+    ignition_trailing_stop_atr_mult: float = Field(
+        default=1.0,
+        description="트레일링 스탑 ATR 배수",
+    )
+    ignition_stop_buffer_pct: float = Field(
+        default=0.003,
+        description="구조 손절 버퍼 (0.3%)",
+    )
+
     @property
     def is_paper_mode(self) -> bool:
         """Paper 모드 여부"""

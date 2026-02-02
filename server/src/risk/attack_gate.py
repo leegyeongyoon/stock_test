@@ -106,6 +106,9 @@ class AttackGate:
             "MAX": 3,  # 50%까지
         }
 
+        # 마지막 체크 결과 저장 (상태 표시용)
+        self._last_result: Optional[AttackGateResult] = None
+
         logger.info(
             "AttackGate initialized with Capital Profile",
             capital_mode=self.capital_profile.get_current_mode().value,
@@ -306,7 +309,7 @@ class AttackGate:
         final_level = min(attack_level, max_level)
 
         if final_level == 0:
-            return AttackGateResult(
+            result = AttackGateResult(
                 allowed=False,
                 action=AttackGateAction.BLOCK,
                 max_level=max_level,
@@ -317,13 +320,15 @@ class AttackGate:
                 regime=regime,
                 daily_loss=daily_loss,
             )
+            self._last_result = result
+            return result
 
         if final_level < attack_level:
             action = AttackGateAction.DOWNGRADE
         else:
             action = AttackGateAction.ALLOW
 
-        return AttackGateResult(
+        result = AttackGateResult(
             allowed=True,
             action=action,
             max_level=max_level,
@@ -334,6 +339,8 @@ class AttackGate:
             regime=regime,
             daily_loss=daily_loss,
         )
+        self._last_result = result
+        return result
 
     def get_risk_per_trade(
         self,
@@ -385,7 +392,18 @@ class AttackGate:
 
     def get_status(self) -> dict:
         """현재 게이트 설정 상태"""
+        # can_enter와 reason은 마지막 체크 결과 기반
+        can_enter = True
+        reason = None
+
+        if self._last_result is not None:
+            can_enter = self._last_result.allowed
+            if not can_enter and self._last_result.reasons:
+                reason = self._last_result.reasons[0]
+
         return {
+            "can_enter": can_enter,
+            "reason": reason,
             "max_dd_tier": self.max_dd_tier,
             "disable_if_safe": self.disable_if_safe,
             "disable_if_risk_off": self.disable_if_risk_off,

@@ -29,6 +29,7 @@ from src.strategies.core_safety import get_core_safety_guard
 from src.strategies.satellite import Regime, SatelliteStrategy
 from src.strategies.attack_breakout import AttackBreakoutStrategy, get_attack_strategy
 from src.strategies.pullback_strategy import PullbackStrategy, get_pullback_strategy
+from src.strategies.ignition import IgnitionStrategy, get_ignition_strategy, SurgeDetector, get_surge_detector
 from src.monitoring.slack import SlackNotifier, AlertLevel, SlackMessage
 
 logger = structlog.get_logger()
@@ -96,6 +97,8 @@ class TradingEngine:
         self.satellite_strategy = SatelliteStrategy()
         self.attack_strategy = get_attack_strategy()  # Attack 전략 (급등 추격 - 비권장)
         self.pullback_strategy = get_pullback_strategy()  # Pullback 전략 (눌림목 매수)
+        self.ignition_strategy = get_ignition_strategy()  # v4.0 Ignition 전략 (전조 패턴 + 점화)
+        self.surge_detector = get_surge_detector()  # 급등 시작 실시간 감지
         self.pullback_strategy.set_mode(settings.pullback_mode)  # 설정에서 모드 로드
 
         # User Mode Manager
@@ -628,6 +631,111 @@ class TradingEngine:
                     # 시그널 실행
                     for signal in pullback_signals:
                         await self._execute_pullback_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
+
+            # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
+            if self._is_upbit and self.ignition_strategy and settings.ignition_mode != "OFF":
+                if risk_decision.satellite_allowed:
+                    try:
+                        # BTC 24시간 변화율 설정 (상대강도 계산용)
+                        btc_data = self._market_data.get("KRW-BTC", {})
+                        btc_change_24h = btc_data.get("price_change_pct", 0) / 100
+                        self.ignition_strategy.set_btc_change(btc_change_24h)
+                        self.ignition_strategy.set_account_balance(current_equity)
+                        self.ignition_strategy.set_mode(settings.ignition_mode)
+
+                        # 15분마다 Setup 스캔
+                        import time
+                        current_minute = int(time.time() / 60)
+                        if current_minute % 15 == 0:
+                            qualified_symbols = self.symbol_manager.get_qualified_symbols()
+                            new_candidates = await self.ignition_strategy.scan_setups(
+                                symbols=qualified_symbols,
+                                market_data_map=self._market_data,
+                            )
+                            if new_candidates:
+                                logger.info(
+                                    "Ignition setup candidates found",
+                                    count=len(new_candidates),
+                                    symbols=[c.symbol for c in new_candidates],
+                                )
+
+                        # Watchlist 종목들 점화 체크 (실시간)
+                        watchlist = self.ignition_strategy.get_watchlist()
+                        for candidate in watchlist:
+                            symbol = candidate.symbol
+                            md = self._market_data.get(symbol, {})
+                            if not md:
+                                continue
+
+                            # 점화 신호 체크
+                            ignition_signal = self.ignition_strategy.check_ignition(symbol, md)
+                            if ignition_signal:
+                                # 호가 정보 조회
+                                orderbook = await self._get_orderbook_cached(symbol)
+                                bid_price = orderbook.get("bids", [[0]])[0][0] if orderbook else md.get("price", 0)
+                                ask_price = orderbook.get("asks", [[0]])[0][0] if orderbook else md.get("price", 0)
+                                current_price = md.get("price", 0)
+
+                                # 진입 시도 (Anti-Chase Gate 포함)
+                                position = self.ignition_strategy.try_entry(
+                                    signal=ignition_signal,
+                                    current_price=current_price,
+                                    bid_price=bid_price,
+                                    ask_price=ask_price,
+                                )
+
+                                if position:
+                                    # 실제 주문 실행
+                                    await self._execute_ignition_entry(position, md, risk_decision)
+
+                        # 기존 포지션 청산 체크
+                        for pos in self.ignition_strategy.get_all_positions():
+                            symbol = pos.symbol
+                            md = self._market_data.get(symbol, {})
+                            current_price = md.get("price", 0)
+
+                            exit_result = self.ignition_strategy.check_exits(symbol, current_price)
+                            if exit_result:
+                                exit_reason, exit_pct = exit_result
+                                await self._execute_ignition_exit(pos, exit_reason, exit_pct, md)
+
+                        # 정리
+                        self.ignition_strategy.cleanup()
+
+                    except Exception as e:
+                        logger.error("Ignition strategy error", error=str(e))
+
+            # === Surge Detector (급등 시작 실시간 감지) - Upbit 전용 ===
+            if self._is_upbit and self.surge_detector and settings.ignition_mode != "OFF":
+                if risk_decision.satellite_allowed:
+                    try:
+                        # 전체 심볼 스캔하여 급등 시작 감지
+                        qualified_symbols = self.symbol_manager.get_qualified_symbols()
+                        surge_signals = self.surge_detector.scan_all_symbols(
+                            symbols=qualified_symbols,
+                            market_data_map=self._market_data,
+                        )
+
+                        # 급등 신호 처리
+                        for surge in surge_signals:
+                            await self._execute_surge_entry(surge, self._market_data.get(surge.symbol, {}), risk_decision, current_equity)
+
+                        # 기존 Surge 포지션 청산 체크
+                        for pos in self.surge_detector.get_positions():
+                            symbol = pos.symbol
+                            md = self._market_data.get(symbol, {})
+                            current_price = md.get("price", 0)
+
+                            exit_result = self.surge_detector.check_exit(symbol, current_price)
+                            if exit_result:
+                                exit_reason, exit_pct = exit_result
+                                await self._execute_surge_exit(symbol, pos, exit_reason, exit_pct, current_price)
+
+                        # 만료 신호 정리
+                        self.surge_detector.clear_expired()
+
+                    except Exception as e:
+                        logger.error("Surge detector error", error=str(e))
 
         except Exception as e:
             logger.error("Strategy execution error", error=str(e))
@@ -1458,15 +1566,14 @@ class TradingEngine:
             # 매수 금액 계산 (자산의 target_allocation %)
             order_amount = current_equity * signal.target_allocation
 
-            # 최소/최대 주문 금액 제한
-            MIN_ORDER = 10000  # 최소 1만원
-            MAX_ORDER = 100000  # 최대 10만원 (분산 투자)
+            # 최소 주문 금액만 체크 (최대 제한 없음 - 사용자 요청)
+            MIN_ORDER = 5000  # 최소 5천원
 
             if order_amount < MIN_ORDER:
                 logger.debug("Pullback order too small", amount=order_amount, min=MIN_ORDER)
                 return
 
-            order_amount = min(order_amount, MAX_ORDER)
+            # MAX_ORDER 제한 제거 - 잔고 전체 사용 가능
 
             logger.info(
                 "Pullback order amount calculated",
@@ -1604,6 +1711,447 @@ class TradingEngine:
                 message=f"Pullback execution failed: {signal.symbol}",
                 details={"error": str(e)},
             )
+
+    async def _execute_ignition_entry(self, position, market_data: dict, risk_decision) -> None:
+        """Ignition 진입 실행 (v4.0 전조 패턴 + 점화)"""
+        try:
+            symbol = position.symbol
+            sizing = position.sizings[-1]  # 최신 사이징
+            current_price = market_data.get("price", 0)
+
+            logger.info(
+                "Executing Ignition entry",
+                symbol=symbol,
+                mode=sizing.mode,
+                quantity=sizing.quantity,
+                entry_price=sizing.entry_price,
+                stop_loss=sizing.stop_loss,
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="IGNITION",
+                message=f"Ignition entry: {symbol} ({sizing.mode})",
+                details={
+                    "phase": sizing.phase.value,
+                    "risk_pct": sizing.risk_pct,
+                    "position_amount": sizing.position_amount,
+                    "stop_loss": sizing.stop_loss,
+                },
+            )
+
+            # 매수 금액
+            order_amount = sizing.position_amount
+
+            # 최소 주문 금액 체크
+            MIN_ORDER = 5000
+            if order_amount < MIN_ORDER:
+                logger.debug("Ignition order too small", amount=order_amount, min=MIN_ORDER)
+                return
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info(
+                    "PAPER mode - skipping Ignition trade execution",
+                    symbol=symbol,
+                    amount=order_amount,
+                )
+                self.add_event(
+                    level="INFO",
+                    event_type="PAPER",
+                    message=f"[PAPER] Would have bought {symbol} (Ignition)",
+                    details={
+                        "amount": order_amount,
+                        "price": current_price,
+                        "mode": sizing.mode,
+                    },
+                )
+                return
+
+            # 시장가 매수
+            result = await self.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                quantity=order_amount,  # KRW 금액
+            )
+
+            if not result.success:
+                logger.error("Ignition order failed", symbol=symbol, error=result.error)
+                self.add_event(
+                    level="ERROR",
+                    event_type="IGNITION",
+                    message=f"Ignition buy failed: {symbol}",
+                    details={"error": result.error},
+                )
+                return
+
+            filled_qty = result.filled_qty
+            avg_price = result.avg_price
+
+            # 체결 정보 확인
+            if filled_qty <= 0 or avg_price <= 0:
+                asset = symbol.replace("KRW-", "")
+                balance = await self.exchange.get_balance(asset)
+                if balance and balance.total > 0:
+                    ticker = await self.exchange.get_ticker(symbol)
+                    filled_qty = balance.total
+                    avg_price = ticker.get("trade_price", 0) if ticker else current_price
+
+            logger.info(
+                "Ignition entry filled",
+                symbol=symbol,
+                quantity=filled_qty,
+                price=avg_price,
+            )
+
+            self.add_event(
+                level="INFO",
+                event_type="IGNITION",
+                message=f"Ignition entry completed: {symbol}",
+                details={
+                    "quantity": filled_qty,
+                    "price": avg_price,
+                    "mode": sizing.mode,
+                    "stop_loss": sizing.stop_loss,
+                },
+            )
+
+            # Slack 알림
+            if self.slack_notifier.is_enabled:
+                notional = filled_qty * avg_price
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+:fire: *Ignition 매수 체결*
+> 심볼: `{symbol}`
+> 모드: {sizing.mode}
+> 수량: {filled_qty:.4f}
+> 가격: ₩{avg_price:,.0f}
+> 금액: ₩{notional:,.0f}
+> 손절가: ₩{sizing.stop_loss:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO,
+                ))
+
+        except Exception as e:
+            logger.error("Ignition entry execution error", error=str(e))
+            self.add_event(
+                level="ERROR",
+                event_type="IGNITION",
+                message=f"Ignition entry failed: {position.symbol}",
+                details={"error": str(e)},
+            )
+
+    async def _execute_ignition_exit(self, position, exit_reason, exit_pct: float, market_data: dict) -> None:
+        """Ignition 청산 실행"""
+        try:
+            symbol = position.symbol
+            current_price = market_data.get("price", 0)
+            exit_qty = position.total_quantity * exit_pct
+
+            logger.info(
+                "Executing Ignition exit",
+                symbol=symbol,
+                reason=exit_reason.value,
+                exit_pct=exit_pct,
+                exit_qty=exit_qty,
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="IGNITION",
+                message=f"Ignition exit: {symbol} ({exit_reason.value})",
+                details={
+                    "exit_pct": exit_pct,
+                    "exit_qty": exit_qty,
+                    "current_r": position.current_r,
+                },
+            )
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info(
+                    "PAPER mode - skipping Ignition exit execution",
+                    symbol=symbol,
+                    exit_qty=exit_qty,
+                )
+                return
+
+            # 시장가 매도
+            result = await self.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                quantity=exit_qty,
+            )
+
+            if not result.success:
+                logger.error("Ignition exit failed", symbol=symbol, error=result.error)
+                return
+
+            # 포지션 업데이트
+            self.ignition_strategy.close_position(
+                symbol=symbol,
+                reason=exit_reason,
+                exit_price=result.avg_price or current_price,
+                exit_quantity=exit_qty if exit_pct < 1.0 else None,
+            )
+
+            self.add_event(
+                level="INFO",
+                event_type="IGNITION",
+                message=f"Ignition exit completed: {symbol}",
+                details={
+                    "reason": exit_reason.value,
+                    "quantity": exit_qty,
+                    "price": result.avg_price or current_price,
+                    "pnl": position.realized_pnl,
+                },
+            )
+
+            # Slack 알림
+            if self.slack_notifier.is_enabled:
+                pnl_emoji = ":moneybag:" if position.realized_pnl > 0 else ":money_with_wings:"
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+{pnl_emoji} *Ignition 청산*
+> 심볼: `{symbol}`
+> 사유: {exit_reason.value}
+> 수량: {exit_qty:.4f}
+> 가격: ₩{result.avg_price or current_price:,.0f}
+> 손익: ₩{position.realized_pnl:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO if position.realized_pnl >= 0 else AlertLevel.WARNING,
+                ))
+
+        except Exception as e:
+            logger.error("Ignition exit execution error", error=str(e))
+
+    async def _execute_surge_entry(self, surge, market_data: dict, risk_decision, current_equity: float) -> None:
+        """급등 시작 진입 실행"""
+        try:
+            symbol = surge.symbol
+            current_price = surge.current_price
+
+            logger.info(
+                "Executing Surge entry",
+                symbol=symbol,
+                change_1m=f"{surge.change_1m_pct:.2f}%",
+                change_5m=f"{surge.change_5m_pct:.2f}%",
+                volume_ratio=f"{surge.volume_ratio:.1f}x",
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="SURGE",
+                message=f"Surge detected: {symbol} +{surge.change_1m_pct:.1f}% (1m)",
+                details={
+                    "change_1m_pct": surge.change_1m_pct,
+                    "change_5m_pct": surge.change_5m_pct,
+                    "volume_ratio": surge.volume_ratio,
+                    "stop_loss": surge.stop_loss,
+                },
+            )
+
+            # 매수 금액 계산 (자산의 20%)
+            order_amount = current_equity * 0.20
+
+            # 최소 주문 금액 체크
+            MIN_ORDER = 5000
+            if order_amount < MIN_ORDER:
+                logger.debug("Surge order too small", amount=order_amount, min=MIN_ORDER)
+                return
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info(
+                    "PAPER mode - skipping Surge trade execution",
+                    symbol=symbol,
+                    amount=order_amount,
+                )
+                self.add_event(
+                    level="INFO",
+                    event_type="PAPER",
+                    message=f"[PAPER] Would have bought {symbol} (Surge)",
+                    details={
+                        "amount": order_amount,
+                        "price": current_price,
+                        "change_1m": surge.change_1m_pct,
+                    },
+                )
+                return
+
+            # 시장가 매수
+            result = await self.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                quantity=order_amount,  # KRW 금액
+            )
+
+            if not result.success:
+                logger.error("Surge order failed", symbol=symbol, error=result.error)
+                self.add_event(
+                    level="ERROR",
+                    event_type="SURGE",
+                    message=f"Surge buy failed: {symbol}",
+                    details={"error": result.error},
+                )
+                return
+
+            filled_qty = result.filled_qty
+            avg_price = result.avg_price
+
+            # 체결 정보 확인
+            if filled_qty <= 0 or avg_price <= 0:
+                asset = symbol.replace("KRW-", "")
+                balance = await self.exchange.get_balance(asset)
+                if balance and balance.total > 0:
+                    ticker = await self.exchange.get_ticker(symbol)
+                    filled_qty = balance.total
+                    avg_price = ticker.get("trade_price", 0) if ticker else current_price
+
+            logger.info(
+                "Surge entry filled",
+                symbol=symbol,
+                quantity=filled_qty,
+                price=avg_price,
+            )
+
+            self.add_event(
+                level="INFO",
+                event_type="SURGE",
+                message=f"Surge entry completed: {symbol}",
+                details={
+                    "quantity": filled_qty,
+                    "price": avg_price,
+                    "change_1m": surge.change_1m_pct,
+                    "volume_ratio": surge.volume_ratio,
+                },
+            )
+
+            # 포지션 추적
+            self.surge_detector.track_position(
+                symbol=symbol,
+                entry_price=avg_price,
+                quantity=filled_qty,
+                stop_loss=surge.stop_loss,
+                take_profit=surge.take_profit_1,
+            )
+
+            # Slack 알림
+            if self.slack_notifier.is_enabled:
+                notional = filled_qty * avg_price
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+:rocket: *급등 감지 매수*
+> 심볼: `{symbol}`
+> 1분 변화: +{surge.change_1m_pct:.1f}%
+> 5분 변화: +{surge.change_5m_pct:.1f}%
+> 거래량: {surge.volume_ratio:.1f}x
+> 수량: {filled_qty:.4f}
+> 가격: ₩{avg_price:,.0f}
+> 금액: ₩{notional:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO,
+                ))
+
+        except Exception as e:
+            logger.error("Surge entry execution error", error=str(e))
+            self.add_event(
+                level="ERROR",
+                event_type="SURGE",
+                message=f"Surge entry failed: {surge.symbol}",
+                details={"error": str(e)},
+            )
+
+    async def _execute_surge_exit(self, symbol: str, position, exit_reason: str, exit_pct: float, current_price: float) -> None:
+        """Surge 청산 실행"""
+        try:
+            exit_qty = position.quantity * exit_pct
+
+            logger.info(
+                "Executing Surge exit",
+                symbol=symbol,
+                reason=exit_reason,
+                exit_pct=exit_pct,
+                exit_qty=exit_qty,
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="SURGE",
+                message=f"Surge exit: {symbol} ({exit_reason})",
+                details={
+                    "exit_pct": exit_pct,
+                    "exit_qty": exit_qty,
+                    "entry_price": position.entry_price,
+                    "current_price": current_price,
+                },
+            )
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info(
+                    "PAPER mode - skipping Surge exit execution",
+                    symbol=symbol,
+                    exit_qty=exit_qty,
+                )
+                self.surge_detector.close_position(symbol, partial=(exit_pct < 1.0))
+                return
+
+            # 시장가 매도
+            result = await self.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                quantity=exit_qty,
+            )
+
+            if not result.success:
+                logger.error("Surge exit failed", symbol=symbol, error=result.error)
+                return
+
+            # 포지션 업데이트
+            self.surge_detector.close_position(symbol, partial=(exit_pct < 1.0))
+
+            # 손익 계산
+            pnl = (current_price - position.entry_price) * exit_qty
+
+            self.add_event(
+                level="INFO",
+                event_type="SURGE",
+                message=f"Surge exit completed: {symbol}",
+                details={
+                    "reason": exit_reason,
+                    "quantity": exit_qty,
+                    "price": result.avg_price or current_price,
+                    "pnl": pnl,
+                },
+            )
+
+            # Slack 알림
+            if self.slack_notifier.is_enabled:
+                pnl_emoji = ":moneybag:" if pnl > 0 else ":money_with_wings:"
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+{pnl_emoji} *급등 청산*
+> 심볼: `{symbol}`
+> 사유: {exit_reason}
+> 수량: {exit_qty:.4f}
+> 진입가: ₩{position.entry_price:,.0f}
+> 청산가: ₩{result.avg_price or current_price:,.0f}
+> 손익: ₩{pnl:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO if pnl >= 0 else AlertLevel.WARNING,
+                ))
+
+        except Exception as e:
+            logger.error("Surge exit execution error", error=str(e))
 
     def _round_quantity(self, symbol: str, quantity: float) -> float:
         """심볼별 수량 정밀도 처리 (SymbolManager 사용)"""
