@@ -1,10 +1,13 @@
 """Core Strategy Safety Guards
 
-Core 전략 (캐리 트레이드) 안전장치:
+Core 전략 안전장치:
 - 허용 심볼 제한 (BTC/ETH 초유동성만)
-- 펀딩 역전 감지
+- 펀딩 역전 감지 (Binance Futures 전용)
 - Edge 축소 감지
 - 단계형 청산 트리거
+
+v2 업데이트 (Upbit 호환):
+- Upbit 모드에서 펀딩비 체크 비활성화 (현물 전용)
 """
 
 from dataclasses import dataclass, field
@@ -14,9 +17,11 @@ from typing import Optional
 
 import structlog
 
+from src.config import get_settings
 from src.risk.config import get_risk_config
 
 logger = structlog.get_logger()
+settings = get_settings()
 
 
 class CoreSafetyAction(str, Enum):
@@ -100,15 +105,21 @@ class CoreSafetyGuard:
 
     책임:
     1. 허용 심볼 검증 (BTC/ETH만)
-    2. 펀딩 역전 감지 및 청산 트리거
+    2. 펀딩 역전 감지 및 청산 트리거 (Binance Futures 전용)
     3. Edge 축소 감지 및 진입 차단
     4. 종합 안전 판단
+
+    v2 업데이트:
+    - Upbit 모드에서 펀딩비 관련 체크 비활성화
     """
 
     def __init__(self):
         self.config = get_risk_config()
 
-        # 펀딩 상태 추적 (symbol -> FundingState)
+        # Upbit 모드 여부 (펀딩비 체크 비활성화)
+        self._is_upbit = settings.is_upbit
+
+        # 펀딩 상태 추적 (symbol -> FundingState) - Binance 전용
         self._funding_states: dict[str, FundingState] = {}
 
         # Edge 상태 추적 (symbol -> EdgeState)
@@ -129,7 +140,7 @@ class CoreSafetyGuard:
 
     def update_funding_rate(self, symbol: str, funding_rate: float) -> FundingState:
         """
-        펀딩 레이트 업데이트
+        펀딩 레이트 업데이트 (Binance Futures 전용)
 
         Args:
             symbol: 심볼
@@ -138,6 +149,10 @@ class CoreSafetyGuard:
         Returns:
             FundingState: 업데이트된 펀딩 상태
         """
+        # Upbit 모드에서는 펀딩비 없음
+        if self._is_upbit:
+            return FundingState(symbol=symbol)
+
         if symbol not in self._funding_states:
             self._funding_states[symbol] = FundingState(symbol=symbol)
 
@@ -243,13 +258,17 @@ class CoreSafetyGuard:
 
     def check_funding_safety(self, symbol: str) -> tuple[bool, str]:
         """
-        펀딩 안전성 체크
+        펀딩 안전성 체크 (Binance Futures 전용)
 
         Returns:
             tuple[bool, str]: (안전 여부, 사유)
         """
         if not self.is_allowed_symbol(symbol):
             return (False, f"Symbol {symbol} not allowed for Core strategy")
+
+        # Upbit 모드에서는 펀딩비 체크 스킵
+        if self._is_upbit:
+            return (True, "Upbit mode - no funding rate")
 
         state = self._funding_states.get(symbol)
         if not state:
@@ -312,6 +331,10 @@ class CoreSafetyGuard:
         Returns:
             tuple[bool, str]: (청산 필요, 사유)
         """
+        # Upbit 모드에서는 펀딩비 기반 청산 없음
+        if self._is_upbit:
+            return (False, "Upbit mode - no funding-based unwind")
+
         state = self._funding_states.get(symbol)
         if state and state.should_exit:
             return (True, f"Funding exit: rate={state.current_rate}, consecutive={state.negative_count}")
@@ -327,13 +350,15 @@ class CoreSafetyGuard:
         """
         reasons = []
 
-        # 펀딩 상태
-        funding_state = self._funding_states.get(symbol)
-        if funding_state and funding_state.should_exit:
-            reasons.append(f"Funding exit triggered")
+        # 펀딩 상태 (Upbit 모드에서는 무시)
+        funding_state = None
+        if not self._is_upbit:
+            funding_state = self._funding_states.get(symbol)
+            if funding_state and funding_state.should_exit:
+                reasons.append("Funding exit triggered")
 
-        if funding_state and funding_state.is_reversed:
-            reasons.append(f"Funding reversed: {funding_state.current_rate}")
+            if funding_state and funding_state.is_reversed:
+                reasons.append(f"Funding reversed: {funding_state.current_rate}")
 
         # Edge 상태
         edge_state = self._edge_states.get(symbol)
@@ -341,12 +366,12 @@ class CoreSafetyGuard:
             reasons.append(f"Edge insufficient: {edge_state.current_edge_bps}bps")
 
         if edge_state and edge_state.trend == "DETERIORATING":
-            reasons.append(f"Edge deteriorating")
+            reasons.append("Edge deteriorating")
 
         # 액션 결정
-        should_exit = funding_state.should_exit if funding_state else False
+        should_exit = (funding_state.should_exit if funding_state else False) if not self._is_upbit else False
         should_reduce = (
-            (funding_state and funding_state.is_reversed)
+            (funding_state and funding_state.is_reversed if not self._is_upbit else False)
             or (edge_state and edge_state.trend == "DETERIORATING")
         )
         can_enter = not should_exit and not should_reduce and self.is_allowed_symbol(symbol)

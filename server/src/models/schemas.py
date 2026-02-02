@@ -44,8 +44,9 @@ class OrderType(str, Enum):
 class StrategyType(str, Enum):
     """전략 타입"""
 
-    CORE = "CORE"  # 캐시앤캐리
+    CORE = "CORE"  # 캐시앤캐리 / Defensive Core
     SATELLITE = "SATELLITE"  # 5m 스캐너
+    ATTACK = "ATTACK"  # 급등주 공격
 
 
 class EventLevel(str, Enum):
@@ -65,39 +66,43 @@ class EventType(str, Enum):
     RISK = "RISK"
     STRATEGY = "STRATEGY"
     CONNECTION = "CONNECTION"
+    MODE_CHANGE = "MODE_CHANGE"
+    ATTACK = "ATTACK"
+    ATTACK_MODE_CHANGE = "ATTACK_MODE_CHANGE"
+    ATTACK_SIGNAL = "ATTACK_SIGNAL"
+    ATTACK_ENTRY = "ATTACK_ENTRY"
+    ATTACK_EXIT = "ATTACK_EXIT"
 
 
 # === API 응답 스키마 ===
 
 
 class SummarySchema(BaseModel):
-    """요약 정보"""
+    """요약 정보 (Upbit KRW)"""
 
-    equity: float = Field(description="총 자산 (USD)")
-    pnl_today: float = Field(description="오늘 PnL (USD)")
+    equity: float = Field(description="총 자산 (KRW)")
+    pnl_today: float = Field(description="오늘 PnL (KRW)")
     pnl_today_pct: float = Field(description="오늘 PnL (%)")
     drawdown: float = Field(description="최대 손실폭 (%)")
-    exposure: float = Field(description="총 익스포저 (USD)")
-    cash: float = Field(description="가용 현금 (USD)")
-    margin_used: float = Field(description="사용 중인 마진 (USD)")
+    exposure: float = Field(description="총 익스포저 (KRW)")
+    cash: float = Field(description="가용 현금 (KRW)")
     mode: TradingMode = Field(description="현재 운영 모드")
     is_paper: bool = Field(description="Paper 모드 여부")
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class PositionSchema(BaseModel):
-    """포지션 정보"""
+    """포지션 정보 (Upbit 현물 전용)"""
 
-    symbol: str = Field(description="심볼 (예: BTCUSDT)")
+    symbol: str = Field(description="심볼 (예: KRW-BTC)")
     strategy: StrategyType = Field(description="전략 타입")
-    side: OrderSide = Field(description="방향")
+    side: OrderSide = Field(description="방향 (현물은 BUY만)")
     quantity: float = Field(description="수량")
     avg_price: float = Field(description="평균 진입가")
     current_price: float = Field(description="현재가")
-    unrealized_pnl: float = Field(description="미실현 PnL (USD)")
-    realized_pnl: float = Field(description="실현 PnL (USD)")
-    notional: float = Field(description="명목 가치 (USD)")
-    leverage: float = Field(default=1.0, description="레버리지")
+    unrealized_pnl: float = Field(description="미실현 PnL (KRW)")
+    realized_pnl: float = Field(description="실현 PnL (KRW)")
+    notional: float = Field(description="명목 가치 (KRW)")
     opened_at: datetime = Field(description="포지션 오픈 시간")
 
 

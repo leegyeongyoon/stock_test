@@ -1,4 +1,10 @@
-"""Satellite 전략 - 5m 스캐너 (돌파 + RVOL + VWAP) + 1h MA/ATR 레짐 필터 (강화 버전)"""
+"""Satellite 전략 - 5m 스캐너 (돌파 + RVOL + VWAP) + 1h MA/ATR 레짐 필터 (강화 버전)
+
+v3 업데이트 (Upbit 호환):
+- Long-only 모드 지원 (Upbit은 숏 불가)
+- 과열 추격 금지 필터 (+12% 이상 급등 시 진입 금지)
+- settings.is_upbit 기반 자동 모드 전환
+"""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -16,6 +22,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+# Upbit 과열 추격 금지 임계값
+OVERHEAT_THRESHOLD = 0.12  # +12% 이상 급등 시 진입 금지
 
 
 class Regime(str, Enum):
@@ -65,18 +74,22 @@ class SatellitePosition:
 
 class SatelliteStrategy(BaseStrategy):
     """
-    Satellite 전략 - 5분봉 모멘텀/돌파 (v2: 코인별 독립 판단)
+    Satellite 전략 - 5분봉 모멘텀/돌파 (v3: Long-only 모드 지원)
+
+    v3 변경사항 (Upbit 호환):
+    - Long-only 모드: is_upbit=True일 때 숏 진입 비활성화
+    - 과열 추격 금지: 전일 대비 +12% 이상 급등 시 진입 금지
+    - 슬리피지 가드 추가
 
     v2 변경사항:
     - BTC Regime 의존 제거 → 각 코인별 독립적 돌파 조건만 체크
     - VOLATILE일 때만 신규 진입 차단 (안전장치)
-    - 롱/숏 모두 개별 코인 돌파 기준으로 판단
 
     진입 조건 (Phase 1 - 시그널 감지):
     - RVOL_5m >= 2.5 (거래량 2.5배 폭증)
     - ClosePos >= 0.75 (봉 상단 75% 위치 마감)
     - 롱: price > 최근 12개 5m 고점 AND price >= VWAP
-    - 숏: price < 최근 12개 5m 저점 AND price <= VWAP
+    - 숏: price < 최근 12개 5m 저점 AND price <= VWAP (Long-only 모드 제외)
 
     진입 조건 (Phase 2 - 확인, 5분 후):
     - 돌파 레벨 위/아래 유지
@@ -95,6 +108,9 @@ class SatelliteStrategy(BaseStrategy):
         self._enabled = settings.satellite_enabled
         self.feature_engine = feature_engine
 
+        # Long-only 모드 (Upbit은 숏 불가)
+        self._long_only_mode = settings.is_upbit
+
         # 설정
         self.max_position_usd = settings.satellite_max_position_usd
         self.hard_stop_pct = settings.satellite_hard_stop_pct  # -0.8%
@@ -106,6 +122,9 @@ class SatelliteStrategy(BaseStrategy):
         self.rvol_threshold = settings.satellite_rvol_threshold  # 2.5
         self.close_pos_threshold = settings.satellite_close_pos_threshold  # 0.75
         self.confirmation_enabled = settings.satellite_confirmation_entry
+
+        # 과열 추격 금지 임계값
+        self.overheat_threshold = OVERHEAT_THRESHOLD  # +12%
 
         # 상태
         self._btc_regime: Regime = Regime.NEUTRAL
@@ -193,6 +212,19 @@ class SatelliteStrategy(BaseStrategy):
 
         return None
 
+    def _is_overheated(self, market_data: dict) -> bool:
+        """과열 추격 금지 체크 - 전일 대비 급등 시 진입 금지"""
+        change_rate = market_data.get("change_rate", 0)
+        if change_rate >= self.overheat_threshold:
+            logger.info(
+                "Satellite overheat detected - skip entry",
+                symbol=market_data.get("symbol"),
+                change_rate=f"{change_rate:.1%}",
+                threshold=f"{self.overheat_threshold:.1%}",
+            )
+            return True
+        return False
+
     async def _detect_signal(self, market_data: dict) -> bool:
         """Phase 1: 시그널 감지"""
         symbol = market_data.get("symbol")
@@ -208,6 +240,10 @@ class SatelliteStrategy(BaseStrategy):
 
         # 이미 대기 중인 시그널이 있으면 스킵
         if symbol in self._pending_signals:
+            return False
+
+        # 과열 추격 금지 (Long-only 모드에서만 적용)
+        if self._long_only_mode and self._is_overheated(market_data):
             return False
 
         # RVOL 필터
@@ -230,6 +266,7 @@ class SatelliteStrategy(BaseStrategy):
             vwap=f"{vwap:.2f}",
             at_high=price >= highest_12,
             at_low=price <= lowest_12,
+            long_only_mode=self._long_only_mode,
         )
 
         # 돌파 체크 (롱) - 코인별 독립 판단
@@ -254,7 +291,10 @@ class SatelliteStrategy(BaseStrategy):
             )
             return True
 
-        # 돌파 체크 (숏) - 코인별 독립 판단
+        # 돌파 체크 (숏) - Long-only 모드에서는 스킵
+        if self._long_only_mode:
+            return False
+
         # 24h 저점의 101% 이하면 돌파 근접으로 인정
         breakout_threshold_low = lowest_12 * 1.01 if lowest_12 > 0 else float("inf")
         if price <= breakout_threshold_low < float("inf") and price <= vwap:
@@ -357,6 +397,10 @@ class SatelliteStrategy(BaseStrategy):
         if price <= 0:
             return None
 
+        # 과열 추격 금지 (Long-only 모드에서만 적용)
+        if self._long_only_mode and self._is_overheated(market_data):
+            return None
+
         # RVOL 필터
         if rvol < self.rvol_threshold:
             return None
@@ -379,7 +423,10 @@ class SatelliteStrategy(BaseStrategy):
                 confidence=min(1.0, rvol / self.rvol_threshold),
             )
 
-        # 저점 돌파 (숏) - 코인별 독립 판단
+        # 저점 돌파 (숏) - Long-only 모드에서는 스킵
+        if self._long_only_mode:
+            return None
+
         breakout_threshold_low = lowest_12 * 1.01 if lowest_12 > 0 else float("inf")
         if price <= breakout_threshold_low < float("inf") and price <= vwap:
             return Signal(
@@ -568,6 +615,8 @@ class SatelliteStrategy(BaseStrategy):
         """전략 상태 조회"""
         return {
             "enabled": self._enabled,
+            "long_only_mode": self._long_only_mode,
+            "overheat_threshold": self.overheat_threshold,
             "btc_regime": self._btc_regime.value,
             "btc_is_volatile": self._btc_is_volatile,
             "confirmation_enabled": self.confirmation_enabled,

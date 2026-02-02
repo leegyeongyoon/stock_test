@@ -315,6 +315,62 @@ class RiskOverlayConfig(BaseSettings):
         description="동일 상관군 최대 포지션 수",
     )
 
+    # === Capital Profile (Growth/Preserve Mode) ===
+    # Growth Mode: 자산 < 10M KRW - 공격적 성장
+    # Preserve Mode: 자산 >= 10M KRW - 수익 보존
+    capital_growth_attack_levels: str = Field(
+        default="1,2,3",
+        description="Growth 모드 허용 Attack Level",
+    )
+    capital_growth_attack_modes: str = Field(
+        default="NORMAL,PLUS,MAX",
+        description="Growth 모드 허용 Attack Mode",
+    )
+    capital_preserve_attack_levels: str = Field(
+        default="1,2",
+        description="Preserve 모드 허용 Attack Level (L3 금지)",
+    )
+    capital_preserve_attack_modes: str = Field(
+        default="NORMAL,OFF",
+        description="Preserve 모드 허용 Attack Mode",
+    )
+    capital_l3_require_dd_tier1: bool = Field(
+        default=True,
+        description="L3(50%) 진입에 DD Tier1 필수",
+    )
+    capital_l3_require_risk_on: bool = Field(
+        default=True,
+        description="L3(50%) 진입에 RiskOn/Neutral 필수",
+    )
+    capital_overheat_l3_block_threshold: float = Field(
+        default=0.15,
+        description="L3 금지 과열 임계값 (전일 +15%)",
+    )
+    capital_overheat_l2_block_threshold: float = Field(
+        default=0.20,
+        description="L2 금지 과열 임계값 (전일 +20%)",
+    )
+
+    @property
+    def growth_attack_levels_list(self) -> list[int]:
+        """Growth 모드 허용 Attack Level 리스트"""
+        return [int(x.strip()) for x in self.capital_growth_attack_levels.split(",")]
+
+    @property
+    def growth_attack_modes_list(self) -> list[str]:
+        """Growth 모드 허용 Attack Mode 리스트"""
+        return [x.strip() for x in self.capital_growth_attack_modes.split(",")]
+
+    @property
+    def preserve_attack_levels_list(self) -> list[int]:
+        """Preserve 모드 허용 Attack Level 리스트"""
+        return [int(x.strip()) for x in self.capital_preserve_attack_levels.split(",")]
+
+    @property
+    def preserve_attack_modes_list(self) -> list[str]:
+        """Preserve 모드 허용 Attack Mode 리스트"""
+        return [x.strip() for x in self.capital_preserve_attack_modes.split(",")]
+
     @property
     def core_symbols_list(self) -> list[str]:
         """Core 허용 심볼 리스트"""

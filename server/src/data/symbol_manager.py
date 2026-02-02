@@ -1,6 +1,6 @@
 """Symbol Manager - 동적 심볼 관리
 
-Binance Futures 전체 USDT 심볼을 동적으로 관리:
+Binance/Upbit 심볼을 동적으로 관리:
 - exchangeInfo에서 전체 심볼 조회
 - 유동성 필터 적용 (거래대금, 스프레드)
 - 정밀도 정보 캐싱
@@ -14,12 +14,17 @@ from typing import Optional
 
 import structlog
 
+from src.config import get_settings
+
 logger = structlog.get_logger()
+settings = get_settings()
 
 # 유동성 필터 기준
-MIN_VOLUME_24H = 50_000_000  # 50M USDT
-MAX_SPREAD_BPS = 8  # 8 basis points
-MIN_NOTIONAL = 100  # 100 USDT 최소 주문
+MIN_VOLUME_24H = 50_000_000  # 50M USDT (Binance)
+MIN_VOLUME_24H_KRW = 1_000_000_000  # 10억 KRW (Upbit)
+MAX_SPREAD_BPS = 10  # 10 basis points
+MIN_NOTIONAL = 100  # 100 USDT 최소 주문 (Binance)
+MIN_NOTIONAL_KRW = 5000  # 5000 KRW 최소 주문 (Upbit)
 
 # 갱신 주기
 REFRESH_INTERVAL_MINUTES = 60
@@ -65,7 +70,7 @@ class SymbolManager:
     동적 심볼 관리자
 
     책임:
-    1. Binance Futures 전체 USDT 심볼 조회
+    1. Binance/Upbit 심볼 조회
     2. 유동성 필터링 (거래대금, 스프레드)
     3. 심볼 정보 캐싱 (정밀도 등)
     4. 주기적 갱신
@@ -75,13 +80,20 @@ class SymbolManager:
         self,
         perp_exchange=None,
         spot_exchange=None,
+        upbit_exchange=None,
         min_volume_24h: float = MIN_VOLUME_24H,
+        min_volume_24h_krw: float = MIN_VOLUME_24H_KRW,
         max_spread_bps: float = MAX_SPREAD_BPS,
     ):
         self.perp_exchange = perp_exchange
         self.spot_exchange = spot_exchange
+        self.upbit_exchange = upbit_exchange
         self.min_volume_24h = min_volume_24h
+        self.min_volume_24h_krw = min_volume_24h_krw
         self.max_spread_bps = max_spread_bps
+
+        # 거래소 타입 결정
+        self._is_upbit = upbit_exchange is not None
 
         # 심볼 캐시
         self._symbols: dict[str, SymbolInfo] = {}
@@ -104,7 +116,7 @@ class SymbolManager:
         """
         심볼 목록 갱신
 
-        1. exchangeInfo에서 전체 USDT 심볼 조회
+        1. exchangeInfo에서 전체 심볼 조회
         2. 24h 티커에서 거래대금 조회
         3. 호가에서 스프레드 계산
         4. 유동성 필터 적용
@@ -113,6 +125,80 @@ class SymbolManager:
         Returns:
             유동성 통과 심볼 목록
         """
+        if self._is_upbit:
+            return await self._refresh_upbit()
+        else:
+            return await self._refresh_binance()
+
+    async def _refresh_upbit(self) -> list[str]:
+        """Upbit 심볼 목록 갱신"""
+        if not self.upbit_exchange:
+            logger.error("SymbolManager: upbit_exchange not set")
+            return self._qualified
+
+        try:
+            # 1. KRW 마켓 목록 조회
+            markets = await self.upbit_exchange.get_markets()
+            krw_markets = [m for m in markets if m.get("market", "").startswith("KRW-")]
+
+            self._total_symbols = len(krw_markets)
+
+            # 2. 전체 시세 조회
+            market_codes = [m["market"] for m in krw_markets]
+            tickers = await self.upbit_exchange.get_all_tickers(market_codes)
+
+            # 3. 심볼 정보 생성 및 필터링
+            self._symbols = {}
+            self._qualified = []
+
+            for market in krw_markets:
+                symbol = market["market"]  # KRW-BTC
+                base_asset = symbol.replace("KRW-", "")
+
+                ticker = tickers.get(symbol, {})
+                volume_24h = ticker.get("acc_trade_price_24h", 0)
+
+                # Upbit은 정밀도 정보가 제한적 - 기본값 사용
+                info = SymbolInfo(
+                    symbol=symbol,
+                    base_asset=base_asset,
+                    quote_asset="KRW",
+                    price_precision=0,  # KRW는 정수
+                    quantity_precision=8,  # 대부분 코인은 8자리
+                    min_notional=MIN_NOTIONAL_KRW,
+                    step_size=0.00000001,
+                    tick_size=1.0,  # KRW 단위
+                    min_qty=0.00000001,
+                    volume_24h=volume_24h,
+                    spread_bps=0,  # Upbit은 스프레드 계산 생략
+                    last_price=ticker.get("trade_price", 0),
+                    funding_rate=0,  # Upbit은 펀딩비 없음
+                )
+
+                self._symbols[symbol] = info
+
+                # 유동성 필터 (거래대금만)
+                if volume_24h >= self.min_volume_24h_krw:
+                    self._qualified.append(symbol)
+
+            self._filtered_count = len(self._qualified)
+            self._last_refresh = datetime.utcnow()
+
+            logger.info(
+                "SymbolManager: Refreshed Upbit symbols",
+                total=self._total_symbols,
+                qualified=self._filtered_count,
+                min_volume=f"{self.min_volume_24h_krw/1e9:.1f}B KRW",
+            )
+
+            return self._qualified
+
+        except Exception as e:
+            logger.error("SymbolManager: Upbit refresh failed", error=str(e))
+            return self._qualified
+
+    async def _refresh_binance(self) -> list[str]:
+        """Binance 심볼 목록 갱신"""
         if not self.perp_exchange:
             logger.error("SymbolManager: perp_exchange not set")
             return self._qualified
@@ -242,12 +328,18 @@ class SymbolManager:
 
     def _passes_liquidity_filter(self, info: SymbolInfo) -> bool:
         """유동성 필터 통과 여부"""
+        # 거래소별 거래대금 기준
+        if self._is_upbit:
+            min_volume = self.min_volume_24h_krw
+        else:
+            min_volume = self.min_volume_24h
+
         # 거래대금 체크
-        if info.volume_24h < self.min_volume_24h:
+        if info.volume_24h < min_volume:
             return False
 
-        # 스프레드 체크
-        if info.spread_bps > self.max_spread_bps:
+        # 스프레드 체크 (Upbit은 스킵)
+        if not self._is_upbit and info.spread_bps > self.max_spread_bps:
             return False
 
         return True
@@ -281,13 +373,18 @@ class SymbolManager:
         """
         info = self._symbols.get(symbol)
         if not info:
+            # Upbit 심볼이면 기본값 사용
+            if self._is_upbit and symbol.startswith("KRW-"):
+                # Upbit 기본 정밀도: 8자리
+                rounded = math.floor(quantity * 1e8) / 1e8
+                return rounded if rounded > 0.00000001 else 0
             logger.warning(f"SymbolManager: Unknown symbol {symbol}")
             return 0
 
         # step_size 단위로 내림
         step = info.step_size
         if step <= 0:
-            step = 0.001
+            step = 0.00000001 if self._is_upbit else 0.001
 
         rounded = math.floor(quantity / step) * step
 
@@ -326,7 +423,9 @@ class SymbolManager:
     def get_min_notional(self, symbol: str) -> float:
         """심볼의 최소 주문금액"""
         info = self._symbols.get(symbol)
-        return info.min_notional if info else MIN_NOTIONAL
+        if info:
+            return info.min_notional
+        return MIN_NOTIONAL_KRW if self._is_upbit else MIN_NOTIONAL
 
     def get_stats(self) -> dict:
         """통계 정보"""
@@ -366,7 +465,9 @@ def get_symbol_manager() -> SymbolManager:
 def init_symbol_manager(
     perp_exchange=None,
     spot_exchange=None,
+    upbit_exchange=None,
     min_volume_24h: float = MIN_VOLUME_24H,
+    min_volume_24h_krw: float = MIN_VOLUME_24H_KRW,
     max_spread_bps: float = MAX_SPREAD_BPS,
 ) -> SymbolManager:
     """SymbolManager 초기화"""
@@ -374,7 +475,9 @@ def init_symbol_manager(
     _symbol_manager = SymbolManager(
         perp_exchange=perp_exchange,
         spot_exchange=spot_exchange,
+        upbit_exchange=upbit_exchange,
         min_volume_24h=min_volume_24h,
+        min_volume_24h_krw=min_volume_24h_krw,
         max_spread_bps=max_spread_bps,
     )
     return _symbol_manager

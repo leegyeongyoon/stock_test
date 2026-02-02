@@ -31,6 +31,8 @@ class OrderResult:
     filled_qty: float = 0.0
     avg_price: float = 0.0
     error: Optional[str] = None
+    commission: float = 0.0  # 수수료
+    commission_asset: str = "USDT"  # 수수료 자산
 
 
 @dataclass
