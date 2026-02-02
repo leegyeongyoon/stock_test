@@ -1,17 +1,12 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { api, Summary, Position, Event, AttackStatus, AttackPosition, AttackSignal, CapitalProfileStatus } from '@/lib/api'
+import { api, Summary, Position, Event, CapitalProfileStatus, SurgeStatus } from '@/lib/api'
 import ConnectionStatus from '@/components/ConnectionStatus'
 import ModeSelector from '@/components/ModeSelector'
 import SummaryCards from '@/components/SummaryCards'
 import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
-import {
-  AttackStatusCard,
-  AttackModeSelector,
-  AttackPositionsTable,
-} from '@/components/attack'
 
 interface SatelliteStatus {
   enabled: boolean
@@ -37,9 +32,7 @@ export default function Dashboard() {
   const [events, setEvents] = useState<Event[]>([])
   const [satelliteStatus, setSatelliteStatus] = useState<SatelliteStatus | null>(null)
   const [riskStatus, setRiskStatus] = useState<RiskStatus | null>(null)
-  const [attackStatus, setAttackStatus] = useState<AttackStatus | null>(null)
-  const [attackPositions, setAttackPositions] = useState<AttackPosition[]>([])
-  const [attackSignals, setAttackSignals] = useState<AttackSignal[]>([])
+  const [surgeStatus, setSurgeStatus] = useState<SurgeStatus | null>(null)
   const [capitalProfile, setCapitalProfile] = useState<CapitalProfileStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -64,17 +57,12 @@ export default function Dashboard() {
         // 추가 데이터 실패해도 무시
       }
 
-      // Attack 데이터 조회
+      // SurgeDetector 데이터 조회
       try {
-        const [attackStatusData, attackPosData] = await Promise.all([
-          api.getAttackStatus(),
-          api.getAttackPositions(),
-        ])
-        setAttackStatus(attackStatusData)
-        setAttackPositions(attackPosData.active_positions)
-        setAttackSignals(attackPosData.pending_signals)
+        const surgeData = await api.getSurgeStatus()
+        setSurgeStatus(surgeData)
       } catch {
-        // Attack 모듈 미설치 시 무시
+        // SurgeDetector 미설치 시 무시
       }
 
       // Capital Profile 조회
@@ -120,9 +108,6 @@ export default function Dashboard() {
     }
   }
 
-  const pendingSignals = satelliteStatus?.pending_signals || {}
-  const pendingCount = Object.keys(pendingSignals).length
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -139,14 +124,6 @@ export default function Dashboard() {
             <span className="text-slate-400 text-xs mb-1">트레이딩 모드</span>
             <ModeSelector />
           </div>
-
-          {/* Attack Mode Selector */}
-          {attackStatus && (
-            <AttackModeSelector
-              currentMode={attackStatus.mode}
-              onModeChange={(newStatus) => setAttackStatus(newStatus)}
-            />
-          )}
 
           <ConnectionStatus />
 
@@ -177,7 +154,7 @@ export default function Dashboard() {
       )}
 
       {/* 전략 상태 카드 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {/* BTC 레짐 */}
         <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
           <h3 className="text-slate-400 text-sm mb-2">BTC 시장 상태</h3>
@@ -199,22 +176,27 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* 급등 감지 */}
+        {/* 급등 시작 감지 (SurgeDetector) */}
         <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
-          <h3 className="text-slate-400 text-sm mb-2">급등 감지 (Satellite)</h3>
-          {pendingCount > 0 ? (
+          <h3 className="text-slate-400 text-sm mb-2">급등 시작 감지</h3>
+          {surgeStatus && surgeStatus.active_signals > 0 ? (
             <div className="space-y-1">
-              {Object.entries(pendingSignals).map(([symbol, signal]) => (
-                <div key={symbol} className="flex items-center justify-between">
-                  <span className="text-green-400 font-mono">{symbol}</span>
-                  <span className="text-xs bg-green-600 px-2 py-1 rounded">
-                    매수 대기
+              {surgeStatus.signals.map((signal) => (
+                <div key={signal.symbol} className="flex items-center justify-between">
+                  <span className="text-green-400 font-mono">{signal.symbol}</span>
+                  <span className="text-xs text-slate-300">
+                    +{signal.change_1m_pct.toFixed(1)}% (1m)
                   </span>
                 </div>
               ))}
             </div>
           ) : (
             <p className="text-slate-500">감지된 신호 없음</p>
+          )}
+          {surgeStatus && surgeStatus.active_positions > 0 && (
+            <div className="mt-2 text-xs text-slate-400">
+              활성 포지션: {surgeStatus.active_positions}개
+            </div>
           )}
         </div>
 
@@ -241,9 +223,6 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
-
-        {/* Attack 상태 */}
-        <AttackStatusCard status={attackStatus} loading={loading} />
       </div>
 
       {/* Capital Profile 상태 */}
@@ -290,15 +269,6 @@ export default function Dashboard() {
 
       {/* Summary Cards */}
       <SummaryCards summary={summary} loading={loading} />
-
-      {/* Attack Positions (if any) */}
-      {(attackPositions.length > 0 || attackSignals.length > 0) && (
-        <AttackPositionsTable
-          positions={attackPositions}
-          signals={attackSignals}
-          loading={loading}
-        />
-      )}
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

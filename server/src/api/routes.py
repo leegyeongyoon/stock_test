@@ -1235,3 +1235,98 @@ async def get_pullback_score(symbol: str):
     score_result = calculator.calculate(enhanced_market_data)
 
     return score_result.to_dict()
+
+
+# ===== SurgeDetector 급등 시작 감지 API =====
+
+
+@router.get("/surge/status")
+async def get_surge_status():
+    """SurgeDetector 상태 조회
+
+    Returns:
+        enabled: 활성화 여부
+        active_signals: 활성 신호 수
+        active_positions: 활성 포지션 수
+        cooldown_count: 쿨다운 중인 심볼 수
+        signals: 활성 신호 목록
+        positions: 활성 포지션 목록
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="SurgeDetector is only available for Upbit",
+        )
+
+    # SurgeDetector는 ignition_strategy 내부에 있거나 별도 싱글톤
+    from src.strategies.ignition import get_surge_detector
+
+    surge_detector = get_surge_detector()
+    return {
+        "enabled": True,
+        **surge_detector.get_status(),
+    }
+
+
+@router.get("/surge/signals")
+async def get_surge_signals():
+    """활성 급등 신호 조회
+
+    Returns:
+        signals: 급등 신호 목록 (만료되지 않은 것만)
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="SurgeDetector is only available for Upbit",
+        )
+
+    from src.strategies.ignition import get_surge_detector
+
+    surge_detector = get_surge_detector()
+    signals = surge_detector.get_active_signals()
+
+    return {"signals": [s.to_dict() for s in signals]}
+
+
+@router.get("/surge/positions")
+async def get_surge_positions():
+    """급등 포지션 조회
+
+    Returns:
+        positions: 급등 전략으로 진입한 포지션 목록
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="SurgeDetector is only available for Upbit",
+        )
+
+    from src.strategies.ignition import get_surge_detector
+
+    surge_detector = get_surge_detector()
+    positions = surge_detector.get_positions()
+
+    return {
+        "positions": [
+            {
+                "symbol": p.symbol,
+                "entry_price": p.entry_price,
+                "quantity": p.quantity,
+                "stop_loss": p.stop_loss,
+                "take_profit": p.take_profit,
+                "highest_price": p.highest_price,
+                "trailing_stop": p.trailing_stop,
+            }
+            for p in positions
+        ]
+    }

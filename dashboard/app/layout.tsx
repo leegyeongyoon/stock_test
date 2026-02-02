@@ -34,9 +34,6 @@ export default function RootLayout({
                 <a href="/market" className="hover:text-blue-400 transition-colors">
                   시장 현황
                 </a>
-                <a href="/attack" className="hover:text-orange-400 transition-colors">
-                  Attack
-                </a>
               </nav>
             </div>
           </header>
