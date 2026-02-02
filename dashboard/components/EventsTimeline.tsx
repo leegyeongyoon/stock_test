@@ -22,11 +22,18 @@ const levelTextColors = {
   CRITICAL: 'text-red-300',
 }
 
+const levelLabels: Record<string, string> = {
+  INFO: '정보',
+  WARNING: '경고',
+  ERROR: '오류',
+  CRITICAL: '심각',
+}
+
 export default function EventsTimeline({ events, loading, maxItems = 20 }: Props) {
   if (loading) {
     return (
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-4">
-        <h2 className="text-lg font-semibold mb-4">Events</h2>
+        <h2 className="text-lg font-semibold mb-4">이벤트 로그</h2>
         <div className="animate-pulse space-y-3">
           {[1, 2, 3, 4, 5].map((i) => (
             <div key={i} className="h-12 bg-slate-700 rounded"></div>
@@ -41,12 +48,12 @@ export default function EventsTimeline({ events, loading, maxItems = 20 }: Props
   return (
     <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
       <div className="p-4 border-b border-slate-700">
-        <h2 className="text-lg font-semibold">Events</h2>
+        <h2 className="text-lg font-semibold">이벤트 로그</h2>
       </div>
 
       {displayEvents.length === 0 ? (
         <div className="p-8 text-center text-slate-400">
-          No events
+          이벤트 없음
         </div>
       ) : (
         <div className="divide-y divide-slate-700 max-h-[400px] overflow-y-auto">
@@ -68,7 +75,7 @@ export default function EventsTimeline({ events, loading, maxItems = 20 }: Props
                         levelTextColors[event.level]
                       }`}
                     >
-                      {event.level}
+                      {levelLabels[event.level] || event.level}
                     </span>
                     <span className="text-xs text-slate-500">
                       {event.event_type}

@@ -1,6 +1,7 @@
 'use client'
 
 import { HourlyPnlResponse } from '@/lib/analytics-api'
+import { formatKRW } from '@/lib/currency'
 
 interface Props {
   data: HourlyPnlResponse | null
@@ -56,7 +57,7 @@ export default function HourlyPnlChart({ data, loading }: Props) {
                 <div
                   className={`w-full rounded-t transition-all ${barColor}`}
                   style={{ height: `${Math.max(height, 4)}%` }}
-                  title={`${hourData.hour}:00 - $${hourData.pnl.toFixed(2)} (${hourData.trades_count}건)`}
+                  title={`${hourData.hour}:00 - ${formatKRW(hourData.pnl)} (${hourData.trades_count}건)`}
                 />
               </div>
               {hourData.hour % 4 === 0 && (

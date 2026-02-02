@@ -1,6 +1,7 @@
 'use client'
 
 import { SymbolPnlResponse } from '@/lib/analytics-api'
+import { formatKRW } from '@/lib/currency'
 
 interface Props {
   data: SymbolPnlResponse | null
@@ -55,11 +56,11 @@ export default function SymbolPnlChart({ data, loading }: Props) {
                 />
               </div>
               <div
-                className={`w-24 text-right font-mono text-sm ${
+                className={`w-28 text-right font-mono text-sm ${
                   isProfit ? 'text-green-400' : 'text-red-400'
                 }`}
               >
-                {isProfit ? '+' : ''}${symbol.total_pnl.toFixed(2)}
+                {isProfit ? '+' : ''}{formatKRW(symbol.total_pnl)}
               </div>
               <div className="w-16 text-right text-slate-400 text-sm">
                 {symbol.trades_count}건
@@ -74,7 +75,7 @@ export default function SymbolPnlChart({ data, loading }: Props) {
         <span
           className={data.total_realized >= 0 ? 'text-green-400' : 'text-red-400'}
         >
-          {data.total_realized >= 0 ? '+' : ''}${data.total_realized.toFixed(2)}
+          {data.total_realized >= 0 ? '+' : ''}{formatKRW(data.total_realized)}
         </span>
       </div>
     </div>

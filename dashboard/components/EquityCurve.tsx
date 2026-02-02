@@ -1,6 +1,7 @@
 'use client'
 
 import { EquityCurveResponse } from '@/lib/analytics-api'
+import { formatKRW } from '@/lib/currency'
 
 interface Props {
   data: EquityCurveResponse | null
@@ -82,8 +83,8 @@ export default function EquityCurve({ data, loading }: Props) {
       </svg>
 
       <div className="flex justify-between text-sm text-slate-400 mt-2">
-        <span>${data.start_equity.toLocaleString()}</span>
-        <span>${data.end_equity.toLocaleString()}</span>
+        <span>{formatKRW(data.start_equity)}</span>
+        <span>{formatKRW(data.end_equity)}</span>
       </div>
     </div>
   )

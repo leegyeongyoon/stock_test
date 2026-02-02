@@ -1,16 +1,46 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { api, Summary, Position, Event } from '@/lib/api'
+import { api, Summary, Position, Event, AttackStatus, AttackPosition, AttackSignal, CapitalProfileStatus } from '@/lib/api'
 import ConnectionStatus from '@/components/ConnectionStatus'
+import ModeSelector from '@/components/ModeSelector'
 import SummaryCards from '@/components/SummaryCards'
 import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
+import {
+  AttackStatusCard,
+  AttackModeSelector,
+  AttackPositionsTable,
+} from '@/components/attack'
+
+interface SatelliteStatus {
+  enabled: boolean
+  btc_regime: string
+  btc_is_volatile: boolean
+  pending_signals: Record<string, { side: string; status: string; detected_at: string }>
+  active_positions: number
+}
+
+interface RiskStatus {
+  mode: string
+  satellite_enabled: boolean
+  exposure: {
+    gross_exposure: number
+    equity: number
+    gross_exposure_ratio: number
+  }
+}
 
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [positions, setPositions] = useState<Position[]>([])
   const [events, setEvents] = useState<Event[]>([])
+  const [satelliteStatus, setSatelliteStatus] = useState<SatelliteStatus | null>(null)
+  const [riskStatus, setRiskStatus] = useState<RiskStatus | null>(null)
+  const [attackStatus, setAttackStatus] = useState<AttackStatus | null>(null)
+  const [attackPositions, setAttackPositions] = useState<AttackPosition[]>([])
+  const [attackSignals, setAttackSignals] = useState<AttackSignal[]>([])
+  const [capitalProfile, setCapitalProfile] = useState<CapitalProfileStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -22,12 +52,45 @@ export default function Dashboard() {
         api.getEvents(undefined, 50),
       ])
 
+      // 추가 데이터 조회
+      try {
+        const [satData, riskData] = await Promise.all([
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'}/api/satellite-status`).then(r => r.json()),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'}/api/risk/status`).then(r => r.json()),
+        ])
+        setSatelliteStatus(satData)
+        setRiskStatus(riskData)
+      } catch {
+        // 추가 데이터 실패해도 무시
+      }
+
+      // Attack 데이터 조회
+      try {
+        const [attackStatusData, attackPosData] = await Promise.all([
+          api.getAttackStatus(),
+          api.getAttackPositions(),
+        ])
+        setAttackStatus(attackStatusData)
+        setAttackPositions(attackPosData.active_positions)
+        setAttackSignals(attackPosData.pending_signals)
+      } catch {
+        // Attack 모듈 미설치 시 무시
+      }
+
+      // Capital Profile 조회
+      try {
+        const profileData = await api.getCapitalProfileStatus()
+        setCapitalProfile(profileData)
+      } catch {
+        // Capital Profile 미설치 시 무시
+      }
+
       setSummary(summaryData)
       setPositions(positionsData)
       setEvents(eventsData)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to fetch data')
+      setError(e instanceof Error ? e.message : '데이터 조회 실패')
     } finally {
       setLoading(false)
     }
@@ -35,57 +98,72 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData()
-
-    // 3초마다 폴링
     const interval = setInterval(fetchData, 3000)
-
     return () => clearInterval(interval)
   }, [fetchData])
 
   const handlePause = async () => {
     try {
-      await api.pauseBot('Manual pause from dashboard')
+      await api.pauseBot('대시보드에서 수동 일시정지')
       fetchData()
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to pause')
+      alert(e instanceof Error ? e.message : '일시정지 실패')
     }
   }
 
   const handleResume = async () => {
     try {
-      await api.resumeBot('Manual resume from dashboard')
+      await api.resumeBot('대시보드에서 수동 재개')
       fetchData()
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to resume')
+      alert(e instanceof Error ? e.message : '재개 실패')
     }
   }
+
+  const pendingSignals = satelliteStatus?.pending_signals || {}
+  const pendingCount = Object.keys(pendingSignals).length
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold">Dashboard</h1>
+          <h1 className="text-2xl font-bold">실시간 현황</h1>
           <p className="text-slate-400 text-sm">
-            {summary?.is_paper ? 'Paper Trading Mode' : 'Live Trading Mode'}
+            {summary?.is_paper ? '📝 테스트 모드' : '🔴 실거래 모드'}
           </p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-6">
+          {/* User Mode Selector */}
+          <div className="flex flex-col items-end">
+            <span className="text-slate-400 text-xs mb-1">트레이딩 모드</span>
+            <ModeSelector />
+          </div>
+
+          {/* Attack Mode Selector */}
+          {attackStatus && (
+            <AttackModeSelector
+              currentMode={attackStatus.mode}
+              onModeChange={(newStatus) => setAttackStatus(newStatus)}
+            />
+          )}
+
           <ConnectionStatus />
+
           <div className="flex gap-2">
             <button
               onClick={handlePause}
               disabled={summary?.mode !== 'NORMAL'}
               className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
             >
-              Pause
+              일시정지
             </button>
             <button
               onClick={handleResume}
               disabled={summary?.mode === 'NORMAL' || summary?.mode === 'HALT'}
               className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
             >
-              Resume
+              재개
             </button>
           </div>
         </div>
@@ -94,12 +172,133 @@ export default function Dashboard() {
       {/* Error Banner */}
       {error && (
         <div className="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded">
-          {error}
+          ⚠️ {error}
+        </div>
+      )}
+
+      {/* 전략 상태 카드 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* BTC 레짐 */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <h3 className="text-slate-400 text-sm mb-2">BTC 시장 상태</h3>
+          <div className="flex items-center gap-2">
+            <span className={`text-2xl font-bold ${
+              satelliteStatus?.btc_regime === 'BULLISH' ? 'text-green-400' :
+              satelliteStatus?.btc_regime === 'BEARISH' ? 'text-red-400' :
+              satelliteStatus?.btc_regime === 'VOLATILE' ? 'text-yellow-400' :
+              'text-slate-300'
+            }`}>
+              {satelliteStatus?.btc_regime === 'BULLISH' ? '📈 상승장' :
+               satelliteStatus?.btc_regime === 'BEARISH' ? '📉 하락장' :
+               satelliteStatus?.btc_regime === 'VOLATILE' ? '⚡ 변동장' :
+               '➡️ 중립'}
+            </span>
+            {satelliteStatus?.btc_is_volatile && (
+              <span className="text-xs bg-yellow-600 px-2 py-1 rounded">변동성 높음</span>
+            )}
+          </div>
+        </div>
+
+        {/* 급등 감지 */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <h3 className="text-slate-400 text-sm mb-2">급등 감지 (Satellite)</h3>
+          {pendingCount > 0 ? (
+            <div className="space-y-1">
+              {Object.entries(pendingSignals).map(([symbol, signal]) => (
+                <div key={symbol} className="flex items-center justify-between">
+                  <span className="text-green-400 font-mono">{symbol}</span>
+                  <span className="text-xs bg-green-600 px-2 py-1 rounded">
+                    매수 대기
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-slate-500">감지된 신호 없음</p>
+          )}
+        </div>
+
+        {/* 리스크 상태 */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <h3 className="text-slate-400 text-sm mb-2">리스크 상태</h3>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-slate-400">모드</span>
+              <span className={`font-bold ${
+                riskStatus?.mode === 'NORMAL' ? 'text-green-400' :
+                riskStatus?.mode === 'SAFE' ? 'text-yellow-400' :
+                'text-red-400'
+              }`}>
+                {riskStatus?.mode === 'NORMAL' ? '정상' :
+                 riskStatus?.mode === 'SAFE' ? '안전' : '중단'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">익스포져</span>
+              <span className="font-mono">
+                {((riskStatus?.exposure?.gross_exposure_ratio || 0) * 100).toFixed(1)}%
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Attack 상태 */}
+        <AttackStatusCard status={attackStatus} loading={loading} />
+      </div>
+
+      {/* Capital Profile 상태 */}
+      {capitalProfile && (
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-slate-400 text-sm">Capital Profile</h3>
+            <span className={`px-2 py-1 rounded text-xs font-bold ${
+              capitalProfile.current_mode === 'GROWTH'
+                ? 'bg-green-600 text-white'
+                : 'bg-blue-600 text-white'
+            }`}>
+              {capitalProfile.current_mode === 'GROWTH' ? '🚀 GROWTH' : '🛡️ PRESERVE'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div>
+              <span className="text-slate-400">리스크/트레이드</span>
+              <p className="font-mono text-white">
+                {(capitalProfile.config.risk_per_trade_min * 100).toFixed(2)}% ~ {(capitalProfile.config.risk_per_trade_max * 100).toFixed(2)}%
+              </p>
+            </div>
+            <div>
+              <span className="text-slate-400">허용 Attack Level</span>
+              <p className="font-mono text-white">
+                L{capitalProfile.config.allowed_attack_levels.join(', L')}
+              </p>
+            </div>
+            <div>
+              <span className="text-slate-400">Preserve 전환까지</span>
+              <p className="font-mono text-white">
+                {capitalProfile.hysteresis.days_until_preserve}일
+              </p>
+            </div>
+            <div>
+              <span className="text-slate-400">슬리피지 가드</span>
+              <p className="font-mono text-white">
+                {capitalProfile.config.slippage_guard_multiplier}x
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
       {/* Summary Cards */}
       <SummaryCards summary={summary} loading={loading} />
+
+      {/* Attack Positions (if any) */}
+      {(attackPositions.length > 0 || attackSignals.length > 0) && (
+        <AttackPositionsTable
+          positions={attackPositions}
+          signals={attackSignals}
+          loading={loading}
+        />
+      )}
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

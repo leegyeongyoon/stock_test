@@ -36,7 +36,7 @@ export default function ConnectionStatus({ pollingInterval = 5000 }: Props) {
         }`}
       />
       <span className="text-sm text-slate-400">
-        {connected ? 'Connected' : 'Disconnected'}
+        {connected ? '연결됨' : '연결 끊김'}
       </span>
       {lastUpdate && connected && (
         <span className="text-xs text-slate-500">

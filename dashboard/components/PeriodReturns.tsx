@@ -1,6 +1,7 @@
 'use client'
 
 import { PeriodReturnsResponse } from '@/lib/analytics-api'
+import { formatKRW } from '@/lib/currency'
 
 interface Props {
   data: PeriodReturnsResponse | null
@@ -42,7 +43,7 @@ export default function PeriodReturns({ data, loading }: Props) {
         <div className="bg-slate-700/50 rounded-lg p-4">
           <div className="text-slate-400 text-sm mb-1">총 수익</div>
           <div className={`text-2xl font-bold ${pnlColor}`}>
-            {data.total_pnl >= 0 ? '+' : ''}${data.total_pnl.toFixed(2)}
+            {data.total_pnl >= 0 ? '+' : ''}{formatKRW(data.total_pnl)}
           </div>
         </div>
         <div className="bg-slate-700/50 rounded-lg p-4">

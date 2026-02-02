@@ -1,6 +1,7 @@
 'use client'
 
 import { Summary } from '@/lib/api'
+import { formatKRW, formatKRWCompact } from '@/lib/currency'
 
 interface Props {
   summary: Summary | null
@@ -63,29 +64,35 @@ export default function SummaryCards({ summary, loading }: Props) {
     HALT: 'loss' as const,
   }[summary.mode]
 
+  const modeLabel = {
+    NORMAL: '정상',
+    SAFE: '안전',
+    HALT: '중단',
+  }[summary.mode] || summary.mode
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
       <Card
-        title="Equity"
-        value={`$${summary.equity.toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
-        subValue={summary.is_paper ? 'Paper Mode' : 'Live Mode'}
+        title="총 자산"
+        value={formatKRW(summary.equity)}
+        subValue={summary.is_paper ? '테스트 모드' : '실거래'}
       />
       <Card
-        title="Today's PnL"
-        value={`$${summary.pnl_today.toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
+        title="오늘 손익"
+        value={formatKRW(summary.pnl_today)}
         subValue={`${summary.pnl_today_pct >= 0 ? '+' : ''}${(summary.pnl_today_pct * 100).toFixed(2)}%`}
         color={pnlColor}
       />
       <Card
-        title="Drawdown"
+        title="낙폭 (MDD)"
         value={`${(summary.drawdown * 100).toFixed(2)}%`}
-        subValue={`Exposure: $${summary.exposure.toLocaleString()}`}
+        subValue={`익스포져: ${formatKRWCompact(summary.exposure)}`}
         color={summary.drawdown < -0.02 ? 'loss' : 'default'}
       />
       <Card
-        title="Mode"
-        value={summary.mode}
-        subValue={`Cash: $${summary.cash.toLocaleString()}`}
+        title="운영 모드"
+        value={modeLabel}
+        subValue={`현금: ${formatKRWCompact(summary.cash)}`}
         color={modeColor}
       />
     </div>
