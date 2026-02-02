@@ -57,7 +57,7 @@ export default function StrategyPnlCard({ data, loading }: Props) {
     )
   }
 
-  if (!data) {
+  if (!data || !data.strategies || data.strategies.length === 0) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
