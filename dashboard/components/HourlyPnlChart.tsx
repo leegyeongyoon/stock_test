@@ -20,7 +20,7 @@ export default function HourlyPnlChart({ data, loading }: Props) {
     )
   }
 
-  if (!data) {
+  if (!data || !data.hourly_data || data.hourly_data.length === 0) {
     return (
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <h3 className="text-lg font-semibold mb-4">시간대별 수익</h3>

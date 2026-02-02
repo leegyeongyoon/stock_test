@@ -20,7 +20,7 @@ export default function EquityCurve({ data, loading }: Props) {
     )
   }
 
-  if (!data || data.data.length === 0) {
+  if (!data || !data.data || data.data.length === 0) {
     return (
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <h3 className="text-lg font-semibold mb-4">자산 곡선</h3>

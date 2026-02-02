@@ -22,7 +22,7 @@ export default function SymbolPnlChart({ data, loading }: Props) {
     )
   }
 
-  if (!data || data.symbols.length === 0) {
+  if (!data || !data.symbols || data.symbols.length === 0) {
     return (
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <h3 className="text-lg font-semibold mb-4">종목별 수익</h3>
