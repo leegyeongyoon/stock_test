@@ -22,7 +22,10 @@ export default function SymbolPnlChart({ data, loading }: Props) {
     )
   }
 
-  if (!data || !data.symbols || data.symbols.length === 0) {
+  const symbols = data?.symbols || []
+  const totalRealized = data?.total_realized || 0
+
+  if (symbols.length === 0) {
     return (
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <h3 className="text-lg font-semibold mb-4">종목별 수익</h3>
@@ -31,14 +34,14 @@ export default function SymbolPnlChart({ data, loading }: Props) {
     )
   }
 
-  const maxPnl = Math.max(...data.symbols.map((s) => Math.abs(s.total_pnl)), 1)
+  const maxPnl = Math.max(...symbols.map((s) => Math.abs(s.total_pnl)), 1)
 
   return (
     <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
       <h3 className="text-lg font-semibold mb-4">종목별 수익</h3>
 
       <div className="space-y-3">
-        {data.symbols.slice(0, 10).map((symbol) => {
+        {symbols.slice(0, 10).map((symbol) => {
           const barWidth = (Math.abs(symbol.total_pnl) / maxPnl) * 100
           const isProfit = symbol.total_pnl >= 0
 
@@ -73,9 +76,9 @@ export default function SymbolPnlChart({ data, loading }: Props) {
       <div className="mt-4 pt-4 border-t border-slate-700 flex justify-between text-sm">
         <span className="text-slate-400">총 실현 수익</span>
         <span
-          className={data.total_realized >= 0 ? 'text-green-400' : 'text-red-400'}
+          className={totalRealized >= 0 ? 'text-green-400' : 'text-red-400'}
         >
-          {data.total_realized >= 0 ? '+' : ''}{formatKRW(data.total_realized)}
+          {totalRealized >= 0 ? '+' : ''}{formatKRW(totalRealized)}
         </span>
       </div>
     </div>

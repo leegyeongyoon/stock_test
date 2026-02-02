@@ -57,7 +57,9 @@ export default function StrategyPnlCard({ data, loading }: Props) {
     )
   }
 
-  if (!data || !data.strategies || data.strategies.length === 0) {
+  const strategies = data?.strategies || []
+
+  if (strategies.length === 0) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
@@ -68,13 +70,13 @@ export default function StrategyPnlCard({ data, loading }: Props) {
   }
 
   // Determine grid columns based on number of strategies
-  const gridCols = data.strategies.length <= 2
+  const gridCols = strategies.length <= 2
     ? 'grid-cols-1 md:grid-cols-2'
     : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
 
   return (
     <div className={`grid ${gridCols} gap-4`}>
-      {data.strategies.map((strategy) => {
+      {strategies.map((strategy) => {
         const isProfit = strategy.realized_pnl >= 0
         const strategyLabel = getStrategyLabel(strategy.strategy)
         const style = getStrategyStyle(strategy.strategy)

@@ -20,7 +20,11 @@ export default function HourlyPnlChart({ data, loading }: Props) {
     )
   }
 
-  if (!data || !data.hourly_data || data.hourly_data.length === 0) {
+  const hourlyData = data?.hourly_data || []
+  const bestHour = data?.best_hour || 0
+  const worstHour = data?.worst_hour || 0
+
+  if (hourlyData.length === 0) {
     return (
       <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
         <h3 className="text-lg font-semibold mb-4">시간대별 수익</h3>
@@ -31,18 +35,18 @@ export default function HourlyPnlChart({ data, loading }: Props) {
     )
   }
 
-  const maxPnl = Math.max(...data.hourly_data.map((h) => Math.abs(h.pnl)), 1)
+  const maxPnl = Math.max(...hourlyData.map((h) => Math.abs(h.pnl)), 1)
 
   return (
     <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
       <h3 className="text-lg font-semibold mb-4">시간대별 수익 (UTC)</h3>
 
       <div className="flex items-end gap-1 h-48">
-        {data.hourly_data.map((hourData) => {
+        {hourlyData.map((hourData) => {
           const height = (Math.abs(hourData.pnl) / maxPnl) * 100
           const isProfit = hourData.pnl >= 0
-          const isBest = hourData.hour === data.best_hour && hourData.pnl > 0
-          const isWorst = hourData.hour === data.worst_hour && hourData.pnl < 0
+          const isBest = hourData.hour === bestHour && hourData.pnl > 0
+          const isWorst = hourData.hour === worstHour && hourData.pnl < 0
 
           let barColor = isProfit ? 'bg-green-600/60' : 'bg-red-600/60'
           if (isBest) barColor = 'bg-green-500'
@@ -72,13 +76,13 @@ export default function HourlyPnlChart({ data, loading }: Props) {
         <div>
           <span className="text-slate-400">최고 시간대: </span>
           <span className="text-green-400 font-medium">
-            {data.best_hour}:00 UTC
+            {bestHour}:00 UTC
           </span>
         </div>
         <div>
           <span className="text-slate-400">최저 시간대: </span>
           <span className="text-red-400 font-medium">
-            {data.worst_hour}:00 UTC
+            {worstHour}:00 UTC
           </span>
         </div>
       </div>
