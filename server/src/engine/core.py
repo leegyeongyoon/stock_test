@@ -29,6 +29,7 @@ from src.strategies.core_safety import get_core_safety_guard
 from src.strategies.satellite import Regime, SatelliteStrategy
 from src.strategies.attack_breakout import AttackBreakoutStrategy, get_attack_strategy
 from src.strategies.pullback_strategy import PullbackStrategy, get_pullback_strategy
+from src.monitoring.slack import SlackNotifier, AlertLevel, SlackMessage
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -102,6 +103,11 @@ class TradingEngine:
 
         # Capital Profile (Growth/Preserve 2단계 시스템)
         self.capital_profile = get_capital_profile_manager()
+
+        # Slack 알림
+        self.slack_notifier = SlackNotifier()
+        if self.slack_notifier.is_enabled:
+            logger.info("Slack notifier enabled")
 
         # 상태
         self._running = False
@@ -1574,6 +1580,22 @@ class TradingEngine:
                 },
             )
 
+            # Slack 알림
+            if self.slack_notifier.is_enabled:
+                notional = filled_qty * avg_price
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+:chart_with_upwards_trend: *Pullback 매수 체결*
+> 심볼: `{symbol}`
+> 점수: {signal.score}점 (L{signal.level})
+> 수량: {filled_qty:.4f}
+> 가격: ₩{avg_price:,.0f}
+> 금액: ₩{notional:,.0f}
+> 손절가: ₩{signal.stop_loss:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO,
+                ))
+
         except Exception as e:
             logger.error("Pullback signal execution error", error=str(e))
             self.add_event(
@@ -1947,6 +1969,24 @@ class TradingEngine:
                                 avg_fill_price=result.avg_price,
                                 realized_pnl=realized_pnl,
                             )
+
+                            # Slack 알림 (청산)
+                            if self.slack_notifier.is_enabled:
+                                pnl_emoji = ":moneybag:" if realized_pnl >= 0 else ":money_with_wings:"
+                                pnl_sign = "+" if realized_pnl >= 0 else ""
+                                pnl_pct = (realized_pnl / (entry_price * result.filled_qty)) * 100 if entry_price > 0 else 0
+                                await self.slack_notifier.send(SlackMessage(
+                                    text=f"""
+{pnl_emoji} *Pullback 청산*
+> 심볼: `{symbol}`
+> 사유: {reason}
+> 수량: {result.filled_qty:.4f}
+> 진입가: ₩{entry_price:,.0f}
+> 청산가: ₩{result.avg_price:,.0f}
+> 손익: {pnl_sign}₩{realized_pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)
+                                    """.strip(),
+                                    level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
+                                ))
 
                         if action == "FULL":
                             continue  # Pullback 전량 청산 후 다음 자산으로
