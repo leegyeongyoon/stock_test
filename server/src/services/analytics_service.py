@@ -91,26 +91,19 @@ class AnalyticsService:
             if starting_equity == 10000.0 and stat.starting_equity > 0:
                 starting_equity = stat.starting_equity
 
-            # 일별 거래 수익 조회
-            daily_trade_stmt = (
-                select(func.sum(TradeModel.realized_pnl).label("pnl"))
-                .where(
-                    func.date(TradeModel.executed_at) == stat.date,
-                )
-            )
-            daily_trade_result = await self._session.execute(daily_trade_stmt)
-            daily_trade_pnl = daily_trade_result.scalar() or 0.0
+            # 일별 거래 수익은 전략별 수익 합계 사용 (실제 거래 기록)
+            daily_trade_pnl = (stat.core_pnl or 0.0) + (stat.satellite_pnl or 0.0)
 
             pnl_pct = daily_trade_pnl / stat.starting_equity if stat.starting_equity > 0 else 0
 
             daily_returns.append(
                 DailyReturn(
                     date=stat.date,
-                    pnl=daily_trade_pnl,  # 실제 거래 수익만
+                    pnl=daily_trade_pnl,  # 전략별 거래 수익만
                     pnl_pct=pnl_pct,
                     equity=stat.ending_equity,
-                    core_pnl=stat.core_pnl,
-                    satellite_pnl=stat.satellite_pnl,
+                    core_pnl=stat.core_pnl or 0.0,
+                    satellite_pnl=stat.satellite_pnl or 0.0,
                 )
             )
 
