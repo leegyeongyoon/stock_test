@@ -45,9 +45,31 @@ class AnalyticsService:
         return start_date, end_date
 
     async def get_period_returns(self, period: PeriodType) -> PeriodReturnsResponse:
-        """기간별 수익률 조회"""
+        """기간별 수익률 조회 - 실제 거래 기록 기반"""
         start_date, end_date = self._get_date_range(period)
 
+        # 1. 실제 거래에서 총 수익 계산
+        trade_stmt = (
+            select(
+                func.sum(TradeModel.realized_pnl).label("total_pnl"),
+                func.count().label("total_trades"),
+                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
+                func.sum(case((TradeModel.realized_pnl < 0, 1), else_=0)).label("losses"),
+            )
+            .where(
+                TradeModel.executed_at >= start_date,
+                TradeModel.executed_at <= end_date,
+            )
+        )
+        trade_result = await self._session.execute(trade_stmt)
+        trade_row = trade_result.one()
+
+        total_pnl = trade_row.total_pnl or 0.0
+        total_trades = trade_row.total_trades or 0
+        wins = trade_row.wins or 0
+        losses = trade_row.losses or 0
+
+        # 2. 일별 통계에서 equity 정보 (드로다운 계산용)
         stmt = (
             select(DailyStatsModel)
             .where(
@@ -61,31 +83,36 @@ class AnalyticsService:
         daily_stats = result.scalars().all()
 
         daily_returns = []
-        total_pnl = 0.0
         max_equity = 0.0
         max_drawdown = 0.0
-        wins = 0
-        losses = 0
-        starting_equity = 10000.0  # 기본값
+        starting_equity = 10000.0
 
         for stat in daily_stats:
             if starting_equity == 10000.0 and stat.starting_equity > 0:
                 starting_equity = stat.starting_equity
 
-            pnl_pct = stat.pnl / stat.starting_equity if stat.starting_equity > 0 else 0
+            # 일별 거래 수익 조회
+            daily_trade_stmt = (
+                select(func.sum(TradeModel.realized_pnl).label("pnl"))
+                .where(
+                    func.date(TradeModel.executed_at) == stat.date,
+                )
+            )
+            daily_trade_result = await self._session.execute(daily_trade_stmt)
+            daily_trade_pnl = daily_trade_result.scalar() or 0.0
+
+            pnl_pct = daily_trade_pnl / stat.starting_equity if stat.starting_equity > 0 else 0
 
             daily_returns.append(
                 DailyReturn(
                     date=stat.date,
-                    pnl=stat.pnl,
+                    pnl=daily_trade_pnl,  # 실제 거래 수익만
                     pnl_pct=pnl_pct,
                     equity=stat.ending_equity,
                     core_pnl=stat.core_pnl,
                     satellite_pnl=stat.satellite_pnl,
                 )
             )
-
-            total_pnl += stat.pnl
 
             if stat.ending_equity > max_equity:
                 max_equity = stat.ending_equity
@@ -94,11 +121,6 @@ class AnalyticsService:
             if dd < max_drawdown:
                 max_drawdown = dd
 
-            if stat.pnl > 0:
-                wins += 1
-            elif stat.pnl < 0:
-                losses += 1
-
         total_pnl_pct = total_pnl / starting_equity if starting_equity > 0 else 0
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0
 
@@ -106,7 +128,7 @@ class AnalyticsService:
             period=period,
             start_date=start_date.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d"),
-            total_pnl=total_pnl,
+            total_pnl=total_pnl,  # 실제 거래 수익만
             total_pnl_pct=total_pnl_pct,
             daily_returns=daily_returns,
             max_drawdown=max_drawdown,
@@ -301,8 +323,19 @@ class AnalyticsService:
         )
 
     async def get_equity_curve(self, period: PeriodType) -> EquityCurveResponse:
-        """자산 곡선 조회"""
+        """자산 곡선 조회 - 실제 거래 기반 수익률"""
         start_date, end_date = self._get_date_range(period)
+
+        # 실제 거래에서 총 수익 계산
+        trade_stmt = (
+            select(func.sum(TradeModel.realized_pnl).label("total_pnl"))
+            .where(
+                TradeModel.executed_at >= start_date,
+                TradeModel.executed_at <= end_date,
+            )
+        )
+        trade_result = await self._session.execute(trade_stmt)
+        total_trade_pnl = trade_result.scalar() or 0.0
 
         stmt = (
             select(EquitySnapshotModel)
@@ -333,7 +366,7 @@ class AnalyticsService:
                 EquityPoint(
                     timestamp=f"{s.date}T00:00:00",
                     equity=s.ending_equity,
-                    pnl=s.pnl,
+                    pnl=s.core_pnl + s.satellite_pnl,  # 전략별 거래 수익만
                 )
                 for s in daily_stats
             ]
@@ -342,16 +375,16 @@ class AnalyticsService:
                 EquityPoint(
                     timestamp=s.timestamp.isoformat(),
                     equity=s.equity,
-                    pnl=s.realized_pnl + s.unrealized_pnl,
+                    pnl=s.realized_pnl,  # 실현 수익만
                 )
                 for s in snapshots
             ]
 
         start_equity = data[0].equity if data else 10000.0
         end_equity = data[-1].equity if data else 10000.0
-        total_return_pct = (
-            (end_equity - start_equity) / start_equity if start_equity > 0 else 0
-        )
+
+        # 수익률은 실제 거래 기반으로 계산
+        total_return_pct = total_trade_pnl / start_equity if start_equity > 0 else 0
 
         return EquityCurveResponse(
             period=period,
