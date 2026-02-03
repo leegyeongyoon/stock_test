@@ -345,18 +345,24 @@ class TradingEngine:
 
     async def _load_initial_candles(self, symbols: list[str]) -> None:
         """초기 1분봉 데이터 로드 (SurgeDetector용)"""
+        print(f"[DEBUG] _load_initial_candles called with {len(symbols)} symbols")
         logger.info("Loading initial 1m candles for SurgeDetector...")
 
         # 상위 50개만 로드 (Rate Limit 고려)
         target_symbols = symbols[:50]
+        print(f"[DEBUG] Loading candles for {len(target_symbols)} target symbols")
 
+        loaded_count = 0
         for symbol in target_symbols:
             try:
                 await self._load_candles_for_symbol(symbol, "1", 100)
+                loaded_count += 1
             except Exception as e:
+                print(f"[DEBUG] Failed to load candles for {symbol}: {e}")
                 logger.warning(f"Failed to load 1m candles for {symbol}: {e}")
             await asyncio.sleep(0.1)  # Rate limit 방지
 
+        print(f"[DEBUG] Initial candle loading complete: {loaded_count}/{len(target_symbols)}")
         logger.info(
             "Initial 1m candles loaded",
             symbols_count=len(target_symbols),
@@ -378,6 +384,7 @@ class TradingEngine:
     ) -> None:
         """심볼별 캔들 로드 (Upbit API)"""
         if not self._is_upbit:
+            print(f"[DEBUG] Not Upbit, skipping candle load for {symbol}")
             logger.debug("Not Upbit, skipping candle load")
             return
 
@@ -385,9 +392,11 @@ class TradingEngine:
         candles = await self.exchange.get_candles(symbol, interval, limit)
 
         if not candles:
+            print(f"[DEBUG] No candles returned for {symbol} {interval}m")
             logger.debug(f"No candles returned for {symbol} {interval}m")
             return
 
+        print(f"[DEBUG] Got {len(candles)} candles for {symbol} {interval}m")
         logger.debug(f"Loaded {len(candles)} candles for {symbol} {interval}m")
 
         # CandleManager에 저장
@@ -403,7 +412,9 @@ class TradingEngine:
 
         # 저장 확인
         check = self.candle_manager.get_candles(symbol, f"{interval}m", 5)
-        logger.debug(f"After store: {symbol} {interval}m has {len(check) if check else 0} candles")
+        check_count = len(check) if check else 0
+        print(f"[DEBUG] After store: {symbol} {interval}m has {check_count} candles (stored {stored_count})")
+        logger.debug(f"After store: {symbol} {interval}m has {check_count} candles")
 
     def _convert_upbit_candle(self, upbit_candle: dict) -> dict:
         """Upbit 캔들을 CandleManager 형식으로 변환"""

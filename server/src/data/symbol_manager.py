@@ -47,6 +47,8 @@ class SymbolInfo:
     spread_bps: float = 0.0  # 스프레드 (basis points)
     last_price: float = 0.0  # 최근 가격
     funding_rate: float = 0.0  # 펀딩비
+    korean_name: str = ""  # 한글명 (Upbit)
+    english_name: str = ""  # 영문명 (Upbit)
 
     def to_dict(self) -> dict:
         return {
@@ -62,6 +64,8 @@ class SymbolInfo:
             "spread_bps": self.spread_bps,
             "last_price": self.last_price,
             "funding_rate": self.funding_rate,
+            "korean_name": self.korean_name,
+            "english_name": self.english_name,
         }
 
 
@@ -158,6 +162,10 @@ class SymbolManager:
                 ticker = tickers.get(symbol, {})
                 volume_24h = ticker.get("acc_trade_price_24h", 0)
 
+                # 한글명, 영문명 추출
+                korean_name = market.get("korean_name", "")
+                english_name = market.get("english_name", "")
+
                 # Upbit은 정밀도 정보가 제한적 - 기본값 사용
                 info = SymbolInfo(
                     symbol=symbol,
@@ -173,6 +181,8 @@ class SymbolManager:
                     spread_bps=0,  # Upbit은 스프레드 계산 생략
                     last_price=ticker.get("trade_price", 0),
                     funding_rate=0,  # Upbit은 펀딩비 없음
+                    korean_name=korean_name,
+                    english_name=english_name,
                 )
 
                 self._symbols[symbol] = info
@@ -180,6 +190,12 @@ class SymbolManager:
                 # 유동성 필터 (거래대금만)
                 if volume_24h >= self.min_volume_24h_krw:
                     self._qualified.append(symbol)
+
+            # 거래대금 순으로 정렬 (BTC, ETH가 상위에 오도록)
+            self._qualified.sort(
+                key=lambda s: self._symbols[s].volume_24h,
+                reverse=True,
+            )
 
             self._filtered_count = len(self._qualified)
             self._last_refresh = datetime.utcnow()
@@ -426,6 +442,26 @@ class SymbolManager:
         if info:
             return info.min_notional
         return MIN_NOTIONAL_KRW if self._is_upbit else MIN_NOTIONAL
+
+    def get_korean_name(self, symbol: str) -> str:
+        """심볼의 한글명"""
+        info = self._symbols.get(symbol)
+        return info.korean_name if info else ""
+
+    def get_symbol_names(self, symbol: str) -> dict:
+        """심볼의 이름 정보 (한글명, 영문명, base_asset)"""
+        info = self._symbols.get(symbol)
+        if info:
+            return {
+                "base_asset": info.base_asset,
+                "korean_name": info.korean_name,
+                "english_name": info.english_name,
+            }
+        return {
+            "base_asset": symbol.replace("KRW-", ""),
+            "korean_name": "",
+            "english_name": "",
+        }
 
     def get_stats(self) -> dict:
         """통계 정보"""

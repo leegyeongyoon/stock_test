@@ -130,6 +130,89 @@ class SurgePosition:
             self.trailing_stop = self.highest_price * 0.985
 
 
+@dataclass
+class SurgeProximityScore:
+    """급등 조건 근접도 점수 (0-100%)"""
+
+    symbol: str
+    current_price: float
+
+    # 1분 변화율 (가중치 25%)
+    change_1m_score: float = 0.0  # 0-100%
+    change_1m_value: float = 0.0  # 실제 값
+
+    # 거래량 배수 (가중치 20%)
+    volume_score: float = 0.0  # 0-100%
+    volume_ratio: float = 0.0  # 실제 배수
+    volume_target: float = 3.0  # 목표 배수
+
+    # 거래량 급증 - 직전 대비 (가중치 15%)
+    volume_spike_score: float = 0.0  # 0-100%
+    volume_spike_ratio: float = 0.0  # 실제 급증 배수 (현재/직전)
+
+    # 거래량 가속도 (가중치 10%)
+    volume_accel_score: float = 0.0  # 0-100%
+    volume_accel_ratio: float = 0.0  # 실제 가속도 (최근3분/이전3분)
+
+    # 과열 차단 (가중치 10%)
+    vol_overheat_score: float = 0.0  # 통과=100, 차단=0
+    vol_overheat_reason: str = ""
+
+    # 구조적 Anti-Chase (가중치 20%)
+    anti_chase_score: float = 0.0  # 0-100%
+    dist_breakout: float = 0.0
+    dist_atr: float = 0.0
+    entry_type: str = ""
+
+    # 종합 점수
+    total_score: float = 0.0
+
+    # 추가 정보
+    is_hot_yesterday: bool = False
+    korean_name: str = ""  # 한글명
+    english_name: str = ""  # 영문명
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "current_price": round(self.current_price, 2),
+            "korean_name": self.korean_name,
+            "english_name": self.english_name,
+            "change_1m": {
+                "score": round(self.change_1m_score, 1),
+                "value": round(self.change_1m_value, 2),
+                "target": 1.5,
+            },
+            "volume": {
+                "score": round(self.volume_score, 1),
+                "ratio": round(self.volume_ratio, 2),
+                "target": round(self.volume_target, 2),
+            },
+            "volume_spike": {
+                "score": round(self.volume_spike_score, 1),
+                "ratio": round(self.volume_spike_ratio, 2),
+                "target": 2.0,
+            },
+            "volume_accel": {
+                "score": round(self.volume_accel_score, 1),
+                "ratio": round(self.volume_accel_ratio, 2),
+                "target": 1.5,
+            },
+            "vol_overheat": {
+                "score": round(self.vol_overheat_score, 1),
+                "reason": self.vol_overheat_reason,
+            },
+            "anti_chase": {
+                "score": round(self.anti_chase_score, 1),
+                "dist_breakout": round(self.dist_breakout, 4),
+                "dist_atr": round(self.dist_atr, 2),
+                "entry_type": self.entry_type,
+            },
+            "total_score": round(self.total_score, 1),
+            "is_hot_yesterday": self.is_hot_yesterday,
+        }
+
+
 class SurgeDetector:
     """
     급등 시작 실시간 감지
@@ -519,6 +602,197 @@ class SurgeDetector:
             "hot_yesterday_policy": hot_policy.get_stats(),
             "structure_anti_chase": structure_chase.get_stats(),
         }
+
+    def calc_surge_proximity(
+        self,
+        symbol: str,
+        market_data: dict,
+    ) -> Optional[SurgeProximityScore]:
+        """
+        개별 심볼의 급등 조건 근접도 계산
+
+        Args:
+            symbol: 심볼
+            market_data: 시장 데이터
+
+        Returns:
+            SurgeProximityScore 또는 None (데이터 부족 시)
+        """
+        cm = self._candle_manager
+        current_price = market_data.get("price", 0)
+
+        if current_price <= 0:
+            return None
+
+        # === 1분봉 데이터 ===
+        candles_1m = cm.get_candles(symbol, CandleManager.INTERVAL_1M, count=10)
+        if len(candles_1m) < 5:
+            return None
+
+        # 1분 전 가격
+        price_1m_ago = candles_1m[-2].close if len(candles_1m) >= 2 else current_price
+        change_1m_pct = ((current_price - price_1m_ago) / price_1m_ago * 100) if price_1m_ago > 0 else 0
+
+        # === 거래량 계산 ===
+        volumes = [c.volume for c in candles_1m]
+        if len(volumes) >= 5:
+            recent_vol = volumes[-1]
+            avg_vol = sum(volumes[:-1]) / len(volumes[:-1])
+            volume_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
+        else:
+            recent_vol = 0
+            avg_vol = 1
+            volume_ratio = 0
+
+        # === 거래량 급증 (Spike) - 직전 1분 대비 ===
+        prev_vol = volumes[-2] if len(volumes) >= 2 else 1
+        volume_spike = recent_vol / prev_vol if prev_vol > 0 else 0
+
+        # === 거래량 가속도 (Acceleration) - 최근 3분 vs 이전 3분 ===
+        if len(volumes) >= 6:
+            recent_3_avg = sum(volumes[-3:]) / 3
+            prior_3_avg = sum(volumes[-6:-3]) / 3
+            volume_accel = recent_3_avg / prior_3_avg if prior_3_avg > 0 else 0
+        else:
+            volume_accel = 1.0  # 데이터 부족 시 중립
+
+        # === HotYesterday 체크 (목표 배수 조정) ===
+        hot_policy = get_hot_yesterday_policy()
+        signed_change_rate = market_data.get("signed_change_rate", 0)
+        adjustment = hot_policy.check(
+            symbol=symbol,
+            signed_change_rate=signed_change_rate,
+            base_volume_mult=3.0,
+            base_time_stop_min=5,
+        )
+        volume_target = adjustment.volume_mult_adjusted
+        is_hot_yesterday = adjustment.is_hot
+
+        # === VolOverheatGuard 체크 ===
+        vol_guard = get_vol_overheat_guard()
+        vol_check = vol_guard.check(
+            symbol=symbol,
+            current_volume=recent_vol,
+            avg_volume_24h=avg_vol,
+        )
+
+        # === 구조적 Anti-Chase 계산 ===
+        structure_chase = get_structure_anti_chase()
+        vwap_5m = self._calc_vwap_5m(symbol, candles_1m)
+        breakout_level = self._get_breakout_level(candles_1m)
+        atr_5m = self._calc_atr_5m(candles_1m)
+        is_retest = self._check_retest_pattern(candles_1m, breakout_level)
+
+        chase_result = structure_chase.check(
+            symbol=symbol,
+            current_price=current_price,
+            breakout_level=breakout_level,
+            vwap_5m=vwap_5m,
+            atr_5m=atr_5m,
+            is_retest=is_retest,
+        )
+
+        # === 최소 조건 필터 ===
+        # 1분 변화율이 0.1% 미만이면 급등 근접 종목이 아님
+        # (상승 모멘텀이 있어야 "근접"이라 할 수 있음)
+        MIN_CHANGE_THRESHOLD = 0.1  # 최소 0.1% 상승
+        if change_1m_pct < MIN_CHANGE_THRESHOLD:
+            return None
+
+        # === 점수 계산 ===
+        # 1. 1분 변화율 점수 (목표: 1.5%, 최대 100%)
+        change_1m_score = min(100, max(0, (change_1m_pct / 1.5) * 100))
+
+        # 2. 거래량 점수 (목표: volume_target, 최대 100%)
+        volume_score = min(100, max(0, (volume_ratio / volume_target) * 100))
+
+        # 3. 거래량 급증 점수 (목표: 2x, 최대 100%)
+        volume_spike_score = min(100, max(0, (volume_spike / 2.0) * 100))
+
+        # 4. 거래량 가속도 점수 (목표: 1.5x, 최대 100%)
+        volume_accel_score = min(100, max(0, (volume_accel / 1.5) * 100))
+
+        # 5. VolOverheat 점수 (통과=100, 차단=0)
+        vol_overheat_score = 100.0 if vol_check.passed else 0.0
+        vol_overheat_reason = "" if vol_check.passed else vol_check.reason
+
+        # 6. Anti-Chase 점수 (거리 기반)
+        # dist_atr이 작을수록 좋음 (0~2 범위를 100~0으로 변환)
+        if chase_result.passed:
+            anti_chase_score = 100.0
+        else:
+            # 차단된 경우: 거리에 따라 점수 감소
+            anti_chase_score = max(0, 100 - (chase_result.dist_atr * 40))
+
+        # === 가중 평균 계산 ===
+        # 가중치: 변화율 25%, 거래량 20%, 급증 15%, 가속 10%, 과열 10%, Anti-Chase 20%
+        total_score = (
+            change_1m_score * 0.25
+            + volume_score * 0.20
+            + volume_spike_score * 0.15
+            + volume_accel_score * 0.10
+            + vol_overheat_score * 0.10
+            + anti_chase_score * 0.20
+        )
+
+        return SurgeProximityScore(
+            symbol=symbol,
+            current_price=current_price,
+            change_1m_score=change_1m_score,
+            change_1m_value=change_1m_pct,
+            volume_score=volume_score,
+            volume_ratio=volume_ratio,
+            volume_target=volume_target,
+            volume_spike_score=volume_spike_score,
+            volume_spike_ratio=volume_spike,
+            volume_accel_score=volume_accel_score,
+            volume_accel_ratio=volume_accel,
+            vol_overheat_score=vol_overheat_score,
+            vol_overheat_reason=vol_overheat_reason,
+            anti_chase_score=anti_chase_score,
+            dist_breakout=chase_result.dist_breakout,
+            dist_atr=chase_result.dist_atr,
+            entry_type=chase_result.entry_type.value,
+            total_score=total_score,
+            is_hot_yesterday=is_hot_yesterday,
+            korean_name=market_data.get("korean_name", ""),
+            english_name=market_data.get("english_name", ""),
+        )
+
+    def get_surge_candidates(
+        self,
+        symbols: list[str],
+        market_data_map: dict[str, dict],
+        min_score: float = 70.0,
+        limit: int = 20,
+    ) -> list[SurgeProximityScore]:
+        """
+        급등 조건 근접 종목 조회
+
+        Args:
+            symbols: 스캔할 심볼 리스트
+            market_data_map: 심볼별 시장 데이터
+            min_score: 최소 점수 (기본 70%)
+            limit: 최대 반환 개수
+
+        Returns:
+            점수순으로 정렬된 SurgeProximityScore 리스트
+        """
+        candidates = []
+
+        for symbol in symbols:
+            market_data = market_data_map.get(symbol, {})
+            if not market_data:
+                continue
+
+            proximity = self.calc_surge_proximity(symbol, market_data)
+            if proximity and proximity.total_score >= min_score:
+                candidates.append(proximity)
+
+        # 점수 내림차순 정렬
+        candidates.sort(key=lambda x: x.total_score, reverse=True)
+
+        return candidates[:limit]
 
 
 # 싱글톤

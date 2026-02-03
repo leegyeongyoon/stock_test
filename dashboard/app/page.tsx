@@ -1,12 +1,23 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { api, Summary, Position, Event, CapitalProfileStatus, SurgeStatus } from '@/lib/api'
+import { api, Summary, Position, Event, CapitalProfileStatus, SurgeCandidate } from '@/lib/api'
 import ConnectionStatus from '@/components/ConnectionStatus'
 import ModeSelector from '@/components/ModeSelector'
 import SummaryCards from '@/components/SummaryCards'
 import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
+import SurgeCandidates from '@/components/SurgeCandidates'
+
+interface SurgeStatus {
+  active_signals: number
+  active_positions: number
+  signals: Array<{
+    symbol: string
+    change_1m_pct: number
+    volume_ratio: number
+  }>
+}
 
 interface SatelliteStatus {
   enabled: boolean
@@ -33,6 +44,7 @@ export default function Dashboard() {
   const [satelliteStatus, setSatelliteStatus] = useState<SatelliteStatus | null>(null)
   const [riskStatus, setRiskStatus] = useState<RiskStatus | null>(null)
   const [surgeStatus, setSurgeStatus] = useState<SurgeStatus | null>(null)
+  const [surgeCandidates, setSurgeCandidates] = useState<SurgeCandidate[]>([])
   const [capitalProfile, setCapitalProfile] = useState<CapitalProfileStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -59,10 +71,19 @@ export default function Dashboard() {
 
       // SurgeDetector 데이터 조회
       try {
-        const surgeData = await api.getSurgeStatus()
+        const surgeResponse = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'}/api/surge/status`)
+        const surgeData = await surgeResponse.json() as SurgeStatus
         setSurgeStatus(surgeData)
       } catch {
         // SurgeDetector 미설치 시 무시
+      }
+
+      // 급등 근접 종목 조회
+      try {
+        const candidatesData = await api.getSurgeCandidates(70, 20)
+        setSurgeCandidates(candidatesData.candidates)
+      } catch {
+        // API 실패 시 무시
       }
 
       // Capital Profile 조회
@@ -269,6 +290,9 @@ export default function Dashboard() {
 
       {/* Summary Cards */}
       <SummaryCards summary={summary} loading={loading} />
+
+      {/* Surge Candidates - 급등 근접 종목 */}
+      <SurgeCandidates candidates={surgeCandidates} loading={loading} />
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -1370,3 +1370,69 @@ async def get_surge_positions():
             for p in positions
         ]
     }
+
+
+@router.get("/surge/candidates")
+async def get_surge_candidates(
+    min_score: float = Query(70.0, description="최소 점수 (0-100)"),
+    limit: int = Query(20, description="최대 반환 개수"),
+):
+    """급등 조건 근접 종목 조회
+
+    각 조건별 달성률(%)을 계산하여 급등 임박 종목 반환
+
+    조건 및 가중치:
+    - 1분 변화율 (30%): 목표 1.5%
+    - 거래량 배수 (30%): 목표 3배 (전일급등주는 3.75배)
+    - VolOverheat (15%): 8배 초과 차단
+    - Anti-Chase (25%): 구조적 거리 기반
+
+    Returns:
+        candidates: 점수순으로 정렬된 근접 종목 목록
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="SurgeDetector is only available for Upbit",
+        )
+
+    from src.strategies.ignition import get_surge_detector
+    from src.data.candle_manager import get_candle_manager
+
+    surge_detector = get_surge_detector()
+    cm = get_candle_manager()
+
+    # 심볼 및 시장 데이터 수집
+    symbols = engine.symbol_manager.get_all_symbols()
+    market_data_map = {}
+
+    for symbol in symbols:
+        # 1분봉에서 현재가 가져오기
+        candles = cm.get_candles(symbol, "1m", 1)
+        if candles and len(candles) > 0:
+            price = candles[-1].close
+            if price and price > 0:
+                # 한글명/영문명 조회
+                names = engine.symbol_manager.get_symbol_names(symbol)
+                market_data_map[symbol] = {
+                    "price": price,
+                    "signed_change_rate": 0,
+                    "korean_name": names.get("korean_name", ""),
+                    "english_name": names.get("english_name", ""),
+                }
+
+    candidates = surge_detector.get_surge_candidates(
+        symbols=symbols,
+        market_data_map=market_data_map,
+        min_score=min_score,
+        limit=limit,
+    )
+
+    return {
+        "candidates": [c.to_dict() for c in candidates],
+        "total_scanned": len(symbols),
+        "filtered_count": len(candidates),
+    }

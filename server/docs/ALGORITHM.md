@@ -1,7 +1,7 @@
 # 트레이딩 알고리즘 구조 문서
 
-> **버전**: 4.3 (Surge Detector 급등 시작 감지)
-> **최종 수정**: 2026-02-02
+> **버전**: 4.4 (Surge Proximity + Structure Anti-Chase)
+> **최종 수정**: 2026-02-03
 > **목표**: 소자본(1,000만원 이하) 안정적 성장, MDD 5% 제약
 > **거래소**: Upbit (KRW 현물 전용)
 
@@ -10,725 +10,489 @@
 ## 목차
 
 1. [시스템 개요](#시스템-개요)
-2. [SurgeDetector 급등 시작 감지](#surgedetector-급등-시작-감지) ← **v4.3 핵심**
+2. [급등 근접 종목 시스템](#급등-근접-종목-시스템)
 3. [Ignition 전략](#ignition-전략)
-4. [Pullback 눌림목 매수 전략](#pullback-눌림목-매수-전략)
-5. [Pullback Score 시스템](#pullback-score-시스템)
-6. [MDD 5% 방어 시스템](#mdd-5-방어-시스템)
+4. [Structure Anti-Chase 필터](#structure-anti-chase-필터)
+5. [Pullback 눌림목 매수 전략](#pullback-눌림목-매수-전략)
+6. [MDD 방어 시스템](#mdd-방어-시스템)
 7. [리스크 관리](#리스크-관리)
-8. [실행 엔진](#실행-엔진)
-9. [설정 파라미터](#설정-파라미터)
-10. [모니터링](#모니터링)
-11. [Deprecated: Attack 전략](#deprecated-attack-전략)
+8. [설정 파라미터](#설정-파라미터)
+9. [모니터링 API](#모니터링-api)
+10. [파일 구조](#파일-구조)
+11. [변경 이력](#변경-이력)
 
 ---
 
 ## 시스템 개요
 
-### v4.3 전략 전환 배경
-
-```
-문제점 (v4.1 Attack 전략):
-- 급등 "후" 추격 매수 → 이미 상승 끝난 시점에 진입
-- 고점 물림 반복 → 손절 연속 → 자본 소진
-- RVOL, Breakout = "후행 지표" (이미 일어난 일 감지)
-
-해결책 (v4.3 SurgeDetector + Ignition):
-- 급등 "시작" 순간 포착 → 초반에 진입
-- 1분봉 기반 실시간 감지 → 추격 아닌 선제 진입
-- 이미 급등한 종목 자동 필터링 (5분 변화율 < 5%)
-```
-
-### 투자 철학 (v4.3)
+### 투자 철학
 
 ```
 "이미 급등한 주식이 아닌, 급등 시작하는 주식을 찾아라"
 
-기존 사고방식: 급등 감지 → 추격 매수 → 고점 물림
-새로운 사고방식: 급등 "시작" 감지 → 초반 진입 → 상승 수익
+기존 문제:
+- 급등 감지 후 추격 매수 → 고점 물림 → 손절 반복
+
+v4.4 해결책:
+- 6개 조건 점수화 → 급등 "근접" 종목 미리 감지
+- Structure Anti-Chase → 거리 기반 추격 방지
+- 분산 투자 (최대 10개 포지션)
 ```
 
-- **급등 시작 감지**: 1분 변화율로 급등 "시작" 순간 포착
-- **추격 매수 방지**: 5분 변화율 5% 이상이면 진입 금지
-- **거래량 확인**: 평균 대비 3배 이상 거래량 급증 확인
-- **MDD 5% 절대 수호**: 손절 -2%로 리스크 관리
-- **트레일링 스톱**: 고점 대비 -1.5%로 수익 보호
+### 전략 구성
 
-### 핵심 수치 (v4.3 vs v4.2 vs v4.1)
+| 전략 | 역할 | 포지션 배분 |
+|------|------|------------|
+| Ignition | 급등 초반 점화 포착 | 최대 50% |
+| Pullback | 눌림목 매수 (분산) | 5~10% × 10개 |
 
-| 항목 | v4.1 Attack | v4.2 Pullback | v4.3 SurgeDetector |
-|------|-------------|---------------|---------------------|
-| 전략 핵심 | 급등 추격 | 눌림목 매수 | **급등 시작 감지** |
-| 지표 유형 | 후행 (RVOL) | 선행 (호가창) | **실시간 (1분봉)** |
-| 진입 시점 | 급등 중 | 조정 후 반등 | **급등 시작 순간** |
-| 추격 방지 | 없음 | 없음 | **5분 변화율 < 5%** |
-| 최대 포지션 | 1개 | 10개 | **10개** |
-| 포지션당 배분 | 50% | 5~10% | **최대 50%** |
-| 손절 | -3% | -3% | **-2%** |
-| 익절 | 트레일링 | +5% | **1.5R / 트레일링** |
-| 타임스탑 | 45분 | 4시간 | **10분** |
+### 핵심 수치 요약
 
-### 선행 vs 후행 vs 실시간 지표
-
-```
-후행 지표 (Attack - deprecated):
-┌─────────────────────────────────────────────┐
-│ RVOL (거래량 폭발)   → 이미 급등 진행 중     │
-│ Breakout (고점 돌파) → 이미 상승 시작됨      │
-│ Close Position       → 현재 봉 위치 (과거)   │
-└─────────────────────────────────────────────┘
-         ↓
-    급등 "후" 감지 = 고점 물림
-
-선행 지표 (Pullback - v4.2):
-┌─────────────────────────────────────────────┐
-│ 호가창 불균형 (Bid > Ask) → 매수세 우위      │
-│ 축적 신호 (Accumulation)  → 세력 매집 중     │
-│ 지지선 근접               → 반등 가능 구간   │
-└─────────────────────────────────────────────┘
-         ↓
-    반등 "전" 감지 = 저점 매수
-
-실시간 지표 (SurgeDetector - v4.3):
-┌─────────────────────────────────────────────┐
-│ 1분 변화율 >= 1.5%  → 급등 "시작" 순간 포착  │
-│ 거래량 >= 평균 3배  → 진짜 급등 확인         │
-│ 5분 변화율 < 5%     → 이미 급등한 것 제외    │
-└─────────────────────────────────────────────┘
-         ↓
-    급등 "시작" 감지 = 초반 진입
-```
+| 항목 | Ignition | Pullback |
+|------|----------|----------|
+| 진입 트리거 | 1분 +1.5% | Score 55+ |
+| 거래량 요구 | 3.0x 이상 | - |
+| 과열 차단 | 8.0x 초과 | - |
+| 손절 | -2% | -3% |
+| 익절 | 1.5R (50%) | +5% (50%) |
+| 트레일링 | 고점 -1.5% | 고점 -2% |
+| 타임스톱 | 10분 | 4시간 |
+| 최대 포지션 | - | 10개 |
 
 ---
 
-## SurgeDetector 급등 시작 감지
+## 급등 근접 종목 시스템
 
-### 핵심 철학
+### 개요
 
-```
-"이미 급등한 주식을 사는 것이 아니라, 급등 시작하는 주식을 사라"
+급등 조건에 "근접"한 종목을 6개 지표로 점수화하여 모니터링하는 시스템.
+대시보드에서 실시간으로 확인 가능.
 
-기존 문제:
-- 5분, 15분 급등률 확인 → 이미 급등 완료
-- 추격 매수 → 고점 물림
+### 6개 조건 점수 체계
 
-SurgeDetector 해결책:
-- 1분봉 실시간 모니터링
-- 급등 "시작" 순간 포착 (1분 변화율 >= 1.5%)
-- 이미 급등한 종목 자동 제외 (5분 변화율 >= 5%)
-```
+| 조건 | 가중치 | 목표 | 설명 |
+|------|--------|------|------|
+| 📈 1분 상승률 | 25% | 1.5% | 급등 시작 감지 |
+| 📊 거래량 배수 | 20% | 3.0x | 평균 대비 거래량 |
+| ⚡ 거래량 급증 | 15% | 2.0x | 직전 1분 대비 급증 |
+| 🚀 거래량 가속 | 10% | 1.5x | 최근 3분 vs 이전 3분 |
+| 🌡️ 과열 체크 | 10% | 8.0x 미만 | 너무 늦은 진입 방지 |
+| 🛡️ 추격매수 방지 | 20% | ATR 0.9 이내 | 고점 추격 방지 |
 
-### 진입 조건 (3가지 필수)
-
-| 조건 | 기준 | 목적 |
-|------|------|------|
-| 1분 변화율 | >= 1.5% | 급등 "시작" 감지 |
-| 거래량 비율 | >= 평균 3배 | 진짜 급등 확인 |
-| 5분 변화율 | < 5% | **추격 방지 (핵심!)** |
+### 점수 계산 공식
 
 ```python
-def _check_surge(symbol, market_data):
-    """
-    급등 시작 감지 - 핵심 로직
+# 1분 상승률 (25%)
+change_1m_score = min(100, (change_1m_pct / 1.5) * 100)
 
-    조건 1: 1분 변화율 >= 1.5% (급등 시작)
-    조건 2: 거래량 >= 평균 3배 (거래량 확인)
-    조건 3: 5분 변화율 < 5% (추격 방지!)
-    """
-    # 조건 1: 1분 변화율 >= 1.5%
-    if change_1m_pct < 1.5:
-        return None  # 급등 시작 아님
+# 거래량 배수 (20%)
+volume_score = min(100, (volume_ratio / 3.0) * 100)
 
-    # 조건 2: 거래량 >= 평균 3배
-    if volume_ratio < 3.0:
-        return None  # 거래량 부족
+# 거래량 급증 - 직전 1분 대비 (15%)
+volume_spike = current_1m_vol / prev_1m_vol
+volume_spike_score = min(100, (volume_spike / 2.0) * 100)
 
-    # 조건 3: 5분 변화율 < 5% (핵심! 추격 방지)
-    if change_5m_pct >= 5.0:
-        return None  # 이미 급등 완료 - 진입 금지!
+# 거래량 가속 - 최근 3분 vs 이전 3분 (10%)
+volume_accel = avg(recent_3m) / avg(prior_3m)
+volume_accel_score = min(100, (volume_accel / 1.5) * 100)
 
-    return SurgeSignal(...)
+# 과열 체크 (10%) - 8배 초과 시 0점
+vol_overheat_score = 100 if vol_ratio <= 8.0 else 0
+
+# 추격매수 방지 (20%) - dist_atr 기반
+anti_chase_score = 100 if dist_atr <= 0.9 else 0
+
+# 총점 (가중 평균)
+total_score = (
+    change_1m_score * 0.25 +
+    volume_score * 0.20 +
+    volume_spike_score * 0.15 +
+    volume_accel_score * 0.10 +
+    vol_overheat_score * 0.10 +
+    anti_chase_score * 0.20
+)
 ```
 
-### 추격 방지 로직
+### 필터 조건
+
+- **최소 변화율**: 0.1% 미만 제외 (하락/횡보 종목 필터링)
+- **표시 기준**: 총점 70점 이상만 대시보드에 표시
+
+### 대시보드 UI
 
 ```
-왜 "5분 변화율 < 5%"가 핵심인가?
-
-시나리오 A (진입 O):
-- 현재: 1분 변화율 2%, 5분 변화율 3%
-- 해석: 방금 급등 시작됨, 아직 초반
-- 결과: 진입 허용 → 상승 수익
-
-시나리오 B (진입 X):
-- 현재: 1분 변화율 2%, 5분 변화율 8%
-- 해석: 이미 5분간 8% 급등, 추격 매수 구간
-- 결과: 진입 금지 → 고점 물림 방지
-
-핵심 원칙:
-"급등 시작은 잡고, 급등 중간/끝은 피한다"
-```
-
-### 청산 조건 (4가지)
-
-| 청산 유형 | 조건 | 청산 비율 | 설명 |
-|----------|------|----------|------|
-| 손절 (Stop Loss) | 진입가 -2% | 100% | 즉시 전량 청산 |
-| 익절 (Take Profit) | 목표가 도달 (1.5R) | 50% | 절반 청산, 나머지 트레일링 |
-| 트레일링 (Trailing) | 고점 -1.5% | 100% | 수익 보호 |
-| 타임스탑 (Time Stop) | 10분 경과 + 손실 | 100% | 횡보/하락 시 청산 |
-
-```python
-def check_exit(symbol, current_price):
-    """
-    청산 조건 체크 (우선순위 순서)
-    """
-    # 1. 손절 체크 (-2%)
-    if current_price <= pos.stop_loss:
-        return "STOP_LOSS", 1.0  # 전량 청산
-
-    # 2. 익절 체크 (1.5R 도달 시 50% 청산)
-    if current_price >= pos.take_profit:
-        return "TAKE_PROFIT", 0.5  # 절반 청산
-
-    # 3. 트레일링 스톱 (고점 -1.5%)
-    if pos.trailing_stop and current_price <= pos.trailing_stop:
-        return "TRAILING_STOP", 1.0  # 전량 청산
-
-    # 4. 타임스탑 (10분 경과 + 손실)
-    if elapsed > 600 and current_price < pos.entry_price:
-        return "TIME_STOP", 1.0  # 전량 청산
-
-    return None
-```
-
-### 트레일링 스톱 동작
-
-```
-진입가: 100원
-고점 갱신될 때마다 트레일링 스톱 상승:
-
-고점 102원 → 트레일링 스톱: 102 × 0.985 = 100.47원
-고점 105원 → 트레일링 스톱: 105 × 0.985 = 103.43원
-고점 110원 → 트레일링 스톱: 110 × 0.985 = 108.35원
-
-현재가가 트레일링 스톱 이하로 내려오면 청산
-→ 수익 보호하면서 추가 상승 여지 확보
-```
-
-### 포지션 사이징
-
-```python
-# AGGRESSIVE 모드 설정 (v4.3)
-max_position_pct = 0.50      # 잔고의 50%까지 사용 가능
-max_concurrent_positions = 10  # 동시 10개 포지션
-
-# 제한 제거됨:
-# - MAX_ORDER 10만원 제한 제거
-# - 잔고 전부 사용 가능
-```
-
-### SurgeSignal 데이터 구조
-
-```python
-@dataclass
-class SurgeSignal:
-    symbol: str
-    current_price: float
-    change_1m_pct: float    # 1분 변화율 (급등 시작 감지)
-    change_5m_pct: float    # 5분 변화율 (추격 방지용)
-    volume_ratio: float     # 거래량 비율 (vs 평균)
-    entry_price: float      # 진입가
-    stop_loss: float        # 손절가 (-2%)
-    take_profit_1: float    # 1차 익절가 (1.5R)
-    take_profit_2: float    # 2차 익절가 (3R)
-    signal_time: datetime   # 신호 발생 시간
-    expires_at: datetime    # 만료 시간 (60초)
+┌─────────────────────────────────────────┐
+│ 🎯 급등 근접 종목                 5개 감지 │
+├─────────────────────────────────────────┤
+│ 🏆 TOP 5 (급등 조건에 가장 근접)          │
+│                                         │
+│ ┌─────────────────────────────────────┐ │
+│ │ ① BTC 비트코인              85점   │ │
+│ │                           4/6 충족  │ │
+│ │ ₩97,500,000              +1.23%    │ │
+│ │ ✓ 상승률 1.2%  ✓ 거래량 3.5배       │ │
+│ │ ✓ 급증 2.1배   ✗ 가속 0.8배         │ │
+│ │ ✓ 과열 OK      ✓ 추격 A            │ │
+│ └─────────────────────────────────────┘ │
+└─────────────────────────────────────────┘
 ```
 
 ---
 
 ## Ignition 전략
 
-### 전략 개요
+### 전략 철학
 
 ```
 Ignition = "점화" 전략
 급등 초반 점화 순간에만 진입하는 전략
 
-구성요소:
-1. SetupEngine: 15분/1시간 봉 기반 후보 선별
-2. IgnitionEngine: 1분봉 기반 점화 감지
-3. AntiChaseGate: 과추격 방지 (ATR 2배 제한)
-4. IgnitionPositionPolicy: Profit-add only 사이징
+핵심 원리:
+1. Setup Score로 "폭발 직전" 종목 선별
+2. 1분봉 실시간 감시로 점화 순간 포착
+3. Anti-Chase 필터로 과추격 방지
 ```
 
-### Setup Score (S1~S5 패턴)
+### Setup Score (S1~S5 전조 패턴)
 
-| 패턴 | 이름 | 최대 점수 | 설명 |
+5가지 전조 패턴으로 "폭발 직전" 종목 선별 (총 100점)
+
+| 패턴 | 이름 | 최대 점수 | 기준 |
 |------|------|----------|------|
-| S1 | Volatility Contraction | 25점 | 변동성 수축 (폭발 전조) |
-| S2 | Volume Dry-up | 20점 | 거래량 감소 (세력 매집) |
-| S3 | Accumulation | 20점 | 축적 패턴 |
-| S4 | Relative Strength | 20점 | 상대 강도 |
-| S5 | Range Pressure | 15점 | 레인지 압박 |
+| S1 | 변동성 수축 | 20점 | BB Width <= 20% |
+| S2 | 거래량 건조 | 20점 | Vol <= 평균 50% |
+| S3 | 매집 구조 | 25점 | Higher Lows 3회+, Close Pos 55%+ |
+| S4 | 상대 강도 | 20점 | BTC 대비 +10% |
+| S5 | 레인지 압박 | 15점 | 상단 30% 위치, 터치 3회+ |
 
-### AntiChase Gate (과추격 방지)
+**Watchlist 진입 기준**:
+- Setup Score >= 70점 → Watchlist 추가
+- 최대 20개 종목
+- TTL: 2시간
+
+### 진입 조건 (3가지 필수)
+
+| 조건 | 기준 | 목적 |
+|------|------|------|
+| 1분 변화율 | >= 1.5% | 급등 시작 감지 |
+| 거래량 비율 | >= 3.0x | 진짜 급등 확인 |
+| Anti-Chase | Type A/B | 과추격 방지 |
+
+### VolOverheat Guard (과열 차단)
+
+```
+거래량 기반 진입 타이밍 필터:
+
+vol_ratio < 2.0x  → 초기 단계 (허용)
+vol_ratio 2.0~5.0x → 최적 구간 (적극 진입)
+vol_ratio 5.0~8.0x → 주의 구간 (신중)
+vol_ratio > 8.0x  → 과열 (차단!)
+
+점수 계산:
+vol_overheat_score = max(0, (8.0 - vol_ratio) / 6.0 * 100)
+```
+
+### 전일급등주 정책 (HotYesterdayPolicy)
+
+전일 +10% 이상 급등한 종목에 대한 강화 조건:
+
+| 항목 | 일반 종목 | 전일급등주 |
+|------|----------|-----------|
+| 거래량 요구 | 3.0x | 3.75x (+25%) |
+| 포지션 사이즈 | 100% | 60% (-40%) |
+| 타임스톱 | 5분 | 3분 (-2분) |
+
+### 청산 조건
+
+| 유형 | 조건 | 청산 비율 |
+|------|------|----------|
+| 손절 | -2% 또는 1분 저가 -0.5% | 100% |
+| 익절 | 1.5R 도달 | 50% |
+| 트레일링 | 고점 -1.5% | 100% |
+| 타임스톱 | 10분 + 손실 | 100% |
 
 ```python
-# 4가지 필터로 추격 매수 차단
-TIME_WINDOW_SEC = 120     # 점화 후 120초 이내만 진입
-MAX_ATR_MULTIPLE = 2.0    # ATR 2배 이상 급등 시 진입 금지
-MIN_SPREAD = 0.001        # 스프레드 0.1% 이상 필수
-MAX_SPREAD = 0.005        # 스프레드 0.5% 이하 필수 (유동성)
+# 트레일링 스톱 동작
+trailing_stop = highest_price * 0.985  # 고점에서 1.5% 하락 시 청산
+```
+
+---
+
+## Structure Anti-Chase 필터
+
+### 개요 (v4.2)
+
+기존 "5분 변화율 < 5%" 방식을 대체하는 거리 기반 추격 방지 시스템.
+
+### 3가지 거리 지표
+
+```python
+# 돌파 레벨 대비 거리
+dist_breakout = (current_price - breakout_level) / breakout_level
+
+# VWAP 대비 거리
+dist_vwap = (current_price - vwap) / vwap
+
+# ATR 정규화 거리 (핵심 지표)
+dist_atr = dist_vwap / (atr / current_price)
+```
+
+### Type A/B/X 분류
+
+| Type | 조건 | 의미 | 사이징 |
+|------|------|------|--------|
+| **A** | dist_atr <= 0.9 | 첫 점화 직후 | 100% |
+| **B** | 리테스트 패턴 | 되돌림 후 재진입 | 70% |
+| **X** | dist_atr > 0.9 | 과추격 | 차단 |
+
+### Type A (첫 점화) 조건
+
+```python
+# dist_atr 0.9 이하 = 아직 VWAP에서 멀리 안 감
+if dist_atr <= 0.9:
+    entry_type = "A"
+    position_mult = 1.0
+```
+
+### Type B (리테스트) 조건
+
+```python
+# VWAP 근처 (±0.3*atr_pct) 또는 돌파레벨 근처 (±0.25*atr_pct)
+if abs(dist_vwap) <= 0.3 * atr_pct:
+    entry_type = "B"
+    position_mult = 0.7  # 70% 사이징
+```
+
+### Type X (차단) 조건
+
+```python
+# 이미 너무 멀리 감
+if dist_atr > 0.9:
+    entry_type = "X"
+    return None  # 진입 차단
 ```
 
 ---
 
 ## Pullback 눌림목 매수 전략
 
-### 전략 핵심 구조
+### 전략 철학
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                 Pullback 눌림목 매수 전략                    │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐ │
-│   │  Pre-filter  │───►│  Pullback    │───►│  Gate Check  │ │
-│   │  (거래대금)  │    │  Score 계산  │    │  + Execution │ │
-│   └──────────────┘    └──────────────┘    └──────────────┘ │
-│          │                   │                    │        │
-│          ▼                   ▼                    ▼        │
-│   거래대금 1억+       55점+ (L1)          포지션 10개 미만  │
-│   변화율 0.5~15%      70점+ (L2)          DD 5% 미만       │
-│                       85점+ (L3)          NORMAL 모드      │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Position Management                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐ │
-│   │  Stop Loss   │    │  Take Profit │    │  Trailing    │ │
-│   │    -3%       │    │    +5%       │    │  +3% → -2%   │ │
-│   └──────────────┘    └──────────────┘    └──────────────┘ │
-│                                                             │
-│   ┌──────────────┐                                         │
-│   │  Time Stop   │  4시간 경과 시 강제 청산                 │
-│   │   4시간      │                                         │
-│   └──────────────┘                                         │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+"급등을 쫓지 말고, 급등 후 눌림을 사라"
+
+1. 최근 급등한 종목이
+2. 적절히 조정 받고
+3. 지지선 근처에서
+4. 매수세가 축적되면
+5. 분할 매수
 ```
 
-### 진입 조건 (Pullback Signal)
+### 진입 조건
 
 | 조건 | 기준 | 설명 |
 |------|------|------|
-| Pullback Score | ≥ 55점 (L1) | 눌림목 점수 시스템 |
-| 최근 급등 이력 | 24h 변동 8%+ | 급등 후 조정 필수 |
-| 눌림 깊이 | 고점 대비 -3~8% | 적절한 조정 |
-| 지지선 근접 | VWAP/SMA/24h저점 근처 | 반등 예상 구간 |
-| 축적 신호 | Bid > Ask | 매수세 우위 (선행!) |
-| 포지션 수 | < 10개 | 분산 투자 |
-| 운영 모드 | NORMAL | SAFE/HALT 시 진입 금지 |
+| 최근 급등 | 24h 변동 5%+ | 급등 이력 필수 |
+| 눌림 깊이 | 고점 -3~10% | 적절한 조정 |
+| 지지선 | VWAP/SMA 근처 | 반등 예상 구간 |
+| 축적 신호 | Bid > Ask | 매수세 우위 |
+| 반등 조짐 | 양봉/안정화 | 확인 신호 |
 
-### 포지션 배분 (레벨별 차등)
+### Pullback Score (5개 컴포넌트)
 
-```python
-# Pullback 레벨별 배분
-PULLBACK_ALLOC_L1 = 0.05  # 5% (기본 시그널)
-PULLBACK_ALLOC_L2 = 0.08  # 8% (강한 시그널)
-PULLBACK_ALLOC_L3 = 0.10  # 10% (매우 강한 시그널)
+| 컴포넌트 | 최대점 | 세부 기준 |
+|---------|--------|----------|
+| **Recent Surge** | 20 | 24h 범위 15%=12pt, 전일 +10%=8pt |
+| **Pullback Depth** | 25 | 3~5% 눌림=25pt (이상적) |
+| **Support Level** | 20 | VWAP ±1%=8pt, SMA20 ±1%=7pt |
+| **Accumulation** | 20 | Bid/Ask 2배=12pt, RVOL<0.8=5pt |
+| **Reversal Sign** | 15 | 안정화=6pt, 양봉 2개=4pt |
 
-# 계산 예시 (계좌 50만원 기준)
-# L1 시그널: 50만원 × 5% = 25,000원 매수
-# L2 시그널: 50만원 × 8% = 40,000원 매수
-# L3 시그널: 50만원 × 10% = 50,000원 매수
+### Level별 배분
 
-# 최대 10개 포지션 = 최대 노출 50~100%
-```
+| Level | 점수 | 배분 | 모드 제한 |
+|-------|------|------|----------|
+| L3 | >= 85 | 10% | SAFE 이상 |
+| L2 | 70~84 | 8% | NORMAL 이상 |
+| L1 | 55~69 | 5% | AGGRESSIVE만 |
+| L0 | < 55 | - | 진입 불가 |
 
 ### 청산 조건
 
-| 조건 | 기준 | 설명 |
-|------|------|------|
-| 손절 (Stop Loss) | -3% | 진입가 대비 -3% 하락 시 |
-| 익절 (Take Profit) | +5% | 진입가 대비 +5% 상승 시 |
-| 트레일링 (Trailing) | +3% 후 -2% | 고점 대비 -2% 하락 시 |
-| 타임스탑 (Time Stop) | 4시간 | 진입 후 4시간 경과 시 |
+| 유형 | 조건 | 청산 비율 |
+|------|------|----------|
+| 손절 | -3% | 100% |
+| 익절 | +5% | 50% |
+| 트레일링 발동 | +3% | 활성화 |
+| 트레일링 스톱 | 고점 -2% | 100% |
+| 타임스톱 | 4시간 | 100% |
 
-### 청산 우선순위
+### 포지션 관리
 
-```
-1. 손절 (-3%)     → 즉시 청산 (리스크 관리)
-2. 트레일링       → 수익 보호 (고점 대비 -2%)
-3. 익절 (+5%)     → 목표 달성
-4. 타임스탑 (4h)  → 횡보 방지
+```python
+max_positions = 10       # 최대 동시 포지션
+cooldown_min = 60        # 동일 종목 재진입 쿨다운
 ```
 
 ---
 
-## Pullback Score 시스템
+## MDD 방어 시스템
 
-### Score 구성요소 (선행 지표 중심)
+### DD 6-Tier 시스템
 
-| 구성요소 | 최대 점수 | 유형 | 설명 |
-|----------|----------|------|------|
-| Recent Surge (급등 이력) | 20점 | 필터 | 최근 24h 변동폭 8%+ |
-| Pullback Depth (눌림 깊이) | 25점 | 핵심 | 고점 대비 -3~8% 조정 |
-| Support Level (지지선) | 20점 | 핵심 | VWAP/SMA/24h저점 근접 |
-| **Accumulation (축적 신호)** | 20점 | **선행** | **Bid > Ask (호가창)** |
-| Reversal Sign (반등 조짐) | 15점 | 확인 | 양봉, 거래량 증가 |
+| Tier | DD 범위 | 배수 | 모드 | 주요 조치 |
+|------|---------|------|------|----------|
+| 1 | 0~1% | 1.0x | 정상 | 전체 운영 |
+| 2 | 1~2% | 0.8x | 주의 | 감시 강화 |
+| 3 | 2~3.5% | 0.6x | SAFE | L3 진입 금지 |
+| 4 | 3.5~4.5% | 0.3x | Soft DD | Satellite 신규 OFF |
+| 5 | 4.5~5% | 0.1x | 위험 | 헤지 준비 |
+| 6 | >= 5% | 0.0x | Hard DD | 분할청산 개시 |
 
-**총점: 100점**
+### 일손실 기반 모드 전환
 
-### 핵심 선행 지표: 호가창 불균형
+| 조건 | 모드 전환 | 조치 |
+|------|----------|------|
+| 일손실 >= -1.0% | SAFE | 리스크 감소 |
+| 일손실 >= -1.5% | HALT | 신규진입 금지 |
+| 주간손실 >= -5% | Satellite OFF | Attack/Core만 |
 
-```python
-def calc_accumulation_signal(bid_volume, ask_volume):
-    """
-    핵심 선행 지표: 호가창 매수/매도 비율
-
-    bid_volume > ask_volume → 매수세 우위 → 상승 예상
-    """
-    if ask_volume == 0:
-        return 0
-
-    bid_ask_ratio = bid_volume / ask_volume
-
-    # Ratio별 점수
-    if bid_ask_ratio >= 2.0:
-        return 20  # 매수세 압도적 우위
-    elif bid_ask_ratio >= 1.5:
-        return 15  # 매수세 강함
-    elif bid_ask_ratio >= 1.2:
-        return 10  # 매수세 소폭 우위
-    else:
-        return 0   # 매수세 부족
-```
-
-### Score Level 임계값
-
-```python
-PULLBACK_SCORE_L1 = 55   # 기본 진입 (5% 배분)
-PULLBACK_SCORE_L2 = 70   # 강한 신호 (8% 배분)
-PULLBACK_SCORE_L3 = 85   # 매우 강한 신호 (10% 배분)
-```
-
-### Score 계산 예시
+### Hard DD (>= 5%) 분할청산
 
 ```
-KRW-ETH 눌림목 분석:
-
-Recent Surge:     15점 (24h 변동폭 7.5%)
-Pullback Depth:   20점 (고점 대비 -4.2% 조정)
-Support Level:    15점 (VWAP 근접)
-Accumulation:     15점 (Bid/Ask = 1.6)
-Reversal Sign:    10점 (양봉 형성)
-─────────────────────────────────────
-Total Score:      75점 → L2 진입 (8% 배분)
-```
-
-### Pre-filtering (Rate Limit 방지)
-
-```python
-def prefilter_symbols_for_pullback(market_data):
-    """
-    호가창 조회 전 Pre-filtering (API 호출 최소화)
-
-    조건:
-    - 거래대금 > 1억 KRW
-    - 변화율 0.5% ~ 15% (너무 횡보/급등 제외)
-    - 최대 20개 심볼로 제한
-    """
-    candidates = []
-    for symbol, data in market_data.items():
-        volume = data.get("volume_24h", 0)
-        change = abs(data.get("price_change_pct", 0))
-
-        if volume > 100_000_000 and 0.5 < change < 15.0:
-            candidates.append(symbol)
-
-    return candidates[:20]  # Rate Limit 방지
-```
-
----
-
-## MDD 5% 방어 시스템
-
-### 우선순위 체인
-
-```
-1. SYSTEM SAFETY     → 지연/실패/연결 상태
-2. TAIL RISK         → DD / 일손실 / 급변장
-3. MARKET REGIME     → BTC 기반 risk-on/off
-4. POSITION STATE    → 현재 포지션 상태
-5. SIGNAL ENGINE     → Pullback 진입 신호
-
-원칙: 신호가 아무리 좋아도 1~3에서 위험이면 절대 진입 금지
-```
-
-### DD 단계별 대응
-
-| DD 범위 | 상태 | 사이징 | Pullback |
-|---------|------|--------|----------|
-| 0~2% | 정상 | **100%** | 활성화 |
-| 2~3.5% | 주의 | **70%** | 활성화 (신중) |
-| 3.5~5% | 경계 | **30%** | **신규진입 금지** |
-| ≥5% | HALT | **0%** | **전량 청산** |
-
-### 일손실 제한
-
-```python
-DAILY_LOSS_LIMIT_SAFE = -0.015  # -1.5% → SAFE 모드
-DAILY_LOSS_LIMIT_HALT = -0.030  # -3.0% → HALT 모드
+Phase 1: 손실 포지션 50% 축소
+Phase 2: 헤지 추가 (선택적)
+Phase 3: DD >= 6% 시 전량 청산
 ```
 
 ---
 
 ## 리스크 관리
 
-### Pullback 리스크 계산
+### 단일 포지션 최대 손실
 
 ```python
-# 단일 포지션 최대 손실 (L1 기준)
-def max_pullback_loss(equity, allocation, stop_pct):
-    """
-    equity = 500,000 (50만원)
-    allocation = 0.05 (5%)
-    stop_pct = 0.03 (-3%)
+# Ignition (50% 배분, -2% 손절)
+max_loss_ignition = 50% × 2% = 1.0%
 
-    position_size = 500,000 × 0.05 = 25,000원
-    max_loss = 25,000 × 0.03 = 750원
-    loss_pct = 750 / 500,000 = 0.15%
-    """
-    return equity * allocation * stop_pct / equity
+# Pullback L1 (5% 배분, -3% 손절)
+max_loss_pullback_l1 = 5% × 3% = 0.15%
 
-# 최악의 시나리오: 10개 포지션 전부 손절
-# 평균 배분 7% × 10개 × -3% = -2.1% < MDD 5% ✓
+# 최악 시나리오: Pullback 10개 전부 손절
+max_loss_pullback_all = 10 × 7% × 3% = 2.1%
 ```
 
-### Attack vs Pullback 리스크 비교
+### 리스크 비교
 
-| 항목 | Attack (v4.1) | Pullback (v4.2) |
-|------|---------------|-----------------|
-| 단일 손실 | 50% × -3% = **-1.5%** | 5% × -3% = **-0.15%** |
-| 최대 손실 (연속) | 2연패 = **-3%** | 10연패 = **-2.1%** |
-| 분산 효과 | 없음 (단일 포지션) | 있음 (최대 10개) |
-| 리스크 특성 | 집중 (고위험) | 분산 (저위험) |
-
----
-
-## 실행 엔진
-
-### 주문 흐름
-
-```
-Pullback Signal (Score 55+)
-        │
-        ▼
-┌─────────────────────┐
-│   Gate Check        │
-│   (10포지션 미만)   │
-└─────────────────────┘
-        │ Pass
-        ▼
-┌─────────────────────┐
-│   Position Sizing   │
-│   Equity × 5~10%    │
-└─────────────────────┘
-        │
-        ▼
-┌─────────────────────┐
-│   Market Order      │
-│   MIN: 10,000 KRW   │
-│   MAX: 100,000 KRW  │
-└─────────────────────┘
-        │
-        ▼
-┌─────────────────────┐
-│   Position Tracking │
-│   Entry Price 기록  │
-└─────────────────────┘
-        │
-        ▼
-    Position Active
-```
-
-### 호가창 캐싱 (Rate Limit 방지)
-
-```python
-# 호가창 캐시 (30초 TTL)
-_orderbook_cache: dict[str, tuple[dict, float]] = {}
-_orderbook_cache_ttl: float = 30.0
-
-async def get_orderbook_cached(symbol: str):
-    """캐시된 호가창 조회"""
-    now = time.time()
-
-    if symbol in _orderbook_cache:
-        data, cached_time = _orderbook_cache[symbol]
-        if now - cached_time < _orderbook_cache_ttl:
-            return data  # 캐시 히트
-
-    # 캐시 미스 → API 호출
-    orderbook = await exchange.get_orderbook(symbol)
-    _orderbook_cache[symbol] = (orderbook, now)
-    return orderbook
-```
+| 항목 | Ignition | Pullback |
+|------|----------|----------|
+| 단일 손실 | 최대 1.0% | 0.15~0.3% |
+| 집중도 | 높음 | 낮음 (분산) |
+| 연속 손실 위험 | 중간 | 낮음 |
 
 ---
 
 ## 설정 파라미터
 
-### 환경 변수 (.env) - v4.2
+### 환경 변수 (.env)
 
 ```bash
-# ===== 거래소 선택 =====
+# ===== 거래소 =====
 EXCHANGE_TYPE=upbit
-
-# ===== Upbit API =====
-UPBIT_ACCESS_KEY=your_access_key
-UPBIT_SECRET_KEY=your_secret_key
+UPBIT_ACCESS_KEY=your_key
+UPBIT_SECRET_KEY=your_secret
 
 # ===== 운영 모드 =====
 ENABLE_LIVE_TRADING=false
 
-# ===== Risk 파라미터 =====
-DAILY_LOSS_LIMIT_SAFE=-0.015
-DAILY_LOSS_LIMIT_HALT=-0.030
-
-# ===== Attack Module (deprecated - OFF) =====
-ATTACK_MODE=OFF
-
-# ===== Ignition 전략 설정 (급등 초반 점화) =====
+# ===== Ignition 설정 =====
 IGNITION_MODE=NORMAL
+IGNITION_CHANGE_1M_MIN=1.5
+IGNITION_VOLUME_RATIO_MIN=3.0
+IGNITION_VOL_OVERHEAT_MAX=8.0
+IGNITION_STOP_LOSS_PCT=-0.02
+IGNITION_TRAIL_PCT=-0.015
+IGNITION_TIME_STOP_MIN=10
 
-# ===== Pullback 전략 설정 (눌림목 매수) =====
+# ===== Pullback 설정 =====
 PULLBACK_MODE=NORMAL
-
-# Pullback Score 임계값
 PULLBACK_SCORE_L1=55
 PULLBACK_SCORE_L2=70
 PULLBACK_SCORE_L3=85
-
-# Pullback 배분 (레벨별)
 PULLBACK_ALLOC_L1=0.05
 PULLBACK_ALLOC_L2=0.08
 PULLBACK_ALLOC_L3=0.10
-
-# Pullback 포지션 관리
 PULLBACK_MAX_POSITIONS=10
 PULLBACK_STOP_LOSS_PCT=-0.03
 PULLBACK_TAKE_PROFIT_PCT=0.05
-PULLBACK_TRAILING_TRIGGER_PCT=0.03
-PULLBACK_TRAILING_STOP_PCT=0.02
 PULLBACK_TIME_STOP_HOURS=4
-PULLBACK_COOLDOWN_MIN=60
+
+# ===== Risk 설정 =====
+DAILY_LOSS_LIMIT_SAFE=-0.01
+DAILY_LOSS_LIMIT_HALT=-0.015
 ```
+
+### 주요 임계값 표
+
+| 파라미터 | 값 | 설명 |
+|---------|-----|------|
+| `change_1m_min` | 1.5% | 급등 시작 기준 |
+| `volume_ratio_min` | 3.0x | 거래량 배수 기준 |
+| `volume_spike_target` | 2.0x | 직전 대비 급증 목표 |
+| `volume_accel_target` | 1.5x | 가속도 목표 |
+| `vol_overheat_max` | 8.0x | 과열 차단 기준 |
+| `dist_atr_max` | 0.9 | 추격 차단 기준 |
+| `setup_score_min` | 70 | Watchlist 진입 |
+| `pullback_score_l1` | 55 | Pullback L1 |
 
 ---
 
-## 모니터링
+## 모니터링 API
 
-### API 엔드포인트
+### 엔드포인트 목록
 
 ```bash
 # 헬스 체크
-curl http://localhost:8000/api/health
+GET /api/health
 
-# 요약 정보 (잔고, PnL, 모드)
-curl http://localhost:8000/api/summary
+# 요약 정보
+GET /api/summary
 
 # 포지션 조회
-curl http://localhost:8000/api/positions
+GET /api/positions
+
+# 급등 근접 종목
+GET /api/surge/candidates?min_score=70&limit=20
 
 # Pullback 상태
-curl http://localhost:8000/api/pullback/status
+GET /api/pullback/status
 
 # Pullback Score 조회
-curl http://localhost:8000/api/pullback/score/KRW-BTC
-
-# Pullback 포지션
-curl http://localhost:8000/api/pullback/positions
+GET /api/pullback/score/{symbol}
 ```
 
-### Pullback 상태 응답 예시
+### 급등 근접 종목 응답 예시
 
 ```json
 {
-  "enabled": true,
-  "mode": "NORMAL",
-  "min_level": 2,
-  "max_positions": 10,
-  "active_positions": 2,
-  "pending_signals": 3,
-  "positions": {
-    "KRW-ETH": {
-      "entry_price": 4500000,
-      "quantity": 0.01,
-      "highest_price": 4650000
+  "candidates": [
+    {
+      "symbol": "KRW-BTC",
+      "current_price": 97500000,
+      "korean_name": "비트코인",
+      "change_1m": {"score": 80, "value": 1.2, "target": 1.5},
+      "volume": {"score": 100, "ratio": 3.5, "target": 3.0},
+      "volume_spike": {"score": 100, "ratio": 2.1, "target": 2.0},
+      "volume_accel": {"score": 53, "ratio": 0.8, "target": 1.5},
+      "vol_overheat": {"score": 100, "reason": ""},
+      "anti_chase": {"score": 100, "entry_type": "A", "dist_atr": 0.53},
+      "total_score": 85,
+      "is_hot_yesterday": false
     }
-  },
-  "signals": {}
-}
-```
-
-### Pullback Score 응답 예시
-
-```json
-{
-  "symbol": "KRW-ETH",
-  "total_score": 75,
-  "level": 2,
-  "target_allocation": 0.08,
-  "entry_price_target": 4480000,
-  "stop_loss_price": 4345600,
-  "components": [
-    {"name": "Recent Surge", "score": 15, "max_score": 20},
-    {"name": "Pullback Depth", "score": 20, "max_score": 25},
-    {"name": "Support Level", "score": 15, "max_score": 20},
-    {"name": "Accumulation Signal", "score": 15, "max_score": 20},
-    {"name": "Reversal Sign", "score": 10, "max_score": 15}
   ],
-  "timestamp": "2026-02-02T04:30:00"
+  "total_scanned": 236,
+  "filtered_count": 5
 }
-```
-
----
-
-## Deprecated: Attack 전략
-
-> **경고**: Attack 전략은 v4.2부터 deprecated 되었습니다.
-> 이유: 후행 지표(RVOL, Breakout) 기반으로 급등 "후" 추격 매수 → 고점 물림 반복
-
-### Attack 비활성화 이유
-
-```
-Attack 전략의 근본적 문제:
-
-1. 후행 지표 의존
-   - RVOL: 거래량 폭발 = 이미 급등 진행 중
-   - Breakout: 고점 돌파 = 이미 상승 시작됨
-
-2. 진입 타이밍 문제
-   - "급등 감지" 시점 = 이미 늦음
-   - 세력은 미리 매집 완료, 개미만 추격 매수
-
-3. 결과
-   - 고점 물림 → 손절 → 자본 소진
-   - "왜 사면 떨어지지?" 현상
-```
-
-### Attack 설정 (OFF 권장)
-
-```bash
-# Attack 비활성화
-ATTACK_MODE=OFF
 ```
 
 ---
@@ -736,44 +500,40 @@ ATTACK_MODE=OFF
 ## 파일 구조
 
 ```
-src/
-├── config.py                 # 전역 설정
+server/src/
+├── config.py                    # 전역 설정
 ├── api/
-│   └── routes.py             # API 라우트 (Pullback, Ignition 포함)
+│   └── routes.py                # API 라우트
 │
 ├── strategies/
-│   ├── ignition/             # v4.3 Ignition 전략 (급등 시작 감지)
-│   │   ├── __init__.py       # 모듈 초기화
-│   │   ├── surge_detector.py # 급등 시작 실시간 감지 (1분봉)
-│   │   ├── setup_score.py    # Setup Score 계산 (S1~S5)
-│   │   ├── setup_engine.py   # Watchlist 관리
-│   │   ├── ignition_engine.py # 점화 감지
-│   │   ├── anti_chase_gate.py # 과추격 방지 필터
-│   │   ├── ignition_position_policy.py # Profit-add only
-│   │   └── ignition_strategy.py # 통합 전략 클래스
+│   ├── ignition/                # Ignition 전략
+│   │   ├── surge_detector.py    # 급등 근접 점수 계산
+│   │   ├── setup_score.py       # Setup Score (S1~S5)
+│   │   ├── setup_engine.py      # Watchlist 관리
+│   │   ├── ignition_engine.py   # 점화 감지
+│   │   ├── ignition_strategy.py # 통합 전략
+│   │   └── filters/
+│   │       ├── structure_anti_chase.py  # Type A/B/X
+│   │       ├── vol_overheat_guard.py    # 과열 차단
+│   │       └── hot_yesterday_policy.py  # 전일급등주
 │   │
-│   ├── pullback_score.py     # Pullback Score 계산 (v4.2)
-│   ├── pullback_strategy.py  # Pullback 전략 (v4.2)
-│   ├── attack_breakout.py    # Attack 전략 (deprecated)
-│   └── satellite.py          # Satellite (비활성화)
+│   ├── pullback_strategy.py     # Pullback 전략
+│   └── pullback_score.py        # Pullback Score 계산
 │
 ├── risk/
-│   ├── risk_overlay.py       # 리스크 오버레이
-│   ├── risk_engine.py        # 리스크 엔진
-│   └── attack_gate.py        # Attack Gate 관리
+│   ├── risk_overlay.py          # 리스크 오버레이
+│   ├── risk_engine.py           # DD 6-Tier 시스템
+│   └── config.py                # 리스크 설정
 │
 ├── engine/
-│   └── core.py               # 트레이딩 엔진 (Surge + Ignition + Pullback)
+│   └── core.py                  # 트레이딩 엔진
 │
 ├── exchange/
-│   └── upbit.py              # Upbit 거래소 (Rate Limit 관리)
-│
-├── models/
-│   ├── schemas.py            # Pydantic 스키마
-│   └── user_mode.py          # 사용자 모드 설정
+│   └── upbit.py                 # Upbit 거래소
 │
 └── data/
-    └── candle_manager.py     # 캔들 데이터 관리 (1분/5분봉)
+    ├── candle_manager.py        # 캔들 데이터
+    └── symbol_manager.py        # 종목 정보 (한글명)
 ```
 
 ---
@@ -782,25 +542,22 @@ src/
 
 | 버전 | 날짜 | 변경 내용 |
 |------|------|----------|
-| **4.3** | **2026-02-02** | **SurgeDetector 급등 시작 감지 도입** |
-| | | - 1분봉 기반 실시간 급등 시작 감지 |
-| | | - **추격 방지 핵심: 5분 변화율 < 5%** |
-| | | - 거래량 급증 확인 (평균 3배 이상) |
-| | | - 트레일링 스톱 (고점 -1.5%) |
-| | | - 타임스탑 (10분 경과 + 손실) |
-| | | - AGGRESSIVE 모드 잔고 50% 사용 가능 |
-| | | - MAX_ORDER 제한 제거 (전액 매수 가능) |
-| | | - Ignition 전략 통합 (Setup + AntiChase) |
-| 4.2 | 2026-02-02 | Pullback 눌림목 매수 전략 도입 |
-| | | - Attack 전략 deprecated (고점 추격 문제) |
-| | | - 선행 지표 도입 (호가창 불균형, 축적 신호) |
-| | | - Pullback Score 시스템 (5개 컴포넌트) |
-| | | - 분산 투자 (최대 10개 포지션) |
-| | | - Pre-filtering + 호가창 캐싱 (Rate Limit 방지) |
-| 4.1 | 2026-02-02 | Attack 50% 단일 포지션 전략 |
+| **4.4** | **2026-02-03** | **Surge Proximity 6개 조건 체계** |
+| | | - 거래량 급증 (Spike) 지표 추가 |
+| | | - 거래량 가속 (Accel) 지표 추가 |
+| | | - 가중치 재조정 |
+| | | - 대시보드 UI 한글화 및 개선 |
+| | | - 조건별 충족/미충족 표시 |
+| 4.3 | 2026-02-02 | Structure Anti-Chase 도입 |
+| | | - Type A/B/X 분류 체계 |
+| | | - dist_atr 거리 기반 추격 방지 |
+| | | - VolOverheat Guard |
+| 4.2 | 2026-02-02 | Pullback 전략 도입 |
+| | | - 5개 Score 컴포넌트 |
+| | | - 분산 투자 (최대 10개) |
+| 4.1 | 2026-02-02 | Ignition 전략 기본 구조 |
 | 4.0 | 2026-02-02 | Upbit 거래소 전환 |
-| 3.1 | 2026-01-30 | MDD 5% 방어 최적화 |
-| 3.0 | 2026-01-30 | MDD 5% 방어 시스템 강화 |
+| 3.x | 2026-01-30 | MDD 5% 방어 시스템 |
 
 ---
 
@@ -808,36 +565,28 @@ src/
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│       v4.3 SurgeDetector 급등 시작 감지 전략 요약        │
+│            v4.4 트레이딩 시스템 요약                      │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│  핵심 원리: "이미 급등한 것이 아닌, 급등 시작을 잡아라"   │
-│                                                         │
-│  진입 조건 (3가지 필수):                                 │
+│  급등 근접 조건 (6개):                                   │
 │  ┌─────────────────────────────────────────────┐        │
-│  │ 1. 1분 변화율 >= 1.5%  (급등 시작 감지)      │        │
-│  │ 2. 거래량 >= 평균 3배  (진짜 급등 확인)      │        │
-│  │ 3. 5분 변화율 < 5%     (추격 방지!)         │        │
+│  │ 📈 1분 상승률   25%   >= 1.5%               │        │
+│  │ 📊 거래량 배수  20%   >= 3.0x               │        │
+│  │ ⚡ 거래량 급증  15%   >= 2.0x (직전 대비)    │        │
+│  │ 🚀 거래량 가속  10%   >= 1.5x (3분 평균)    │        │
+│  │ 🌡️ 과열 체크    10%   <= 8.0x              │        │
+│  │ 🛡️ 추격 방지    20%   dist_atr <= 0.9      │        │
 │  └─────────────────────────────────────────────┘        │
 │                                                         │
-│  청산 조건:                                             │
-│  - 손절: -2% (즉시 전량 청산)                           │
-│  - 익절: 1.5R 도달 시 50% 청산                          │
-│  - 트레일링: 고점 -1.5% (수익 보호)                     │
-│  - 타임스탑: 10분 경과 + 손실 시 청산                   │
+│  Anti-Chase Type:                                       │
+│  - Type A: 첫 점화 (100% 사이징)                        │
+│  - Type B: 리테스트 (70% 사이징)                        │
+│  - Type X: 차단 (진입 금지)                             │
 │                                                         │
-│  포지션 관리:                                           │
-│  - 최대 10개 동시 포지션                                │
-│  - 잔고 50%까지 사용 가능 (AGGRESSIVE)                  │
-│  - MAX_ORDER 제한 없음                                  │
-│                                                         │
-│  핵심 차별점 (vs Attack):                               │
-│  ┌─────────────────────────────────────────────┐        │
-│  │ Attack: 급등 "후" 추격 → 고점 물림          │        │
-│  │ Surge:  급등 "시작" 감지 → 초반 진입         │        │
-│  │                                             │        │
-│  │ 5분 변화율 < 5% = 이미 급등한 건 안 산다!   │        │
-│  └─────────────────────────────────────────────┘        │
+│  DD 방어:                                               │
+│  - 0~2%: 정상 운영                                      │
+│  - 2~5%: 단계적 축소                                    │
+│  - 5%+: 신규진입 금지, 분할청산                          │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
 ```
