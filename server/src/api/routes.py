@@ -448,6 +448,23 @@ async def get_satellite_status():
     """Satellite 전략 상세 상태 조회 (디버그용)"""
     engine = get_engine()
     sat = engine.satellite_strategy
+
+    # 현재가로 수익률 계산
+    active_positions_detail = {}
+    for sym, pos in sat._active_positions.items():
+        market_data = engine._market_data.get(sym, {})
+        current_price = market_data.get("price", pos.entry_price)
+        pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+
+        active_positions_detail[sym] = {
+            "entry_price": pos.entry_price,
+            "current_price": current_price,
+            "quantity": pos.quantity,
+            "pnl_pct": f"{pnl_pct:.2%}",
+            "highest_price": pos.highest_price,
+            "trailing_active": pos.trailing_active,
+        }
+
     return {
         "enabled": sat._enabled,
         "long_only_mode": sat._long_only_mode,
@@ -465,7 +482,8 @@ async def get_satellite_status():
             }
             for sym, sig in sat._pending_signals.items()
         },
-        "active_positions": len(sat._active_positions),
+        "active_positions_count": len(sat._active_positions),
+        "active_positions": active_positions_detail,
     }
 
 

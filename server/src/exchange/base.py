@@ -43,6 +43,7 @@ class BalanceInfo:
     free: float
     locked: float
     total: float
+    avg_buy_price: float = 0.0  # 평균 매수가 (Upbit)
 
 
 @dataclass

@@ -222,6 +222,9 @@ class TradingEngine:
         # 초기 1분봉 데이터 로드 (SurgeDetector용)
         await self._load_initial_candles(qualified_symbols)
 
+        # Upbit 기존 포지션 동기화 (서버 재시작 시 포지션 추적 복구)
+        await self._sync_satellite_positions()
+
         # 메인 루프 시작
         self._running = True
         self._candle_update_counter = 0  # 캔들 업데이트 카운터
@@ -2654,11 +2657,13 @@ class TradingEngine:
                         await self._execute_upbit_order_intent(order_intent, balance, current_price)
                 else:
                     # Satellite 청산 조건 체크
+                    # Upbit API에서 가져온 실제 평균 매수가 사용
+                    entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
                     pos_dict = {
                         "symbol": symbol,
                         "side": "BUY",  # Upbit은 롱만
                         "quantity": balance.total,
-                        "avg_price": current_price,  # 진입가 추적 필요
+                        "avg_price": entry_price,
                         "opened_at": datetime.utcnow(),
                     }
                     sat_exit = await self.satellite_strategy.should_exit(pos_dict, market_data)
@@ -2676,15 +2681,44 @@ class TradingEngine:
                             quantity=balance.total,
                         )
                         if result.success:
+                            # 포지션 추적 종료
+                            self.satellite_strategy.close_position(symbol)
+
+                            # PnL 계산
+                            realized_pnl = (result.avg_price - entry_price) * result.filled_qty
+
                             self.add_event(
                                 level="INFO",
-                                event_type="ORDER",
-                                message=f"Upbit position closed: {symbol}",
+                                event_type="SATELLITE",
+                                message=f"Satellite exit: {symbol}",
                                 details={
                                     "reason": sat_exit.reason,
                                     "quantity": result.filled_qty,
-                                    "price": result.avg_price,
+                                    "entry_price": entry_price,
+                                    "exit_price": result.avg_price,
+                                    "pnl": realized_pnl,
                                 },
+                            )
+
+                            # 주문 기록
+                            self.add_order(
+                                symbol=symbol,
+                                strategy="SATELLITE",
+                                side="SELL",
+                                order_type="MARKET",
+                                quantity=balance.total,
+                                price=result.avg_price,
+                                status="FILLED",
+                                filled_qty=result.filled_qty,
+                                avg_fill_price=result.avg_price,
+                                realized_pnl=realized_pnl,
+                            )
+
+                            logger.info(
+                                "Satellite position closed",
+                                symbol=symbol,
+                                reason=sat_exit.reason,
+                                pnl=f"₩{realized_pnl:,.0f}",
                             )
 
         except Exception as e:
@@ -2987,10 +3021,9 @@ class TradingEngine:
                 positions_value += position_value
                 current_equity += position_value
 
-                # PSM에서 진입가 조회
-                psm_pos = self.position_state_machine.get_position(symbol)
-                entry_price = psm_pos.entry_price if psm_pos else current_price
-                position_pnl = (current_price - entry_price) * balance.total if psm_pos else 0
+                # Upbit API에서 직접 가져온 평균 매수가 사용
+                entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
+                position_pnl = (current_price - entry_price) * balance.total
                 unrealized_pnl += position_pnl
 
                 self._cached_positions.append({
@@ -3140,6 +3173,34 @@ class TradingEngine:
     def get_events(self, limit: int = 100) -> list:
         """이벤트 목록 조회"""
         return self._cached_events[-limit:]
+
+    async def _sync_satellite_positions(self) -> None:
+        """서버 시작 시 Upbit 기존 포지션을 Satellite 전략에 동기화"""
+        if not self._is_upbit:
+            return
+
+        try:
+            # 1. 시장 데이터 먼저 업데이트 (현재가 필요)
+            watch_symbols = self.symbol_manager.get_qualified_symbols()
+            await self._update_market_data_upbit(watch_symbols)
+
+            # 2. Upbit 잔고 조회
+            all_balances = await self.exchange.get_all_balances()
+
+            # 3. Satellite 전략에 포지션 동기화
+            synced = self.satellite_strategy.sync_positions_from_balances(
+                balances=all_balances,
+                market_data=self._market_data,
+            )
+
+            logger.info(
+                "Satellite positions synced from Upbit",
+                synced_count=synced,
+                total_balances=len(all_balances),
+            )
+
+        except Exception as e:
+            logger.error("Failed to sync satellite positions", error=str(e))
 
     async def _load_orders_from_db(self, limit: int = 500) -> None:
         """서버 시작 시 DB에서 주문 히스토리 로드 (Upbit KRW 마켓만)"""

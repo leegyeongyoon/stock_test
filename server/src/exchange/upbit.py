@@ -362,6 +362,7 @@ class UpbitExchange(BaseExchange):
                 free = float(account.get("balance", 0))
                 locked = float(account.get("locked", 0))
                 total = free + locked
+                avg_buy_price = float(account.get("avg_buy_price", 0))
 
                 if total > 0:
                     balances.append(
@@ -370,6 +371,7 @@ class UpbitExchange(BaseExchange):
                             free=free,
                             locked=locked,
                             total=total,
+                            avg_buy_price=avg_buy_price,
                         )
                     )
 

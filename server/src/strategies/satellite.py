@@ -637,3 +637,79 @@ class SatelliteStrategy(BaseStrategy):
                 for sym, pos in self._active_positions.items()
             },
         }
+
+    def sync_positions_from_balances(
+        self,
+        balances: list,
+        market_data: dict,
+    ) -> int:
+        """
+        Upbit 잔고에서 기존 포지션 동기화
+
+        서버 재시작 시 호출하여 기존 보유 종목을 _active_positions에 등록
+
+        Args:
+            balances: BalanceInfo 리스트 (Upbit 잔고)
+            market_data: 현재 시세 정보
+
+        Returns:
+            동기화된 포지션 수
+        """
+        synced_count = 0
+
+        for balance in balances:
+            if balance.asset == "KRW" or balance.total <= 0:
+                continue
+
+            symbol = f"KRW-{balance.asset}"
+
+            # 이미 추적 중이면 스킵
+            if symbol in self._active_positions:
+                continue
+
+            # 평균 매수가 (Upbit API에서 제공)
+            entry_price = balance.avg_buy_price
+            if entry_price <= 0:
+                continue
+
+            # 현재가 조회
+            current_price = market_data.get(symbol, {}).get("price", entry_price)
+
+            # 수익률 계산
+            pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+
+            # 트레일링 활성화 여부 (이미 +1% 이상이면 활성화)
+            trailing_active = pnl_pct >= self.trailing_trigger_pct
+
+            # 포지션 등록
+            self._active_positions[symbol] = SatellitePosition(
+                symbol=symbol,
+                side=OrderSide.BUY,
+                entry_price=entry_price,
+                quantity=balance.total,
+                entry_time=datetime.utcnow(),  # 실제 진입 시간은 알 수 없음
+                highest_price=max(entry_price, current_price),  # 현재가가 고점일 수 있음
+                lowest_price=min(entry_price, current_price),
+                trailing_active=trailing_active,
+            )
+
+            logger.info(
+                "Synced position from Upbit balance",
+                symbol=symbol,
+                entry_price=entry_price,
+                quantity=balance.total,
+                current_price=current_price,
+                pnl_pct=f"{pnl_pct:.2%}",
+                trailing_active=trailing_active,
+            )
+
+            synced_count += 1
+
+        if synced_count > 0:
+            logger.info(
+                "Position sync completed",
+                synced_count=synced_count,
+                total_positions=len(self._active_positions),
+            )
+
+        return synced_count
