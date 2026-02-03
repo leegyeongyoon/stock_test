@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 import structlog
 
+from src.config import get_settings
 from src.risk.config import get_risk_config
 from src.risk.correlation import CorrelationGuard, GuardAction
 from src.risk.dd_tracker import DrawdownTracker, get_dd_tracker
@@ -191,6 +192,12 @@ class RiskOverlay:
         """
         decision = RiskDecision()
         reasons = []
+        settings = get_settings()
+
+        # === 0. SATELLITE_ENABLED 설정 체크 (최우선) ===
+        if not settings.satellite_enabled:
+            decision.satellite_allowed = False
+            reasons.append("CONFIG: satellite_enabled=false")
 
         # Portfolio Risk에 equity 업데이트
         if current_equity is not None:
