@@ -1502,6 +1502,39 @@ async def get_ignition_watchlist():
     }
 
 
+@router.post("/ignition/scan")
+async def trigger_ignition_scan():
+    """Ignition Setup 스캔 수동 트리거 (테스트용)"""
+    engine = get_engine()
+    settings = get_settings()
+
+    if not hasattr(engine, "ignition_strategy") or engine.ignition_strategy is None:
+        return {"error": "Ignition strategy not initialized"}
+
+    # 심볼 가져오기
+    qualified_symbols = engine.symbol_manager.get_qualified_symbols()
+
+    if not qualified_symbols:
+        return {
+            "error": "No qualified symbols",
+            "all_symbols_count": len(engine.symbol_manager.get_all_symbols()),
+        }
+
+    # 스캔 실행
+    import asyncio
+    candidates = await engine.ignition_strategy.scan_setups(
+        symbols=qualified_symbols,
+        market_data_map=engine._market_data,
+    )
+
+    return {
+        "scanned": len(qualified_symbols),
+        "candidates": len(candidates) if candidates else 0,
+        "watchlist": len(engine.ignition_strategy.get_watchlist()),
+        "symbols_sample": qualified_symbols[:5],
+    }
+
+
 @router.get("/ignition/status")
 async def get_ignition_status():
     """Ignition 전략 전체 상태 조회

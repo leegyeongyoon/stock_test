@@ -301,7 +301,10 @@ class TradingEngine:
                         logger.warning("KMVI update failed", error=str(e))
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
-                if self.risk_engine.can_open_position:
+                can_open = self.risk_engine.can_open_position
+                if not can_open:
+                    logger.debug(f"Strategy execution skipped: can_open_position={can_open}, mode={self.risk_engine.mode}")
+                if can_open:
                     await self._execute_strategies()
 
                 # 4. 포지션 관리 (SAFE 모드에서도 실행)
@@ -725,8 +728,10 @@ class TradingEngine:
                         await self._execute_attack_signal(attack_signal, market_data, risk_decision)
 
             # === Pullback 전략 (눌림목 매수) - Upbit 전용 ===
+            # Note: Pullback은 Satellite와 독립적으로 운영됨
             if self._is_upbit and self.pullback_strategy and self.pullback_strategy.is_enabled():
-                if risk_decision.satellite_allowed:
+                pullback_allowed = risk_decision.mode not in [RiskMode.HALT]
+                if pullback_allowed:
                     # Pre-filtering: 호가창 조회 대상 축소 (Rate Limit 방지)
                     candidates = self._prefilter_symbols_for_pullback(self._market_data)
                     logger.debug(f"Pullback candidates: {len(candidates)} symbols (pre-filtered)")
@@ -768,9 +773,11 @@ class TradingEngine:
 
             # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
             # Note: Ignition은 Satellite와 독립적으로 운영됨 (satellite_enabled와 무관)
+            logger.info(f"[IGNITION CHECK] is_upbit={self._is_upbit}, strategy={self.ignition_strategy is not None}, mode={settings.ignition_mode}")
             if self._is_upbit and self.ignition_strategy and settings.ignition_mode != "OFF":
                 # Ignition은 SAFE/HALT 모드에서만 차단, satellite_enabled와 무관
                 ignition_allowed = risk_decision.mode not in [RiskMode.HALT]
+                logger.info(f"[IGNITION] ignition_allowed={ignition_allowed}, risk_mode={risk_decision.mode}")
                 if ignition_allowed:
                     try:
                         # BTC 24시간 변화율 설정 (상대강도 계산용)
@@ -780,22 +787,20 @@ class TradingEngine:
                         self.ignition_strategy.set_account_balance(current_equity)
                         self.ignition_strategy.set_mode(settings.ignition_mode)
 
-                        # Setup 스캔 (v4.2: 1분마다)
-                        import time
-                        current_minute = int(time.time() / 60)
-                        scan_interval = settings.ignition_setup_scan_interval_min
-                        if current_minute % scan_interval == 0:
-                            qualified_symbols = self.symbol_manager.get_qualified_symbols()
-                            new_candidates = await self.ignition_strategy.scan_setups(
-                                symbols=qualified_symbols,
-                                market_data_map=self._market_data,
+                        # Setup 스캔 (항상 실행)
+                        logger.info("[IGNITION] Starting setup scan...")
+                        qualified_symbols = self.symbol_manager.get_qualified_symbols()
+                        logger.info(f"[IGNITION] Qualified symbols: {len(qualified_symbols)}")
+                        new_candidates = await self.ignition_strategy.scan_setups(
+                            symbols=qualified_symbols,
+                            market_data_map=self._market_data,
+                        )
+                        if new_candidates:
+                            logger.info(
+                                "Ignition setup candidates found",
+                                count=len(new_candidates),
+                                symbols=[c.symbol for c in new_candidates],
                             )
-                            if new_candidates:
-                                logger.info(
-                                    "Ignition setup candidates found",
-                                    count=len(new_candidates),
-                                    symbols=[c.symbol for c in new_candidates],
-                                )
 
                         # Watchlist 종목들 점화 체크 (실시간)
                         watchlist = self.ignition_strategy.get_watchlist()
@@ -844,8 +849,10 @@ class TradingEngine:
                         logger.error("Ignition strategy error", error=str(e))
 
             # === Surge Detector (급등 시작 실시간 감지) - Upbit 전용 ===
+            # Note: Surge Detector는 Satellite와 독립적으로 운영됨
             if self._is_upbit and self.surge_detector and settings.ignition_mode != "OFF":
-                if risk_decision.satellite_allowed:
+                surge_allowed = risk_decision.mode not in [RiskMode.HALT]
+                if surge_allowed:
                     try:
                         # 전체 심볼 스캔하여 급등 시작 감지
                         qualified_symbols = self.symbol_manager.get_qualified_symbols()
