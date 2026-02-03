@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 settings = get_settings()
 
-# Upbit 과열 추격 금지 임계값
-OVERHEAT_THRESHOLD = 0.12  # +12% 이상 급등 시 진입 금지
+# Upbit 과열 추격 금지 임계값 (12%→8%: 더 보수적인 필터)
+OVERHEAT_THRESHOLD = 0.08  # +8% 이상 급등 시 진입 금지
 
 
 class Regime(str, Enum):

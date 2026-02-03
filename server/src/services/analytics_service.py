@@ -85,10 +85,12 @@ class AnalyticsService:
         daily_returns = []
         max_equity = 0.0
         max_drawdown = 0.0
-        starting_equity = 10000.0
+        # 기간 내 첫 날의 시작 자산 사용, 없으면 기본값 500,000원
+        starting_equity = 500000.0
 
         for stat in daily_stats:
-            if starting_equity == 10000.0 and stat.starting_equity > 0:
+            # 첫 번째 유효한 starting_equity 사용
+            if starting_equity == 500000.0 and stat.starting_equity > 100000:
                 starting_equity = stat.starting_equity
 
             # 일별 거래 수익은 전략별 수익 합계 사용 (실제 거래 기록)
@@ -107,12 +109,15 @@ class AnalyticsService:
                 )
             )
 
-            if stat.ending_equity > max_equity:
-                max_equity = stat.ending_equity
+            # 유효한 equity 값만 드로다운 계산에 사용 (최소 10,000원 이상)
+            if stat.ending_equity > 10000:
+                if stat.ending_equity > max_equity:
+                    max_equity = stat.ending_equity
 
-            dd = (stat.ending_equity - max_equity) / max_equity if max_equity > 0 else 0
-            if dd < max_drawdown:
-                max_drawdown = dd
+                if max_equity > 0:
+                    dd = (stat.ending_equity - max_equity) / max_equity
+                    if dd < max_drawdown:
+                        max_drawdown = dd
 
         total_pnl_pct = total_pnl / starting_equity if starting_equity > 0 else 0
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0
@@ -182,71 +187,51 @@ class AnalyticsService:
         )
 
     async def get_strategy_pnl(self, period: PeriodType) -> StrategyPnlResponse:
-        """전략별 수익 조회"""
+        """전략별 수익 조회 - TradeModel에서 직접 계산"""
         start_date, end_date = self._get_date_range(period)
 
-        # DailyStatsModel에서 전략별 집계
-        stmt = select(
-            func.sum(DailyStatsModel.core_pnl).label("core_pnl"),
-            func.sum(DailyStatsModel.satellite_pnl).label("satellite_pnl"),
-            func.sum(DailyStatsModel.trades_count).label("trades_count"),
-        ).where(
-            DailyStatsModel.date >= start_date.strftime("%Y-%m-%d"),
-            DailyStatsModel.date <= end_date.strftime("%Y-%m-%d"),
+        # TradeModel에서 전략별 직접 집계
+        stmt = (
+            select(
+                TradeModel.strategy,
+                func.sum(TradeModel.realized_pnl).label("realized_pnl"),
+                func.count().label("count"),
+                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
+            )
+            .where(
+                TradeModel.executed_at >= start_date,
+                TradeModel.executed_at <= end_date,
+            )
+            .group_by(TradeModel.strategy)
         )
 
         result = await self._session.execute(stmt)
-        row = result.one()
+        rows = result.all()
 
-        # 전략별 거래 수 조회
-        core_trades_stmt = (
-            select(
-                func.count().label("count"),
-                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
+        # 결과를 딕셔너리로 변환
+        strategy_data = {}
+        for row in rows:
+            strategy_name = row.strategy.value if hasattr(row.strategy, "value") else str(row.strategy)
+            strategy_data[strategy_name] = {
+                "realized_pnl": row.realized_pnl or 0.0,
+                "count": row.count or 0,
+                "wins": row.wins or 0,
+            }
+
+        strategies = []
+        for strategy_name in ["CORE", "SATELLITE"]:
+            data = strategy_data.get(strategy_name, {"realized_pnl": 0.0, "count": 0, "wins": 0})
+            win_rate = data["wins"] / data["count"] if data["count"] > 0 else 0.0
+            strategies.append(
+                StrategyPnl(
+                    strategy=strategy_name,
+                    realized_pnl=data["realized_pnl"],
+                    unrealized_pnl=0.0,
+                    trades_count=data["count"],
+                    win_rate=win_rate,
+                    avg_holding_time_minutes=0.0,
+                )
             )
-            .where(
-                TradeModel.executed_at >= start_date,
-                TradeModel.executed_at <= end_date,
-                TradeModel.strategy == "CORE",
-            )
-        )
-
-        satellite_trades_stmt = (
-            select(
-                func.count().label("count"),
-                func.sum(case((TradeModel.realized_pnl > 0, 1), else_=0)).label("wins"),
-            )
-            .where(
-                TradeModel.executed_at >= start_date,
-                TradeModel.executed_at <= end_date,
-                TradeModel.strategy == "SATELLITE",
-            )
-        )
-
-        core_result = await self._session.execute(core_trades_stmt)
-        core_row = core_result.one()
-
-        satellite_result = await self._session.execute(satellite_trades_stmt)
-        satellite_row = satellite_result.one()
-
-        strategies = [
-            StrategyPnl(
-                strategy="CORE",
-                realized_pnl=row.core_pnl or 0.0,
-                unrealized_pnl=0.0,
-                trades_count=core_row.count or 0,
-                win_rate=(core_row.wins or 0) / core_row.count if core_row.count else 0.0,
-                avg_holding_time_minutes=0.0,
-            ),
-            StrategyPnl(
-                strategy="SATELLITE",
-                realized_pnl=row.satellite_pnl or 0.0,
-                unrealized_pnl=0.0,
-                trades_count=satellite_row.count or 0,
-                win_rate=(satellite_row.wins or 0) / satellite_row.count if satellite_row.count else 0.0,
-                avg_holding_time_minutes=0.0,
-            ),
-        ]
 
         return StrategyPnlResponse(
             period=period,
@@ -355,26 +340,35 @@ class AnalyticsService:
             daily_result = await self._session.execute(daily_stmt)
             daily_stats = daily_result.scalars().all()
 
+            # 유효한 equity만 포함 (10,000원 이상)
             data = [
                 EquityPoint(
                     timestamp=f"{s.date}T00:00:00",
                     equity=s.ending_equity,
-                    pnl=s.core_pnl + s.satellite_pnl,  # 전략별 거래 수익만
+                    pnl=(s.core_pnl or 0) + (s.satellite_pnl or 0),
                 )
                 for s in daily_stats
+                if s.ending_equity > 10000
             ]
         else:
+            # 유효한 equity만 포함 (10,000원 이상)
             data = [
                 EquityPoint(
                     timestamp=s.timestamp.isoformat(),
                     equity=s.equity,
-                    pnl=s.realized_pnl,  # 실현 수익만
+                    pnl=s.realized_pnl or 0,
                 )
                 for s in snapshots
+                if s.equity > 10000
             ]
 
-        start_equity = data[0].equity if data else 10000.0
-        end_equity = data[-1].equity if data else 10000.0
+        # 시작 자산은 첫 유효 데이터 또는 기본값 500,000원
+        start_equity = data[0].equity if data else 500000.0
+        end_equity = data[-1].equity if data else 500000.0
+
+        # start_equity가 너무 작으면 기본값 사용
+        if start_equity < 100000:
+            start_equity = 500000.0
 
         # 수익률은 실제 거래 기반으로 계산
         total_return_pct = total_trade_pnl / start_equity if start_equity > 0 else 0

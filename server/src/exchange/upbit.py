@@ -246,13 +246,30 @@ class UpbitExchange(BaseExchange):
                 # 최대 3초 동안 체결 대기 (100ms 간격)
                 for _ in range(30):
                     await asyncio.sleep(0.1)
-                    order_detail = await self.get_order(symbol, order_id)
+                    order_detail = await self.get_order_with_trades(order_id)
                     if order_detail:
                         state = order_detail.get("state", "wait")
                         if state in ("done", "cancel"):
                             # 체결 완료
                             filled_qty = float(order_detail.get("executed_volume", 0))
                             avg_price = float(order_detail.get("avg_price", 0) or 0)
+
+                            # avg_price가 여전히 0이면 trades에서 직접 계산
+                            if avg_price == 0 and filled_qty > 0:
+                                trades = order_detail.get("trades", [])
+                                if trades:
+                                    total_value = sum(
+                                        float(t.get("volume", 0)) * float(t.get("price", 0))
+                                        for t in trades
+                                    )
+                                    avg_price = total_value / filled_qty
+
+                            # 그래도 0이면 현재가로 대체
+                            if avg_price == 0:
+                                ticker = await self.get_ticker(symbol)
+                                if ticker:
+                                    avg_price = float(ticker.get("trade_price", 0))
+
                             status = self.ORDER_STATUS_MAP.get(state, OrderStatus.FILLED)
                             return OrderResult(
                                 success=filled_qty > 0,
@@ -317,6 +334,61 @@ class UpbitExchange(BaseExchange):
         except Exception as e:
             print(f"[Upbit] get_order error: {e}")
             return None
+
+    async def get_order_with_trades(self, order_id: str) -> Optional[dict]:
+        """
+        주문 상세 정보 + 체결 내역 조회
+
+        시장가 주문의 경우 avg_price가 없을 수 있으므로
+        trades에서 실제 체결 가격을 계산
+        """
+        try:
+            # 주문 정보 조회 (trades 포함 요청)
+            params = {"uuid": order_id}
+            result = await self._request("GET", "/order", params=params)
+
+            if not result:
+                return None
+
+            # avg_price가 없거나 0인 경우 trades에서 계산
+            avg_price = float(result.get("avg_price", 0) or 0)
+
+            if avg_price == 0:
+                # trades 필드에서 체결 가격 계산
+                trades = result.get("trades", [])
+                if trades:
+                    total_volume = 0.0
+                    total_value = 0.0
+                    for trade in trades:
+                        volume = float(trade.get("volume", 0))
+                        price = float(trade.get("price", 0))
+                        total_volume += volume
+                        total_value += volume * price
+
+                    if total_volume > 0:
+                        avg_price = total_value / total_volume
+                        result["avg_price"] = avg_price
+
+            return result
+        except Exception as e:
+            print(f"[Upbit] get_order_with_trades error: {e}")
+            return None
+
+    async def get_order_trades(self, order_id: str) -> list[dict]:
+        """
+        주문의 체결 내역만 조회
+
+        Returns:
+            체결 내역 리스트 [{"price": ..., "volume": ..., "funds": ...}, ...]
+        """
+        try:
+            order = await self.get_order_with_trades(order_id)
+            if order:
+                return order.get("trades", [])
+            return []
+        except Exception as e:
+            print(f"[Upbit] get_order_trades error: {e}")
+            return []
 
     async def get_open_orders(self, symbol: Optional[str] = None) -> list:
         """미체결 주문 조회"""

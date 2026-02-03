@@ -1,0 +1,2 @@
+// Attack component placeholder
+export {}

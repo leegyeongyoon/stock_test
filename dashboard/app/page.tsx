@@ -2,12 +2,14 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { api, Summary, Position, Event, CapitalProfileStatus, SurgeCandidate } from '@/lib/api'
+import { analyticsApi, RealtimeSummary } from '@/lib/analytics-api'
 import ConnectionStatus from '@/components/ConnectionStatus'
 import ModeSelector from '@/components/ModeSelector'
 import SummaryCards from '@/components/SummaryCards'
 import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
 import SurgeCandidates from '@/components/SurgeCandidates'
+import { formatKRW } from '@/lib/currency'
 
 interface SurgeStatus {
   active_signals: number
@@ -46,6 +48,7 @@ export default function Dashboard() {
   const [surgeStatus, setSurgeStatus] = useState<SurgeStatus | null>(null)
   const [surgeCandidates, setSurgeCandidates] = useState<SurgeCandidate[]>([])
   const [capitalProfile, setCapitalProfile] = useState<CapitalProfileStatus | null>(null)
+  const [realtimeSummary, setRealtimeSummary] = useState<RealtimeSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -92,6 +95,14 @@ export default function Dashboard() {
         setCapitalProfile(profileData)
       } catch {
         // Capital Profile 미설치 시 무시
+      }
+
+      // 실시간 수익 요약 조회
+      try {
+        const realtimeData = await analyticsApi.getRealtimeSummary()
+        setRealtimeSummary(realtimeData)
+      } catch {
+        // 실패 시 무시
       }
 
       setSummary(summaryData)
@@ -206,7 +217,7 @@ export default function Dashboard() {
                 <div key={signal.symbol} className="flex items-center justify-between">
                   <span className="text-green-400 font-mono">{signal.symbol}</span>
                   <span className="text-xs text-slate-300">
-                    +{signal.change_1m_pct.toFixed(1)}% (1m)
+                    +{(signal.change_1m_pct ?? 0).toFixed(1)}% (1m)
                   </span>
                 </div>
               ))}
@@ -263,13 +274,13 @@ export default function Dashboard() {
             <div>
               <span className="text-slate-400">리스크/트레이드</span>
               <p className="font-mono text-white">
-                {(capitalProfile.config.risk_per_trade_min * 100).toFixed(2)}% ~ {(capitalProfile.config.risk_per_trade_max * 100).toFixed(2)}%
+                {((capitalProfile.config?.risk_per_trade_min ?? 0) * 100).toFixed(2)}% ~ {((capitalProfile.config?.risk_per_trade_max ?? 0) * 100).toFixed(2)}%
               </p>
             </div>
             <div>
               <span className="text-slate-400">허용 Attack Level</span>
               <p className="font-mono text-white">
-                L{capitalProfile.config.allowed_attack_levels.join(', L')}
+                L{(capitalProfile.config?.allowed_attack_levels ?? []).join(', L')}
               </p>
             </div>
             <div>
@@ -290,6 +301,41 @@ export default function Dashboard() {
 
       {/* Summary Cards */}
       <SummaryCards summary={summary} loading={loading} />
+
+      {/* 오늘 수익 카드 */}
+      {realtimeSummary && (
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <h3 className="text-slate-400 text-sm mb-3">오늘 수익 현황</h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <span className="text-slate-500 text-xs">오늘 손익</span>
+              <p className={`text-xl font-bold ${realtimeSummary.today_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {realtimeSummary.today_pnl >= 0 ? '+' : ''}{formatKRW(realtimeSummary.today_pnl)}
+              </p>
+              <span className={`text-xs ${(realtimeSummary.today_pnl_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {(realtimeSummary.today_pnl_pct ?? 0) >= 0 ? '+' : ''}{(realtimeSummary.today_pnl_pct ?? 0).toFixed(2)}%
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500 text-xs">미실현 손익</span>
+              <p className={`text-xl font-bold ${realtimeSummary.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {realtimeSummary.unrealized_pnl >= 0 ? '+' : ''}{formatKRW(realtimeSummary.unrealized_pnl)}
+              </p>
+              <span className={`text-xs ${(realtimeSummary.unrealized_pnl_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {(realtimeSummary.unrealized_pnl_pct ?? 0) >= 0 ? '+' : ''}{(realtimeSummary.unrealized_pnl_pct ?? 0).toFixed(2)}%
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500 text-xs">수익 포지션</span>
+              <p className="text-xl font-bold text-green-400">{realtimeSummary.profitable_positions}개</p>
+            </div>
+            <div>
+              <span className="text-slate-500 text-xs">손실 포지션</span>
+              <p className="text-xl font-bold text-red-400">{realtimeSummary.losing_positions}개</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Surge Candidates - 급등 근접 종목 */}
       <SurgeCandidates candidates={surgeCandidates} loading={loading} />

@@ -38,6 +38,14 @@ from src.risk.position_reducer import (
     get_position_reducer,
 )
 
+# v4.2 신규 컴포넌트
+from src.risk.kmvi import KMVICalculator, KMVIState, KMVITier, get_kmvi_calculator
+from src.risk.pump_setup_score import (
+    PumpSetupScore,
+    PumpSetupScoreCalculator,
+    get_pump_setup_calculator,
+)
+
 if TYPE_CHECKING:
     from src.data.candle_manager import CandleManager
     from src.features.feature_engine import FeatureEngine
@@ -108,6 +116,16 @@ class RiskDecision:
     reduce_pct: float = 0.0
     hard_dd_phase: int = 0  # v3.1: Hard DD 분할 청산 단계 (0=none, 1-3)
 
+    # v4.2: KMVI 상태
+    kmvi_tier: str = "NORMAL"
+    kmvi_value_pct: float = 0.0
+    kmvi_micro_scalper_allowed: bool = True
+    kmvi_new_entry_allowed: bool = True
+
+    # v4.2: Ignition 전략 허용
+    ignition_allowed: bool = True
+    ignition_sizing: float = 1.0
+
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -136,6 +154,14 @@ class RiskDecision:
             "is_reducing": self.is_reducing,
             "reduce_pct": round(self.reduce_pct * 100, 1),
             "hard_dd_phase": self.hard_dd_phase,
+            # v4.2: KMVI
+            "kmvi_tier": self.kmvi_tier,
+            "kmvi_value_pct": round(self.kmvi_value_pct, 2),
+            "kmvi_micro_scalper_allowed": self.kmvi_micro_scalper_allowed,
+            "kmvi_new_entry_allowed": self.kmvi_new_entry_allowed,
+            # v4.2: Ignition
+            "ignition_allowed": self.ignition_allowed,
+            "ignition_sizing": round(self.ignition_sizing, 2),
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -169,6 +195,11 @@ class RiskOverlay:
         # 신규 컴포넌트 (MDD 5% 강화)
         self.portfolio_risk = get_portfolio_risk_manager()
         self.position_reducer = get_position_reducer()
+
+        # v4.2 신규 컴포넌트
+        self.kmvi_calculator = get_kmvi_calculator()
+        self.pump_setup_calculator = get_pump_setup_calculator()
+        self._last_kmvi: Optional[KMVIState] = None
 
         # 상태
         self._current_mode: RiskMode = RiskMode.NORMAL
@@ -247,6 +278,30 @@ class RiskOverlay:
             if decision.is_soft_dd and not decision.is_hard_dd:
                 decision.satellite_allowed = False
                 reasons.append(f"Soft DD Tier{decision.dd_tier}: Satellite new entry OFF")
+
+        # === 2.5. KMVI (v4.2) ===
+        kmvi_state = self._last_kmvi
+        if kmvi_state:
+            decision.kmvi_tier = kmvi_state.tier.value
+            decision.kmvi_value_pct = kmvi_state.value_pct
+            decision.kmvi_micro_scalper_allowed = kmvi_state.micro_scalper_allowed
+            decision.kmvi_new_entry_allowed = kmvi_state.new_entry_allowed
+
+            # KMVI 기반 제한
+            if not kmvi_state.new_entry_allowed:
+                # CRISIS: 모든 신규 진입 금지
+                decision.satellite_allowed = False
+                decision.ignition_allowed = False
+                reasons.append(f"KMVI CRISIS: {kmvi_state.value_pct:.2f}%")
+
+            elif not kmvi_state.micro_scalper_allowed:
+                # HIGH: Micro Scalper (Satellite) OFF
+                decision.satellite_allowed = False
+                reasons.append(f"KMVI HIGH: {kmvi_state.value_pct:.2f}%")
+
+            # KMVI sizing multiplier 적용
+            decision.sizing_multiplier *= kmvi_state.sizing_multiplier
+            decision.ignition_sizing = kmvi_state.sizing_multiplier
 
         # === 3. MARKET REGIME ===
         regime, regime_ok, regime_reason = self._check_market_regime()
@@ -530,6 +585,116 @@ class RiskOverlay:
         """마지막 결정"""
         return self._last_decision
 
+    # === v4.2 KMVI 메서드 ===
+
+    def update_kmvi(self, symbols: list[str]) -> Optional[KMVIState]:
+        """
+        KMVI 업데이트 (v4.2)
+
+        Args:
+            symbols: 거래량 순 정렬된 심볼 리스트
+
+        Returns:
+            KMVIState or None
+        """
+        if not self.candle_manager:
+            return None
+
+        try:
+            state = self.kmvi_calculator.update(symbols, self.candle_manager)
+            self._last_kmvi = state
+            return state
+        except Exception as e:
+            logger.error("KMVI update failed", error=str(e))
+            return None
+
+    def get_kmvi_state(self) -> Optional[KMVIState]:
+        """현재 KMVI 상태"""
+        return self._last_kmvi
+
+    # === v4.2 Pump Setup 메서드 ===
+
+    def check_pump_setup(
+        self,
+        symbol: str,
+        candles_5m: list,
+        orderbook: dict,
+        ticker: dict = None,
+    ) -> PumpSetupScore:
+        """
+        Pump Setup Score 계산 (v4.2)
+
+        Args:
+            symbol: 심볼
+            candles_5m: 5분봉 리스트
+            orderbook: 호가창 데이터
+            ticker: 티커 데이터 (옵션)
+
+        Returns:
+            PumpSetupScore
+        """
+        return self.pump_setup_calculator.calculate(
+            symbol=symbol,
+            candles_5m=candles_5m,
+            orderbook=orderbook,
+            ticker=ticker,
+        )
+
+    def can_open_ignition(
+        self,
+        symbol: str = None,
+        candles_5m: list = None,
+        orderbook: dict = None,
+        ticker: dict = None,
+    ) -> tuple[bool, str, float]:
+        """
+        Ignition 전략 진입 가능 여부 (v4.2)
+
+        Args:
+            symbol: 심볼 (Pump Setup 평가용)
+            candles_5m: 5분봉
+            orderbook: 호가창
+            ticker: 티커
+
+        Returns:
+            (가능 여부, 사유, 사이징 배수)
+        """
+        decision = self._last_decision or self.evaluate()
+
+        # 1. 기본 모드 체크
+        if decision.mode == RiskMode.HALT:
+            return False, "HALT mode", 0.0
+
+        if not decision.ignition_allowed:
+            return False, "Ignition blocked by KMVI/DD", 0.0
+
+        # 2. KMVI 체크
+        if self._last_kmvi and not self._last_kmvi.new_entry_allowed:
+            return False, "KMVI CRISIS", 0.0
+
+        # 3. DD Tier 체크 (Tier 4+ 에서 Ignition 제한)
+        if decision.dd_tier >= 4:
+            return False, f"DD Tier {decision.dd_tier} too high", 0.0
+
+        # 4. Pump Setup 체크 (옵션)
+        sizing = decision.ignition_sizing * decision.sizing_multiplier
+        pump_bonus = 0.0
+
+        if symbol and candles_5m and orderbook:
+            pump_result = self.check_pump_setup(symbol, candles_5m, orderbook, ticker)
+            if pump_result.passed:
+                # Pump Setup 통과 시 보너스
+                pump_bonus = 0.2
+                sizing = min(1.0, sizing + pump_bonus)
+                logger.info(
+                    "Pump Setup passed, bonus applied",
+                    symbol=symbol,
+                    score=pump_result.total_score,
+                    sizing=sizing,
+                )
+
+        return True, "", sizing
+
     def get_summary(self) -> dict:
         """요약 정보"""
         decision = self._last_decision or self.evaluate()
@@ -573,6 +738,14 @@ class RiskOverlay:
             ),
             "portfolio_risk": self.portfolio_risk.get_state().to_dict(),
             "reducer_state": self.position_reducer.get_state().to_dict(),
+            # v4.2: KMVI 상태
+            "kmvi": (
+                self._last_kmvi.to_dict() if self._last_kmvi else None
+            ),
+            "kmvi_status": self.kmvi_calculator.get_status(),
+            # v4.2: Ignition
+            "ignition_allowed": decision.ignition_allowed,
+            "ignition_sizing": round(decision.ignition_sizing, 2),
         }
 
     def get_portfolio_risk(self) -> PortfolioRiskManager:

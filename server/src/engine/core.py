@@ -21,6 +21,13 @@ from src.risk.capital_profile import CapitalProfileManager, get_capital_profile_
 from src.risk.exec_health import get_exec_health_monitor
 from src.risk.risk_engine import RiskEngine
 from src.risk.risk_overlay import RiskMode, get_risk_overlay
+from src.risk.stop_watchdog import (
+    StopWatchdog,
+    StopEvent,
+    StopType,
+    WatchedPosition,
+    get_stop_watchdog,
+)
 from src.services.mode_manager import get_mode_manager
 from src.services.trade_recorder import trade_recorder
 # Core Carry 전략 비활성화 (Upbit 현물 전용)
@@ -106,6 +113,11 @@ class TradingEngine:
 
         # Capital Profile (Growth/Preserve 2단계 시스템)
         self.capital_profile = get_capital_profile_manager()
+
+        # v4.2: Stop Watchdog (독립 손절 모니터링)
+        self.stop_watchdog = get_stop_watchdog()
+        self.stop_watchdog.set_exchange(self.exchange)
+        self.stop_watchdog.set_callback(self._on_stop_triggered)
 
         # Slack 알림
         self.slack_notifier = SlackNotifier()
@@ -216,6 +228,9 @@ class TradingEngine:
         # Risk Engine 시작
         await self.risk_engine.start()
 
+        # v4.2: Stop Watchdog 시작
+        await self.stop_watchdog.start()
+
         # DB에서 주문 히스토리 로드
         await self._load_orders_from_db()
 
@@ -252,6 +267,9 @@ class TradingEngine:
         # Risk Engine 중지
         await self.risk_engine.stop()
 
+        # v4.2: Stop Watchdog 중지
+        await self.stop_watchdog.stop()
+
         # Upbit 거래소 연결 해제
         await self.exchange.disconnect()
 
@@ -274,6 +292,13 @@ class TradingEngine:
                 if self._candle_update_counter >= 60:
                     self._candle_update_counter = 0
                     await self._refresh_candles()
+
+                    # v4.2: KMVI 업데이트 (1분마다)
+                    try:
+                        symbols = self.symbol_manager.get_qualified_symbols()
+                        self.risk_overlay.update_kmvi(symbols)
+                    except Exception as e:
+                        logger.warning("KMVI update failed", error=str(e))
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 if self.risk_engine.can_open_position:
@@ -752,10 +777,11 @@ class TradingEngine:
                         self.ignition_strategy.set_account_balance(current_equity)
                         self.ignition_strategy.set_mode(settings.ignition_mode)
 
-                        # 15분마다 Setup 스캔
+                        # Setup 스캔 (v4.2: 1분마다)
                         import time
                         current_minute = int(time.time() / 60)
-                        if current_minute % 15 == 0:
+                        scan_interval = settings.ignition_setup_scan_interval_min
+                        if current_minute % scan_interval == 0:
                             qualified_symbols = self.symbol_manager.get_qualified_symbols()
                             new_candidates = await self.ignition_strategy.scan_setups(
                                 symbols=qualified_symbols,
@@ -3564,6 +3590,68 @@ class TradingEngine:
                 if avg_price is not None:
                     order["avg_fill_price"] = avg_price
                 break
+
+    def _on_stop_triggered(self, event: StopEvent) -> None:
+        """
+        v4.2: Stop Watchdog 콜백 - 손절 발생 시 시장가 청산
+
+        Args:
+            event: 손절 이벤트
+        """
+        logger.warning(
+            "Stop triggered by watchdog",
+            symbol=event.symbol,
+            stop_type=event.stop_type.value,
+            trigger_price=event.trigger_price,
+            pnl_pct=f"{event.pnl_pct:.2%}",
+        )
+
+        # 이벤트 기록
+        self.add_event(
+            level="WARNING",
+            event_type="STOP_WATCHDOG",
+            message=f"Stop triggered: {event.symbol} ({event.stop_type.value})",
+            details=event.to_dict(),
+        )
+
+        # 비동기 청산 실행
+        asyncio.create_task(self._execute_stop_exit(event))
+
+    async def _execute_stop_exit(self, event: StopEvent) -> None:
+        """Stop Watchdog 손절 청산 실행"""
+        try:
+            symbol = event.symbol
+            quantity = event.quantity
+
+            # 시장가 매도 주문
+            order_result = await self.exchange.create_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                quantity=quantity,
+            )
+
+            if order_result:
+                logger.info(
+                    "Stop exit order placed",
+                    symbol=symbol,
+                    quantity=quantity,
+                    order_id=order_result.get("order_id"),
+                )
+
+                # Slack 알림
+                if self.slack_notifier.is_enabled:
+                    alert = SlackMessage(
+                        level=AlertLevel.WARNING,
+                        title=f"Stop Triggered: {symbol}",
+                        message=f"Type: {event.stop_type.value}\nPnL: {event.pnl_pct:.2%}\nTrigger: {event.trigger_price:,.0f}",
+                    )
+                    await self.slack_notifier.send(alert)
+            else:
+                logger.error("Stop exit order failed", symbol=symbol)
+
+        except Exception as e:
+            logger.error("Stop exit execution error", symbol=event.symbol, error=str(e))
 
     def add_event(self, level: str, event_type: str, message: str, details: dict = None) -> None:
         """이벤트 추가"""

@@ -97,28 +97,28 @@ class Settings(BaseSettings):
         description="Satellite 전략 최대 포지션 (USD)",
     )
     satellite_hard_stop_pct: float = Field(
-        default=-0.008,
-        description="하드 손절 (-0.8%)",
+        default=-0.012,
+        description="하드 손절 (-1.2%) - 0.8%→1.2%: 너무 타이트한 손절 완화",
     )
     satellite_trailing_trigger_pct: float = Field(
-        default=0.01,
-        description="트레일링 활성화 트리거 (+1.0%)",
+        default=0.008,
+        description="트레일링 활성화 트리거 (+0.8%) - 1.0%→0.8%: 더 빠른 트레일링",
     )
     satellite_trailing_stop_pct: float = Field(
-        default=0.006,
-        description="트레일링 스탑 (0.6%)",
+        default=0.005,
+        description="트레일링 스탑 (0.5%) - 0.6%→0.5%: 더 타이트한 보호",
     )
     satellite_time_stop_minutes: int = Field(
-        default=30,
-        description="타임스톱 (30분)",
+        default=20,
+        description="타임스톱 (20분) - 30분→20분: 더 빠른 청산",
     )
     satellite_rvol_threshold: float = Field(
-        default=2.0,
-        description="RVOL 임계값 (2.0배) - 추정치 사용으로 완화",
+        default=2.5,
+        description="RVOL 임계값 (2.5배) - 2.0→2.5: 거래량 필터 강화",
     )
     satellite_close_pos_threshold: float = Field(
-        default=0.70,
-        description="ClosePos 임계값 (0.70) - 상단 70% 이상",
+        default=0.75,
+        description="ClosePos 임계값 (0.75) - 0.70→0.75: 상단 마감 필터 강화",
     )
     satellite_confirmation_entry: bool = Field(
         default=True,
@@ -521,12 +521,12 @@ class Settings(BaseSettings):
         description="Setup 최소 점수 (Watchlist 진입 기준)",
     )
     ignition_setup_scan_interval_min: int = Field(
-        default=15,
-        description="Setup 스캔 주기 (분)",
+        default=1,
+        description="Setup 스캔 주기 (분) - v4.2: 15분→1분 (조기 감지)",
     )
     ignition_watchlist_max: int = Field(
-        default=20,
-        description="Watchlist 최대 종목 수",
+        default=30,
+        description="Watchlist 최대 종목 수 (v4.2: 20→30)",
     )
     ignition_watchlist_ttl_hours: float = Field(
         default=2.0,
@@ -583,34 +583,34 @@ class Settings(BaseSettings):
 
     # Ignition Engine 설정
     ignition_range_break_atr_mult: float = Field(
-        default=0.15,
-        description="돌파 버퍼 = ATR * 이 값",
+        default=0.05,
+        description="돌파 버퍼 = ATR * 이 값 (0.15→0.05: 돌파 레벨에 더 가깝게 진입)",
     )
     ignition_volume_expansion_mult: float = Field(
-        default=1.6,
-        description="점화 거래량 = 평균 * 이 값",
+        default=2.5,
+        description="점화 거래량 = 평균 * 이 값 (1.6→2.5: 거래량 필터 강화)",
     )
     ignition_max_extension_atr_mult: float = Field(
-        default=0.8,
-        description="진입 허용 최대 확장폭 (ATR 기준)",
+        default=0.5,
+        description="진입 허용 최대 확장폭 (ATR 기준) (0.8→0.5: 추격 방지)",
     )
 
     # Anti-Chase Gate 설정
     ignition_entry_window_sec: int = Field(
-        default=180,
-        description="점화 후 진입 허용 시간 (초, 3분)",
+        default=120,
+        description="점화 후 진입 허용 시간 (초, 2분) (180→120: 더 빠른 진입 요구)",
     )
     ignition_over_extension_atr_mult: float = Field(
-        default=1.2,
-        description="과확장 차단 기준 (ATR 기준)",
+        default=0.8,
+        description="과확장 차단 기준 (ATR 기준) (1.2→0.8: 더 빠른 차단)",
     )
     ignition_max_spread_bps: float = Field(
-        default=10.0,
-        description="최대 허용 스프레드 (bps)",
+        default=8.0,
+        description="최대 허용 스프레드 (bps) (10→8: 유동성 필터 강화)",
     )
     ignition_distribution_wick_pct: float = Field(
-        default=0.30,
-        description="분배 캔들 윗꼬리 비율 임계값",
+        default=0.25,
+        description="분배 캔들 윗꼬리 비율 임계값 (0.30→0.25: 분배 감지 민감도 증가)",
     )
 
     # Position Sizing 설정
@@ -649,20 +649,20 @@ class Settings(BaseSettings):
         description="확장 실패시 타임스톱 (분)",
     )
     ignition_profit_protection_r: float = Field(
-        default=1.0,
-        description="+1R 도달시 일부 익절",
+        default=0.7,
+        description="+0.7R 도달시 일부 익절 (1.0→0.7: 더 빠른 수익 확보)",
     )
     ignition_profit_protection_pct: float = Field(
         default=0.50,
         description="Profit Protection 익절 비율 (50%)",
     )
     ignition_trailing_trigger_r: float = Field(
-        default=2.0,
-        description="트레일링 발동 R배수",
+        default=1.5,
+        description="트레일링 발동 R배수 (2.0→1.5: 더 빠른 트레일링)",
     )
     ignition_trailing_stop_atr_mult: float = Field(
-        default=1.0,
-        description="트레일링 스탑 ATR 배수",
+        default=0.8,
+        description="트레일링 스탑 ATR 배수 (1.0→0.8: 더 타이트한 트레일링)",
     )
     ignition_stop_buffer_pct: float = Field(
         default=0.003,
@@ -711,26 +711,26 @@ class Settings(BaseSettings):
         description="최적 거래량 상한 (5x)",
     )
 
-    # === Structure Anti-Chase (v4.2) ===
+    # === Structure Anti-Chase (v4.2 - 강화) ===
     structure_chase_breakout_mult: float = Field(
-        default=0.7,
-        description="돌파레벨 추격 임계값 (ATR 배수)",
+        default=0.5,
+        description="돌파레벨 추격 임계값 (ATR 배수) - 0.7→0.5: 더 보수적",
     )
     structure_chase_vwap_mult: float = Field(
-        default=0.9,
-        description="VWAP 추격 임계값 (ATR 배수)",
+        default=0.7,
+        description="VWAP 추격 임계값 (ATR 배수) - 0.9→0.7: 더 엄격",
     )
     structure_retest_vwap_zone: float = Field(
-        default=0.3,
-        description="리테스트 VWAP 존 (ATR 배수)",
+        default=0.25,
+        description="리테스트 VWAP 존 (ATR 배수) - 0.3→0.25: 더 타이트",
     )
     structure_retest_breakout_zone: float = Field(
-        default=0.25,
-        description="리테스트 돌파레벨 존 (ATR 배수)",
+        default=0.20,
+        description="리테스트 돌파레벨 존 (ATR 배수) - 0.25→0.20: 더 타이트",
     )
     structure_retest_position_mult: float = Field(
-        default=0.7,
-        description="리테스트 진입 사이징 (70%)",
+        default=0.6,
+        description="리테스트 진입 사이징 (60%) - 0.7→0.6: 리테스트시 더 보수적",
     )
 
     # === v4.0 Risk-Based Sizing ===
@@ -747,14 +747,14 @@ class Settings(BaseSettings):
         description="ATTACK_LEVEL 3 트레이드당 리스크 (0.50%)",
     )
 
-    # === v4.0 Anti-Chase (조정) ===
+    # === v4.0 Anti-Chase (조정 - 강화) ===
     structure_chase_dist_atr_max: float = Field(
-        default=0.9,
-        description="dist_atr 차단 임계값 (0.9 초과시 추격 금지)",
+        default=0.7,
+        description="dist_atr 차단 임계값 - 0.9→0.7: VWAP에서 멀면 더 빨리 차단",
     )
     structure_chase_dist_breakout_max: float = Field(
-        default=0.6,
-        description="dist_breakout 차단 배수 (0.6 * atr_pct 초과시 추격 금지)",
+        default=0.4,
+        description="dist_breakout 차단 배수 - 0.6→0.4: 돌파레벨에서 멀면 더 빨리 차단",
     )
 
     # === v4.0 DD Tier 연동 ===
@@ -779,6 +779,126 @@ class Settings(BaseSettings):
     midnight_end_hour: int = Field(
         default=1,
         description="자정 시간대 종료 (UTC)",
+    )
+
+    # === v4.2 KMVI (KRW Market Volatility Index) ===
+    kmvi_enabled: bool = Field(
+        default=True,
+        description="KMVI 활성화",
+    )
+    kmvi_top_n: int = Field(
+        default=20,
+        description="KMVI 계산에 사용할 상위 코인 수",
+    )
+    kmvi_percentile: int = Field(
+        default=80,
+        description="KMVI 분위수 (80 = 80%ile)",
+    )
+    kmvi_t1: float = Field(
+        default=0.012,
+        description="KMVI T1 임계값 (1.2%) - ELEVATED",
+    )
+    kmvi_t2: float = Field(
+        default=0.020,
+        description="KMVI T2 임계값 (2.0%) - Micro Scalper OFF",
+    )
+    kmvi_t3: float = Field(
+        default=0.028,
+        description="KMVI T3 임계값 (2.8%) - 신규 진입 OFF",
+    )
+
+    # === v4.2 Pump Setup Score ===
+    pump_setup_enabled: bool = Field(
+        default=True,
+        description="Pump Setup Score 활성화",
+    )
+    pump_setup_score_threshold: float = Field(
+        default=0.72,
+        description="Pump Setup 최소 점수",
+    )
+    pump_setup_comp_min: float = Field(
+        default=0.55,
+        description="Compression 최소 점수",
+    )
+    pump_setup_exp_min: float = Field(
+        default=0.75,
+        description="Expansion 최소 점수 (돌파 근접도)",
+    )
+    pump_setup_ob_min: float = Field(
+        default=0.65,
+        description="Orderbook Support 최소 점수",
+    )
+    pump_setup_vol_min: float = Field(
+        default=1.8,
+        description="Volume 최소 배수",
+    )
+    pump_setup_vol_max: float = Field(
+        default=4.0,
+        description="Volume 최적 구간 상한 (이상이면 감점)",
+    )
+    pump_setup_vol_penalty_threshold: float = Field(
+        default=10.0,
+        description="Volume 페널티 임계값 (이상이면 차단)",
+    )
+    pump_setup_w_comp: float = Field(
+        default=0.25,
+        description="Compression 가중치",
+    )
+    pump_setup_w_exp: float = Field(
+        default=0.20,
+        description="Expansion 가중치",
+    )
+    pump_setup_w_vol: float = Field(
+        default=0.15,
+        description="Volume 가중치",
+    )
+    pump_setup_w_ob: float = Field(
+        default=0.30,
+        description="Orderbook Support 가중치",
+    )
+    pump_setup_w_heat: float = Field(
+        default=0.20,
+        description="Heat Penalty 가중치",
+    )
+
+    # === v4.2 Orderbook Support ===
+    ob_range_pct: float = Field(
+        default=0.003,
+        description="호가 분석 범위 (±0.3%)",
+    )
+    ob_sample_interval_ms: int = Field(
+        default=250,
+        description="호가 샘플링 간격 (ms)",
+    )
+    ob_ema_span_sec: int = Field(
+        default=20,
+        description="호가 EMA span (초)",
+    )
+    ob_persist_sec: int = Field(
+        default=30,
+        description="호가 지속성 기준 (초)",
+    )
+
+    # === v4.2 Stop Watchdog ===
+    stop_watchdog_enabled: bool = Field(
+        default=True,
+        description="Stop Watchdog 활성화",
+    )
+    stop_watchdog_loop_ms: int = Field(
+        default=300,
+        description="Watchdog 루프 주기 (ms)",
+    )
+    stop_watchdog_ws_timeout_sec: int = Field(
+        default=3,
+        description="WebSocket 타임아웃 (초)",
+    )
+    stop_watchdog_fast_crash_pct: float = Field(
+        default=0.03,
+        description="Fast Crash 감지 임계값 (3%)",
+    )
+    stop_watchdog_fast_crash_window_sec: int = Field(
+        default=5,
+        description="Fast Crash 감지 윈도우 (초)",
     )
 
     @property
