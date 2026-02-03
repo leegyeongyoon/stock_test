@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -e .
 
 # 소스 코드
 COPY src/ src/
-COPY alembic/ alembic/ 2>/dev/null || true
+# COPY alembic/ alembic/  # Optional: uncomment when alembic is set up
 
 # 데이터 디렉토리
 RUN mkdir -p data

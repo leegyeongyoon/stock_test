@@ -219,8 +219,12 @@ class TradingEngine:
         # DB에서 주문 히스토리 로드
         await self._load_orders_from_db()
 
+        # 초기 1분봉 데이터 로드 (SurgeDetector용)
+        await self._load_initial_candles(qualified_symbols)
+
         # 메인 루프 시작
         self._running = True
+        self._candle_update_counter = 0  # 캔들 업데이트 카운터
         self._main_task = asyncio.create_task(self._main_loop())
 
         logger.info("Trading Engine started")
@@ -261,6 +265,12 @@ class TradingEngine:
 
                 # 2. 시장 데이터 업데이트
                 await self._update_market_data()
+
+                # 2.5. 1분봉 데이터 갱신 (60초마다)
+                self._candle_update_counter = getattr(self, "_candle_update_counter", 0) + 1
+                if self._candle_update_counter >= 60:
+                    self._candle_update_counter = 0
+                    await self._refresh_candles()
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 if self.risk_engine.can_open_position:
@@ -332,6 +342,91 @@ class TradingEngine:
 
         else:
             return {"success": False, "error": "Unknown command"}
+
+    async def _load_initial_candles(self, symbols: list[str]) -> None:
+        """초기 1분봉 데이터 로드 (SurgeDetector용)"""
+        logger.info("Loading initial 1m candles for SurgeDetector...")
+
+        # 상위 50개만 로드 (Rate Limit 고려)
+        target_symbols = symbols[:50]
+
+        for symbol in target_symbols:
+            try:
+                await self._load_candles_for_symbol(symbol, "1", 100)
+            except Exception as e:
+                logger.warning(f"Failed to load 1m candles for {symbol}: {e}")
+            await asyncio.sleep(0.1)  # Rate limit 방지
+
+        logger.info(
+            "Initial 1m candles loaded",
+            symbols_count=len(target_symbols),
+        )
+
+    async def _refresh_candles(self) -> None:
+        """1분봉 데이터 갱신 (60초마다 호출)"""
+        watch_symbols = self.symbol_manager.get_qualified_symbols()[:30]
+
+        for symbol in watch_symbols:
+            try:
+                await self._load_candles_for_symbol(symbol, "1", 20)
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)  # Rate limit 방지
+
+    async def _load_candles_for_symbol(
+        self, symbol: str, interval: str, limit: int
+    ) -> None:
+        """심볼별 캔들 로드 (Upbit API)"""
+        if not self._is_upbit:
+            logger.debug("Not Upbit, skipping candle load")
+            return
+
+        # Upbit API 호출
+        candles = await self.exchange.get_candles(symbol, interval, limit)
+
+        if not candles:
+            logger.debug(f"No candles returned for {symbol} {interval}m")
+            return
+
+        logger.debug(f"Loaded {len(candles)} candles for {symbol} {interval}m")
+
+        # CandleManager에 저장
+        stored_count = 0
+        for candle in candles:
+            kline = self._convert_upbit_candle(candle)
+            self.candle_manager.update_candle(
+                symbol=symbol,
+                interval=f"{interval}m",
+                kline=kline,
+            )
+            stored_count += 1
+
+        # 저장 확인
+        check = self.candle_manager.get_candles(symbol, f"{interval}m", 5)
+        logger.debug(f"After store: {symbol} {interval}m has {len(check) if check else 0} candles")
+
+    def _convert_upbit_candle(self, upbit_candle: dict) -> dict:
+        """Upbit 캔들을 CandleManager 형식으로 변환"""
+        from datetime import timezone
+
+        candle_time = upbit_candle.get("candle_date_time_utc", "")
+        if candle_time:
+            dt = datetime.fromisoformat(candle_time.replace("Z", "+00:00"))
+            timestamp_ms = int(dt.timestamp() * 1000)
+        else:
+            timestamp_ms = 0
+
+        return {
+            "t": timestamp_ms,  # Open time
+            "T": timestamp_ms + 60000,  # Close time (1분 후)
+            "o": upbit_candle.get("opening_price", 0),
+            "h": upbit_candle.get("high_price", 0),
+            "l": upbit_candle.get("low_price", 0),
+            "c": upbit_candle.get("trade_price", 0),
+            "v": upbit_candle.get("candle_acc_trade_volume", 0),
+            "q": upbit_candle.get("candle_acc_trade_price", 0),
+            "n": 0,  # Trade count (Upbit doesn't provide this)
+        }
 
     async def _update_market_data(self) -> None:
         """시장 데이터 업데이트 (동적 심볼 + 일괄 조회)"""

@@ -3,14 +3,25 @@ Surge Detector - 급등 시작 실시간 감지
 
 역할:
 - 1분봉 기반 급등 "시작" 순간 감지
-- 이미 급등한 종목은 제외 (추격 방지)
+- 구조/거리 기반 추격 판단 (5분%컷 제거)
 - 거래량 급증 + 가격 급등 동시 발생 시 신호
+- A(첫 점화) + B(리테스트) 진입 모드 지원
 
 감지 조건:
 1. 1분 변화율 >= 1.5% (급등 시작)
 2. 거래량 >= 평균의 3배 (거래량 급증)
-3. 5분 변화율 < 5% (이미 급등한 것 제외)
-4. 스프레드 < 0.5% (유동성 확보)
+3. 구조적 Anti-Chase 통과 (돌파레벨/VWAP 거리 기반)
+
+필터 4종 (v4.2):
+- VolOverheatGuard: 상한 컷 (8x 초과시 차단)
+- HotYesterdayPolicy: 전일 급등주 조건 강화
+- StructureAntiChase: 구조/거리 기반 추격 판단 (5분%컷 대체)
+- UpbitMicrostructureFilter: 호가 구조 필터 (시간 필터 대체)
+
+진입 타입:
+- A (FIRST_IGNITION): 첫 점화 - 돌파 직후 진입 (100% 포지션)
+- B (RETEST_ENTRY): 리테스트 - 되돌림 후 재진입 (70% 포지션)
+- X (BLOCKED): 추격 금지 - 너무 멀리 간 경우
 """
 
 from dataclasses import dataclass, field
@@ -20,7 +31,17 @@ from typing import Optional
 import structlog
 
 from src.config import get_settings
-from src.data.candle_manager import CandleManager, get_candle_manager
+from src.data.candle_manager import Candle, CandleManager, get_candle_manager
+from src.strategies.ignition.filters.vol_overheat_guard import (
+    get_vol_overheat_guard,
+)
+from src.strategies.ignition.filters.hot_yesterday_policy import (
+    get_hot_yesterday_policy,
+)
+from src.strategies.ignition.filters.structure_anti_chase import (
+    EntryType,
+    get_structure_anti_chase,
+)
 
 logger = structlog.get_logger()
 
@@ -32,7 +53,7 @@ class SurgeSignal:
     symbol: str
     current_price: float
     change_1m_pct: float  # 1분 변화율
-    change_5m_pct: float  # 5분 변화율 (추격 방지용)
+    change_5m_pct: float  # 5분 변화율 (레거시, 로깅용)
     volume_ratio: float  # 거래량 비율 (vs 평균)
     signal_time: datetime = field(default_factory=datetime.utcnow)
     expires_at: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(seconds=60))
@@ -42,6 +63,20 @@ class SurgeSignal:
     stop_loss: float = 0
     take_profit_1: float = 0
     take_profit_2: float = 0
+
+    # HotYesterday 조정값 (v4.1)
+    position_size_mult: float = 1.0  # 포지션 사이즈 배수
+    time_stop_min: int = 5  # 타임스톱 (분)
+    is_hot_yesterday: bool = False  # 전일 급등주 여부
+    vol_zone: str = "EARLY"  # EARLY, OPTIMAL, HIGH
+
+    # 구조적 Anti-Chase 결과 (v4.2)
+    entry_type: str = "A"  # A=첫점화, B=리테스트, X=차단
+    dist_breakout: float = 0  # 돌파레벨 대비 거리
+    dist_vwap: float = 0  # VWAP 대비 이격
+    dist_atr: float = 0  # ATR 정규화 거리
+    vwap_5m: float = 0  # 5분 VWAP
+    breakout_level: float = 0  # 돌파 레벨
 
     @property
     def is_expired(self) -> bool:
@@ -60,6 +95,17 @@ class SurgeSignal:
             "take_profit_2": round(self.take_profit_2, 2),
             "signal_time": self.signal_time.isoformat(),
             "expires_at": self.expires_at.isoformat(),
+            "position_size_mult": self.position_size_mult,
+            "time_stop_min": self.time_stop_min,
+            "is_hot_yesterday": self.is_hot_yesterday,
+            "vol_zone": self.vol_zone,
+            # v4.2: 구조적 Anti-Chase 정보
+            "entry_type": self.entry_type,
+            "dist_breakout": round(self.dist_breakout, 4),
+            "dist_vwap": round(self.dist_vwap, 4),
+            "dist_atr": round(self.dist_atr, 2),
+            "vwap_5m": round(self.vwap_5m, 2),
+            "breakout_level": round(self.breakout_level, 2),
         }
 
 
@@ -153,8 +199,9 @@ class SurgeDetector:
 
         조건:
         1. 1분 변화율 >= 1.5%
-        2. 거래량 >= 평균 3배
+        2. 거래량 >= 평균 3배 (HotYesterday시 조정)
         3. 5분 변화율 < 5% (이미 급등 제외)
+        4. VolOverheatGuard: 8x 초과시 차단 (너무 늦음)
         """
         cm = self._candle_manager
         current_price = market_data.get("price", 0)
@@ -184,23 +231,75 @@ class SurgeDetector:
         else:
             volume_ratio = 0
 
+        # === Filter 1: HotYesterdayPolicy (파라미터 조정) ===
+        hot_policy = get_hot_yesterday_policy()
+        signed_change_rate = market_data.get("signed_change_rate", 0)
+        adjustment = hot_policy.check(
+            symbol=symbol,
+            signed_change_rate=signed_change_rate,
+            base_volume_mult=3.0,
+            base_time_stop_min=5,
+        )
+        adjusted_vol_mult = adjustment.volume_mult_adjusted
+
+        # === Filter 2: VolOverheatGuard (상한 컷) ===
+        vol_guard = get_vol_overheat_guard()
+        vol_check = vol_guard.check(
+            symbol=symbol,
+            current_volume=recent_vol if len(volumes) >= 5 else 0,
+            avg_volume_24h=avg_vol if len(volumes) >= 5 else 1,
+        )
+        if not vol_check.passed:
+            logger.debug(
+                "Surge rejected - volume overheat",
+                symbol=symbol,
+                vol_ratio=f"{volume_ratio:.1f}x",
+                reason=vol_check.reason,
+            )
+            return None
+
         # === 급등 조건 체크 ===
         # 조건 1: 1분 변화율 >= 1.5%
         if change_1m_pct < 1.5:
             return None
 
-        # 조건 2: 거래량 >= 평균 3배
-        if volume_ratio < 3.0:
+        # 조건 2: 거래량 >= 조정된 배수 (기본 3배, HotYesterday시 강화)
+        if volume_ratio < adjusted_vol_mult:
             return None
 
-        # 조건 3: 5분 변화율 < 5% (이미 급등한 것 제외 - 추격 방지)
-        if change_5m_pct >= 5.0:
+        # === Filter 3: 구조적 Anti-Chase (v4.2 - 5분 % 컷 제거) ===
+        structure_chase = get_structure_anti_chase()
+
+        # VWAP/Breakout 레벨 계산
+        vwap_5m = self._calc_vwap_5m(symbol, candles_1m)
+        breakout_level = self._get_breakout_level(candles_1m)
+        atr_5m = self._calc_atr_5m(candles_1m)
+
+        # 리테스트 여부 판단
+        is_retest = self._check_retest_pattern(candles_1m, breakout_level)
+
+        chase_result = structure_chase.check(
+            symbol=symbol,
+            current_price=current_price,
+            breakout_level=breakout_level,
+            vwap_5m=vwap_5m,
+            atr_5m=atr_5m,
+            is_retest=is_retest,
+        )
+
+        if not chase_result.passed:
             logger.debug(
-                "Surge rejected - already extended",
+                "Surge rejected - structure anti-chase",
                 symbol=symbol,
-                change_5m=f"{change_5m_pct:.2f}%",
+                entry_type=chase_result.entry_type.value,
+                dist_atr=f"{chase_result.dist_atr:.2f}",
+                reason=chase_result.reason,
             )
             return None
+
+        # 진입 타입 및 포지션 배수
+        entry_type = chase_result.entry_type.value
+        position_mult_structure = chase_result.position_mult
 
         # === 신호 생성 ===
         # 손절가: 1분 전 저가 또는 -2%
@@ -212,6 +311,9 @@ class SurgeDetector:
         take_profit_1 = current_price + risk * 1.5  # 1.5R
         take_profit_2 = current_price + risk * 3.0  # 3R
 
+        # 포지션 배수 결합: HotYesterday * Structure AntiChase
+        combined_position_mult = adjustment.position_size_mult * position_mult_structure
+
         signal = SurgeSignal(
             symbol=symbol,
             current_price=current_price,
@@ -222,9 +324,80 @@ class SurgeDetector:
             stop_loss=stop_loss,
             take_profit_1=take_profit_1,
             take_profit_2=take_profit_2,
+            # HotYesterday 조정값
+            position_size_mult=combined_position_mult,
+            time_stop_min=adjustment.time_stop_min,
+            is_hot_yesterday=adjustment.is_hot,
+            vol_zone=vol_check.zone,
+            # 구조적 Anti-Chase 결과 (v4.2)
+            entry_type=entry_type,
+            dist_breakout=chase_result.dist_breakout,
+            dist_vwap=chase_result.dist_vwap,
+            dist_atr=chase_result.dist_atr,
+            vwap_5m=vwap_5m,
+            breakout_level=breakout_level,
         )
 
         return signal
+
+    def _calc_vwap_5m(self, symbol: str, candles: list[Candle]) -> float:
+        """5분 VWAP 계산"""
+        if len(candles) < 5:
+            return candles[-1].close if candles else 0
+
+        recent = candles[-5:]
+        total_pv = sum(c.close * c.volume for c in recent)
+        total_v = sum(c.volume for c in recent)
+
+        return total_pv / total_v if total_v > 0 else candles[-1].close
+
+    def _get_breakout_level(self, candles: list[Candle]) -> float:
+        """돌파 레벨 (최근 5분 고점)"""
+        if len(candles) < 5:
+            return candles[-1].high if candles else 0
+
+        return max(c.high for c in candles[-5:])
+
+    def _calc_atr_5m(self, candles: list[Candle]) -> float:
+        """5분 ATR 계산"""
+        if len(candles) < 2:
+            return 0
+
+        true_ranges = []
+        for i in range(1, min(6, len(candles))):
+            tr = max(
+                candles[i].high - candles[i].low,
+                abs(candles[i].high - candles[i - 1].close),
+                abs(candles[i].low - candles[i - 1].close),
+            )
+            true_ranges.append(tr)
+
+        return sum(true_ranges) / len(true_ranges) if true_ranges else 0
+
+    def _check_retest_pattern(
+        self, candles: list[Candle], breakout_level: float
+    ) -> bool:
+        """
+        리테스트 패턴 감지
+
+        조건: 한번 돌파 후 되돌림이 있었고, 다시 상승 중
+        """
+        if len(candles) < 5:
+            return False
+
+        # 최근 5분 중 돌파 후 되돌림이 있었는지
+        recent_5 = candles[-5:]
+
+        # 한번 돌파했었음 (최근 5봉 중 고점이 돌파레벨 넘음)
+        broke_above = any(c.high > breakout_level for c in recent_5[:-1])
+
+        # 되돌림 있었음 (최근 3봉 중 종가가 돌파레벨 아래)
+        pulled_back = any(c.close < breakout_level for c in recent_5[-3:-1])
+
+        # 현재 회복 중 (현재 봉이 이전 봉보다 높음)
+        recovering = candles[-1].close > candles[-2].close
+
+        return broke_above and pulled_back and recovering
 
     def get_active_signals(self) -> list[SurgeSignal]:
         """활성 신호 반환"""
@@ -332,6 +505,19 @@ class SurgeDetector:
                 }
                 for p in self._positions.values()
             ],
+            "filter_stats": self.get_filter_stats(),
+        }
+
+    def get_filter_stats(self) -> dict:
+        """필터 통계 반환"""
+        vol_guard = get_vol_overheat_guard()
+        hot_policy = get_hot_yesterday_policy()
+        structure_chase = get_structure_anti_chase()
+
+        return {
+            "vol_overheat_guard": vol_guard.get_stats(),
+            "hot_yesterday_policy": hot_policy.get_stats(),
+            "structure_anti_chase": structure_chase.get_stats(),
         }
 
 

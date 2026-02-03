@@ -669,6 +669,118 @@ class Settings(BaseSettings):
         description="구조 손절 버퍼 (0.3%)",
     )
 
+    # === Surge Filter: Upbit Microstructure ===
+    microstructure_max_spread_bps: float = Field(
+        default=12.0,
+        description="최대 스프레드 (12bps)",
+    )
+    microstructure_depth_mult: float = Field(
+        default=6.0,
+        description="호가 깊이 배수 (주문 사이즈 * 6)",
+    )
+    microstructure_max_slippage_pct: float = Field(
+        default=0.0025,
+        description="최대 슬리피지 (0.25%)",
+    )
+
+    # === Surge Filter: Hot Yesterday Policy ===
+    hot_yesterday_threshold: float = Field(
+        default=0.10,
+        description="전일 급등 임계값 (+10%)",
+    )
+    hot_yesterday_position_mult: float = Field(
+        default=0.6,
+        description="전일 급등주 포지션 배수 (60%)",
+    )
+    hot_yesterday_time_stop_reduce: int = Field(
+        default=2,
+        description="전일 급등주 타임스톱 감소 (분)",
+    )
+
+    # === Surge Filter: Volume Overheat Guard ===
+    vol_overheat_max_ratio: float = Field(
+        default=8.0,
+        description="거래량 과열 상한 (8x 초과시 차단)",
+    )
+    vol_overheat_optimal_lower: float = Field(
+        default=2.0,
+        description="최적 거래량 하한 (2x)",
+    )
+    vol_overheat_optimal_upper: float = Field(
+        default=5.0,
+        description="최적 거래량 상한 (5x)",
+    )
+
+    # === Structure Anti-Chase (v4.2) ===
+    structure_chase_breakout_mult: float = Field(
+        default=0.7,
+        description="돌파레벨 추격 임계값 (ATR 배수)",
+    )
+    structure_chase_vwap_mult: float = Field(
+        default=0.9,
+        description="VWAP 추격 임계값 (ATR 배수)",
+    )
+    structure_retest_vwap_zone: float = Field(
+        default=0.3,
+        description="리테스트 VWAP 존 (ATR 배수)",
+    )
+    structure_retest_breakout_zone: float = Field(
+        default=0.25,
+        description="리테스트 돌파레벨 존 (ATR 배수)",
+    )
+    structure_retest_position_mult: float = Field(
+        default=0.7,
+        description="리테스트 진입 사이징 (70%)",
+    )
+
+    # === v4.0 Risk-Based Sizing ===
+    ignition_risk_per_trade_l1: float = Field(
+        default=0.0020,
+        description="ATTACK_LEVEL 1 트레이드당 리스크 (0.20%)",
+    )
+    ignition_risk_per_trade_l2: float = Field(
+        default=0.0035,
+        description="ATTACK_LEVEL 2 트레이드당 리스크 (0.35%)",
+    )
+    ignition_risk_per_trade_l3: float = Field(
+        default=0.0050,
+        description="ATTACK_LEVEL 3 트레이드당 리스크 (0.50%)",
+    )
+
+    # === v4.0 Anti-Chase (조정) ===
+    structure_chase_dist_atr_max: float = Field(
+        default=0.9,
+        description="dist_atr 차단 임계값 (0.9 초과시 추격 금지)",
+    )
+    structure_chase_dist_breakout_max: float = Field(
+        default=0.6,
+        description="dist_breakout 차단 배수 (0.6 * atr_pct 초과시 추격 금지)",
+    )
+
+    # === v4.0 DD Tier 연동 ===
+    ignition_disable_dd_tier: int = Field(
+        default=4,
+        description="Ignition 비활성화 DD Tier (4 이상이면 OFF)",
+    )
+    retest_max_dd_tier: int = Field(
+        default=5,
+        description="Retest 허용 최대 DD Tier",
+    )
+
+    # === v4.0 자정 유동성 강화 ===
+    midnight_liquidity_mult: float = Field(
+        default=1.5,
+        description="자정(00:00~01:00) 유동성 기준 배수",
+    )
+    midnight_start_hour: int = Field(
+        default=0,
+        description="자정 시간대 시작 (UTC)",
+    )
+    midnight_end_hour: int = Field(
+        default=1,
+        description="자정 시간대 종료 (UTC)",
+    )
+
     @property
     def is_paper_mode(self) -> bool:
         """Paper 모드 여부"""

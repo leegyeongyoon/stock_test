@@ -1271,6 +1271,46 @@ async def get_surge_status():
     }
 
 
+@router.get("/surge/diagnostic")
+async def get_surge_diagnostic():
+    """SurgeDetector 진단 정보 조회 (1분봉 데이터 상태 등)"""
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="SurgeDetector is only available for Upbit",
+        )
+
+    from src.data.candle_manager import get_candle_manager
+    cm = get_candle_manager()
+
+    # 주요 심볼들의 1분봉 상태 확인
+    test_symbols = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ZIL", "KRW-SOL"]
+    candle_status = {}
+
+    for symbol in test_symbols:
+        candles_1m = cm.get_candles(symbol, "1m", 10)
+        candles_5m = cm.get_candles(symbol, "5m", 5)
+        candle_status[symbol] = {
+            "candles_1m": len(candles_1m) if candles_1m else 0,
+            "candles_5m": len(candles_5m) if candles_5m else 0,
+        }
+        if candles_1m:
+            last = candles_1m[-1]
+            candle_status[symbol]["last_1m_close"] = last.close
+            candle_status[symbol]["last_1m_time"] = str(last.open_time) if hasattr(last, "open_time") else "N/A"
+
+    # 엔진 상태
+    return {
+        "candle_manager_status": candle_status,
+        "engine_running": engine._running if hasattr(engine, "_running") else False,
+        "is_upbit": settings.is_upbit,
+        "candle_update_counter": getattr(engine, "_candle_update_counter", -1),
+    }
+
+
 @router.get("/surge/signals")
 async def get_surge_signals():
     """활성 급등 신호 조회
