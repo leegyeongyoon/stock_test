@@ -68,7 +68,7 @@ class RiskSizer:
     MAX_STOP_DISTANCE_PCT = 0.025  # 2.5% 초과 손절은 감시 대상
 
     # 안전장치: 절대 최대 비중
-    ABSOLUTE_MAX_POSITION_PCT = 0.60  # 60% 초과 금지
+    ABSOLUTE_MAX_POSITION_PCT = 0.65  # 65% 초과 금지 (Level 3 60% + 여유)
 
     def __init__(self) -> None:
         self._settings = get_settings()
@@ -144,7 +144,7 @@ class RiskSizer:
         # position_value = (equity * risk_per_trade) / stop_distance_pct
         position_value = (equity * risk_per_trade) / stop_distance_pct
 
-        # === 비중 상한 체크 ===
+        # === 비중 상한/하한 체크 ===
         position_pct = position_value / equity
 
         # 레벨별 최대 비중
@@ -156,12 +156,29 @@ class RiskSizer:
         # 절대 상한
         max_position_pct = min(max_position_pct, self.ABSOLUTE_MAX_POSITION_PCT)
 
+        # 레벨별 최소 비중 (Level 3는 급등주 대응으로 50% 보장)
+        min_position_pct = self._attack_config.get_min_position_value_pct(
+            level=attack_level,
+        )
+
         # 비중 캡 적용
         if position_pct > max_position_pct:
             position_pct = max_position_pct
             position_value = equity * position_pct
             capped = True
             cap_reason = cap_reason or "max_position_pct"
+        elif position_pct < min_position_pct and min_position_pct > 0:
+            # 최소 비중 플로어 적용 (급등주 기회 포착)
+            position_pct = min_position_pct
+            position_value = equity * position_pct
+            capped = True
+            cap_reason = "min_position_pct_floor"
+            logger.info(
+                "Position boosted to minimum floor",
+                level=attack_level.value,
+                min_pct=f"{min_position_pct:.0%}",
+                original_pct=f"{position_value / equity:.2%}",
+            )
 
         # === 수량 계산 ===
         quantity = position_value / entry_price if entry_price > 0 else 0

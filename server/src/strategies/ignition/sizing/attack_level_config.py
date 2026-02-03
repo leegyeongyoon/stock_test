@@ -208,14 +208,25 @@ class AttackLevelConfig:
 
         position_pct = config.risk_per_trade / stop_distance_pct
 
-        # 절대 상한 (안전장치)
+        # 절대 상한 (안전장치) - Level 3는 config에서 읽어옴
+        l3_max = getattr(self._settings, "ignition_max_position_pct_l3", 0.60)
         max_caps = {
             AttackLevel.LEVEL_1: 0.15,  # 15%
             AttackLevel.LEVEL_2: 0.35,  # 35%
-            AttackLevel.LEVEL_3: 0.55,  # 55%
+            AttackLevel.LEVEL_3: l3_max,  # 60% (config)
         }
 
         return min(position_pct, max_caps.get(level, 0.15))
+
+    def get_min_position_value_pct(self, level: AttackLevel) -> float:
+        """
+        레벨별 최소 포지션 비중 (급등주 대응)
+
+        Level 3에서는 최소 50% 비중을 보장하여 급등주 기회 포착
+        """
+        if level == AttackLevel.LEVEL_3:
+            return getattr(self._settings, "ignition_min_position_pct_l3", 0.50)
+        return 0.0  # Level 1, 2는 최소 비중 없음
 
 
 # 싱글톤

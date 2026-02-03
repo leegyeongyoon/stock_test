@@ -1454,3 +1454,89 @@ async def get_surge_candidates(
         "total_scanned": len(symbols),
         "filtered_count": len(candidates),
     }
+
+
+# ===== Ignition Watchlist API =====
+
+
+@router.get("/ignition/watchlist")
+async def get_ignition_watchlist():
+    """Ignition Watchlist 조회 - 현재 감시 중인 종목
+
+    Returns:
+        watchlist: 감시 중인 종목 목록 (Setup 통과)
+        count: 종목 수
+        mode: 현재 Ignition 모드
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="Ignition module is only available for Upbit",
+        )
+
+    if not hasattr(engine, "ignition_strategy") or engine.ignition_strategy is None:
+        return {
+            "watchlist": [],
+            "count": 0,
+            "mode": settings.ignition_mode,
+            "message": "Ignition strategy not initialized",
+        }
+
+    watchlist = engine.ignition_strategy.get_watchlist()
+
+    return {
+        "watchlist": [
+            {
+                "symbol": c.symbol,
+                "score": c.total_score,
+                "added_at": c.added_at.isoformat() if hasattr(c, "added_at") else None,
+                "setup_scores": c.scores if hasattr(c, "scores") else {},
+            }
+            for c in watchlist
+        ],
+        "count": len(watchlist),
+        "mode": settings.ignition_mode,
+    }
+
+
+@router.get("/ignition/status")
+async def get_ignition_status():
+    """Ignition 전략 전체 상태 조회
+
+    Returns:
+        mode: Ignition 모드
+        watchlist_count: Watchlist 종목 수
+        active_positions: 활성 포지션 수
+        settings: 주요 설정값
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="Ignition module is only available for Upbit",
+        )
+
+    watchlist_count = 0
+    active_positions = 0
+
+    if hasattr(engine, "ignition_strategy") and engine.ignition_strategy is not None:
+        watchlist_count = len(engine.ignition_strategy.get_watchlist())
+        active_positions = len(engine.ignition_strategy.get_all_positions())
+
+    return {
+        "mode": settings.ignition_mode,
+        "watchlist_count": watchlist_count,
+        "active_positions": active_positions,
+        "settings": {
+            "setup_scan_interval_min": settings.ignition_setup_scan_interval_min,
+            "watchlist_max": settings.ignition_watchlist_max,
+            "setup_min_score": settings.ignition_setup_min_score,
+            "min_position_pct_l3": getattr(settings, "ignition_min_position_pct_l3", 0.50),
+            "max_position_pct_l3": getattr(settings, "ignition_max_position_pct_l3", 0.60),
+        },
+    }

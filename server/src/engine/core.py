@@ -767,8 +767,11 @@ class TradingEngine:
                         await self._execute_pullback_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
 
             # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
+            # Note: Ignition은 Satellite와 독립적으로 운영됨 (satellite_enabled와 무관)
             if self._is_upbit and self.ignition_strategy and settings.ignition_mode != "OFF":
-                if risk_decision.satellite_allowed:
+                # Ignition은 SAFE/HALT 모드에서만 차단, satellite_enabled와 무관
+                ignition_allowed = risk_decision.mode not in [RiskMode.HALT]
+                if ignition_allowed:
                     try:
                         # BTC 24시간 변화율 설정 (상대강도 계산용)
                         btc_data = self._market_data.get("KRW-BTC", {})

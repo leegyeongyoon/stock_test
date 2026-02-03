@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     )
 
     # === Satellite 전략 파라미터 ===
-    satellite_enabled: bool = Field(default=True)
+    satellite_enabled: bool = Field(default=False)  # v4.2: OFF (Ignition으로 대체)
     satellite_max_position_usd: float = Field(
         default=5000.0,
         description="Satellite 전략 최대 포지션 (USD)",
@@ -243,7 +243,7 @@ class Settings(BaseSettings):
 
     # === Attack Module 설정 (급등주 공격) ===
     attack_mode: Literal["OFF", "NORMAL", "PLUS", "MAX"] = Field(
-        default="NORMAL",
+        default="OFF",  # v4.2: OFF (위험한 추격 매수 비활성화)
         description="공격 모드 (OFF/NORMAL/PLUS/MAX)",
     )
 
@@ -745,6 +745,14 @@ class Settings(BaseSettings):
     ignition_risk_per_trade_l3: float = Field(
         default=0.0050,
         description="ATTACK_LEVEL 3 트레이드당 리스크 (0.50%)",
+    )
+    ignition_min_position_pct_l3: float = Field(
+        default=0.50,
+        description="ATTACK_LEVEL 3 최소 포지션 비중 (50%) - 급등주 대응",
+    )
+    ignition_max_position_pct_l3: float = Field(
+        default=0.60,
+        description="ATTACK_LEVEL 3 최대 포지션 비중 (60%) - 급등주 대응",
     )
 
     # === v4.0 Anti-Chase (조정 - 강화) ===
