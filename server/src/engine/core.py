@@ -1832,9 +1832,16 @@ class TradingEngine:
                 },
             )
 
-            # Slack 알림
+            # Slack 알림 (잔고 정보 포함)
             if self.slack_notifier.is_enabled:
                 notional = filled_qty * avg_price
+                # 잔고 조회
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                except Exception:
+                    remaining_krw = 0
+
                 await self.slack_notifier.send(SlackMessage(
                     text=f"""
 :chart_with_upwards_trend: *Pullback 매수 체결*
@@ -1844,6 +1851,8 @@ class TradingEngine:
 > 가격: ₩{avg_price:,.0f}
 > 금액: ₩{notional:,.0f}
 > 손절가: ₩{signal.stop_loss:,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
                     """.strip(),
                     level=AlertLevel.INFO,
                 ))
@@ -1963,9 +1972,16 @@ class TradingEngine:
                 },
             )
 
-            # Slack 알림
+            # Slack 알림 (잔고 정보 포함)
             if self.slack_notifier.is_enabled:
                 notional = filled_qty * avg_price
+                # 잔고 조회
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                except Exception:
+                    remaining_krw = 0
+
                 await self.slack_notifier.send(SlackMessage(
                     text=f"""
 :fire: *Ignition 매수 체결*
@@ -1975,6 +1991,8 @@ class TradingEngine:
 > 가격: ₩{avg_price:,.0f}
 > 금액: ₩{notional:,.0f}
 > 손절가: ₩{sizing.stop_loss:,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
                     """.strip(),
                     level=AlertLevel.INFO,
                 ))
@@ -2056,9 +2074,17 @@ class TradingEngine:
                 },
             )
 
-            # Slack 알림
+            # Slack 알림 (잔고 정보 포함)
             if self.slack_notifier.is_enabled:
                 pnl_emoji = ":moneybag:" if position.realized_pnl > 0 else ":money_with_wings:"
+                pnl_pct = ((result.avg_price or current_price) / position.entry_price - 1) * 100 if position.entry_price > 0 else 0
+                # 잔고 조회
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                except Exception:
+                    remaining_krw = 0
+
                 await self.slack_notifier.send(SlackMessage(
                     text=f"""
 {pnl_emoji} *Ignition 청산*
@@ -2066,7 +2092,9 @@ class TradingEngine:
 > 사유: {exit_reason.value}
 > 수량: {exit_qty:.4f}
 > 가격: ₩{result.avg_price or current_price:,.0f}
-> 손익: ₩{position.realized_pnl:,.0f}
+> 손익: ₩{position.realized_pnl:,.0f} ({pnl_pct:+.2f}%)
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
                     """.strip(),
                     level=AlertLevel.INFO if position.realized_pnl >= 0 else AlertLevel.WARNING,
                 ))
@@ -2383,19 +2411,29 @@ class TradingEngine:
                 take_profit=surge.take_profit_1,
             )
 
-            # Slack 알림
+            # Slack 알림 (잔고 정보 포함)
             if self.slack_notifier.is_enabled:
                 notional = filled_qty * avg_price
+                # 잔고 조회
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                except:
+                    remaining_krw = 0
+
                 await self.slack_notifier.send(SlackMessage(
                     text=f"""
 :rocket: *급등 감지 매수*
 > 심볼: `{symbol}`
 > 1분 변화: +{surge.change_1m_pct:.1f}%
-> 5분 변화: +{surge.change_5m_pct:.1f}%
 > 거래량: {surge.volume_ratio:.1f}x
 > 수량: {filled_qty:.4f}
 > 가격: ₩{avg_price:,.0f}
-> 금액: ₩{notional:,.0f}
+> 매수금액: ₩{notional:,.0f}
+> 손절가: ₩{surge.stop_loss:,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+> 📊 총 자산: ₩{current_equity:,.0f}
                     """.strip(),
                     level=AlertLevel.INFO,
                 ))
@@ -2475,9 +2513,28 @@ class TradingEngine:
                 },
             )
 
-            # Slack 알림
+            # Slack 알림 (잔고 정보 포함)
             if self.slack_notifier.is_enabled:
                 pnl_emoji = ":moneybag:" if pnl > 0 else ":money_with_wings:"
+                pnl_pct = ((current_price / position.entry_price) - 1) * 100
+                # 잔고 조회
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                    # 총 자산 계산
+                    all_balances = await self.exchange.get_all_balances()
+                    total_equity = remaining_krw
+                    for bal in all_balances:
+                        if bal.asset != "KRW" and bal.total > 0:
+                            sym = f"KRW-{bal.asset}"
+                            md = self._market_data.get(sym, {})
+                            price = md.get("price", 0)
+                            if price > 0:
+                                total_equity += bal.total * price
+                except:
+                    remaining_krw = 0
+                    total_equity = 0
+
                 await self.slack_notifier.send(SlackMessage(
                     text=f"""
 {pnl_emoji} *급등 청산*
@@ -2486,7 +2543,10 @@ class TradingEngine:
 > 수량: {exit_qty:.4f}
 > 진입가: ₩{position.entry_price:,.0f}
 > 청산가: ₩{result.avg_price or current_price:,.0f}
-> 손익: ₩{pnl:,.0f}
+> 손익: ₩{pnl:,.0f} ({pnl_pct:+.2f}%)
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+> 📊 총 자산: ₩{total_equity:,.0f}
                     """.strip(),
                     level=AlertLevel.INFO if pnl >= 0 else AlertLevel.WARNING,
                 ))
@@ -2859,11 +2919,18 @@ class TradingEngine:
                                 realized_pnl=realized_pnl,
                             )
 
-                            # Slack 알림 (청산)
+                            # Slack 알림 (청산 - 잔고 정보 포함)
                             if self.slack_notifier.is_enabled:
                                 pnl_emoji = ":moneybag:" if realized_pnl >= 0 else ":money_with_wings:"
                                 pnl_sign = "+" if realized_pnl >= 0 else ""
                                 pnl_pct = (realized_pnl / (entry_price * result.filled_qty)) * 100 if entry_price > 0 else 0
+                                # 잔고 조회
+                                try:
+                                    krw_balance = await self.exchange.get_balance("KRW")
+                                    remaining_krw = krw_balance.available if krw_balance else 0
+                                except Exception:
+                                    remaining_krw = 0
+
                                 await self.slack_notifier.send(SlackMessage(
                                     text=f"""
 {pnl_emoji} *Pullback 청산*
@@ -2873,6 +2940,8 @@ class TradingEngine:
 > 진입가: ₩{entry_price:,.0f}
 > 청산가: ₩{result.avg_price:,.0f}
 > 손익: {pnl_sign}₩{realized_pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
                                     """.strip(),
                                     level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
                                 ))
