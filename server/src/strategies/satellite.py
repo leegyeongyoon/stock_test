@@ -713,3 +713,145 @@ class SatelliteStrategy(BaseStrategy):
             )
 
         return synced_count
+
+    def get_positions_for_liquidation(
+        self,
+        market_data: dict,
+        required_amount: float,
+        max_loss_pct: float = -0.02,
+    ) -> list[tuple[str, float, float, float]]:
+        """
+        Surge/Ignition 진입을 위한 자본 확보용 청산 대상 포지션 선택
+
+        청산 우선순위:
+        1. 수익 포지션 (PnL% 내림차순 - 이익 큰 것부터)
+        2. 소폭 손실 포지션 (max_loss_pct 이상)
+        3. 큰 손실 포지션은 제외 (손실 확정 방지)
+
+        Args:
+            market_data: 현재 시세 정보 {symbol: {price: float, ...}}
+            required_amount: 확보해야 할 금액 (KRW)
+            max_loss_pct: 청산 허용 최대 손실률 (기본 -2%)
+
+        Returns:
+            청산 대상 리스트: [(symbol, quantity, current_price, pnl_pct), ...]
+        """
+        if not self._active_positions:
+            return []
+
+        # 포지션별 PnL 계산
+        positions_with_pnl = []
+        for symbol, pos in self._active_positions.items():
+            current_price = market_data.get(symbol, {}).get("price", pos.entry_price)
+            if current_price <= 0:
+                continue
+
+            pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+            notional = pos.quantity * current_price
+
+            # 최대 손실 이상인 것만 청산 대상
+            if pnl_pct >= max_loss_pct:
+                positions_with_pnl.append({
+                    "symbol": symbol,
+                    "quantity": pos.quantity,
+                    "current_price": current_price,
+                    "entry_price": pos.entry_price,
+                    "pnl_pct": pnl_pct,
+                    "notional": notional,
+                })
+
+        # 정렬: 수익 포지션 우선, 수익률 내림차순
+        positions_with_pnl.sort(key=lambda x: x["pnl_pct"], reverse=True)
+
+        # 필요 금액만큼 선택
+        selected = []
+        accumulated = 0.0
+
+        for pos_info in positions_with_pnl:
+            if accumulated >= required_amount:
+                break
+
+            selected.append((
+                pos_info["symbol"],
+                pos_info["quantity"],
+                pos_info["current_price"],
+                pos_info["pnl_pct"],
+            ))
+            accumulated += pos_info["notional"]
+
+            logger.info(
+                "Selected Satellite for liquidation",
+                symbol=pos_info["symbol"],
+                pnl_pct=f"{pos_info['pnl_pct']:.2%}",
+                notional=f"₩{pos_info['notional']:,.0f}",
+                accumulated=f"₩{accumulated:,.0f}",
+                required=f"₩{required_amount:,.0f}",
+            )
+
+        return selected
+
+    def get_active_positions_summary(self, market_data: dict) -> dict:
+        """
+        활성 포지션 요약 (청산 의사결정용)
+
+        Returns:
+            {
+                "total_count": int,
+                "total_notional": float,
+                "profitable_count": int,
+                "profitable_notional": float,
+                "losing_count": int,
+                "positions": [...]
+            }
+        """
+        if not self._active_positions:
+            return {
+                "total_count": 0,
+                "total_notional": 0,
+                "profitable_count": 0,
+                "profitable_notional": 0,
+                "losing_count": 0,
+                "positions": [],
+            }
+
+        positions_info = []
+        total_notional = 0
+        profitable_count = 0
+        profitable_notional = 0
+        losing_count = 0
+
+        for symbol, pos in self._active_positions.items():
+            current_price = market_data.get(symbol, {}).get("price", pos.entry_price)
+            if current_price <= 0:
+                continue
+
+            pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+            notional = pos.quantity * current_price
+
+            total_notional += notional
+            if pnl_pct >= 0:
+                profitable_count += 1
+                profitable_notional += notional
+            else:
+                losing_count += 1
+
+            positions_info.append({
+                "symbol": symbol,
+                "quantity": pos.quantity,
+                "entry_price": pos.entry_price,
+                "current_price": current_price,
+                "pnl_pct": pnl_pct,
+                "notional": notional,
+            })
+
+        # PnL 내림차순 정렬
+        positions_info.sort(key=lambda x: x["pnl_pct"], reverse=True)
+
+        return {
+            "total_count": len(positions_info),
+            "total_notional": total_notional,
+            "profitable_count": profitable_count,
+            "profitable_notional": profitable_notional,
+            "losing_count": losing_count,
+            "positions": positions_info,
+        }

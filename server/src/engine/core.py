@@ -2038,6 +2038,155 @@ class TradingEngine:
         except Exception as e:
             logger.error("Ignition exit execution error", error=str(e))
 
+    async def _liquidate_satellites_for_surge(
+        self,
+        required_amount: float,
+        available_krw: float,
+    ) -> float:
+        """
+        Surge/Ignition 진입을 위해 Satellite 포지션 청산하여 자본 확보
+
+        우선순위:
+        1. 수익 포지션 (이익 큰 것부터)
+        2. 소폭 손실 포지션 (-2% 이내)
+
+        Args:
+            required_amount: 필요한 총 금액
+            available_krw: 현재 가용 현금
+
+        Returns:
+            청산 후 예상 확보 금액
+        """
+        shortage = required_amount - available_krw
+        if shortage <= 0:
+            return available_krw  # 이미 충분함
+
+        # 청산 대상 선정
+        liquidation_targets = self.satellite_strategy.get_positions_for_liquidation(
+            market_data=self._market_data,
+            required_amount=shortage * 1.05,  # 5% 버퍼
+            max_loss_pct=-0.02,  # 최대 -2% 손실까지만 청산
+        )
+
+        if not liquidation_targets:
+            logger.warning(
+                "No Satellite positions available for liquidation",
+                shortage=f"₩{shortage:,.0f}",
+            )
+            return available_krw
+
+        # 청산 실행
+        freed_capital = 0.0
+        for symbol, quantity, current_price, pnl_pct in liquidation_targets:
+            try:
+                logger.info(
+                    "Liquidating Satellite for Surge capital",
+                    symbol=symbol,
+                    quantity=quantity,
+                    pnl_pct=f"{pnl_pct:.2%}",
+                    estimated_value=f"₩{quantity * current_price:,.0f}",
+                )
+
+                # PAPER 모드 체크
+                if not self.mode_manager.should_execute_trades():
+                    logger.info(
+                        "PAPER mode - simulating Satellite liquidation",
+                        symbol=symbol,
+                    )
+                    freed_capital += quantity * current_price
+                    self.satellite_strategy.close_position(symbol)
+                    continue
+
+                # 시장가 매도
+                result = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=OrderSide.SELL,
+                    order_type=OrderType.MARKET,
+                    quantity=quantity,
+                )
+
+                if result.success:
+                    entry_price = self.satellite_strategy._active_positions.get(
+                        symbol, type("obj", (), {"entry_price": current_price})()
+                    ).entry_price
+                    realized_pnl = (result.avg_price - entry_price) * result.filled_qty
+
+                    # 포지션 추적 종료
+                    self.satellite_strategy.close_position(symbol)
+                    freed_capital += result.filled_qty * result.avg_price
+
+                    # 이벤트 기록
+                    self.add_event(
+                        level="INFO",
+                        event_type="SATELLITE_EXIT",
+                        message=f"Satellite liquidated for Surge: {symbol}",
+                        details={
+                            "reason": "SURGE_CAPITAL_REALLOCATION",
+                            "quantity": result.filled_qty,
+                            "price": result.avg_price,
+                            "pnl_pct": pnl_pct,
+                            "realized_pnl": realized_pnl,
+                        },
+                    )
+
+                    # 주문 기록
+                    self.add_order(
+                        symbol=symbol,
+                        strategy="SATELLITE",
+                        side="SELL",
+                        order_type="MARKET",
+                        quantity=result.filled_qty,
+                        price=result.avg_price,
+                        status="FILLED",
+                        exchange_order_id=getattr(result, "order_id", None),
+                        realized_pnl=realized_pnl,
+                    )
+
+                    logger.info(
+                        "Satellite liquidated successfully",
+                        symbol=symbol,
+                        filled_qty=result.filled_qty,
+                        price=result.avg_price,
+                        realized_pnl=f"₩{realized_pnl:,.0f}",
+                    )
+
+                    # Slack 알림
+                    if self.slack_notifier.is_enabled:
+                        pnl_emoji = "💰" if realized_pnl >= 0 else "📉"
+                        await self.slack_notifier.send(SlackMessage(
+                            text=f"""
+{pnl_emoji} *Satellite 청산 (Surge 자본 재배분)*
+> 심볼: `{symbol}`
+> 수량: {result.filled_qty:.4f}
+> 가격: ₩{result.avg_price:,.0f}
+> 수익률: {pnl_pct:.1%}
+> 손익: ₩{realized_pnl:,.0f}
+                            """.strip(),
+                            level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
+                        ))
+
+                else:
+                    logger.error(
+                        "Satellite liquidation failed",
+                        symbol=symbol,
+                        error=result.error,
+                    )
+
+            except Exception as e:
+                logger.error(
+                    "Satellite liquidation error",
+                    symbol=symbol,
+                    error=str(e),
+                )
+
+        logger.info(
+            "Satellite liquidation completed",
+            freed_capital=f"₩{freed_capital:,.0f}",
+            total_available=f"₩{available_krw + freed_capital:,.0f}",
+        )
+
+        return available_krw + freed_capital
+
     async def _execute_surge_entry(self, surge, market_data: dict, risk_decision, current_equity: float) -> None:
         """급등 시작 진입 실행"""
         try:
@@ -2073,6 +2222,53 @@ class TradingEngine:
             if order_amount < MIN_ORDER:
                 logger.debug("Surge order too small", amount=order_amount, min=MIN_ORDER)
                 return
+
+            # === 자본 확인 및 Satellite 청산 ===
+            # 가용 현금 확인
+            krw_balance = await self.exchange.get_balance("KRW")
+            available_krw = krw_balance.free if krw_balance else 0
+
+            if available_krw < order_amount:
+                logger.info(
+                    "Insufficient capital for Surge - checking Satellite positions",
+                    required=f"₩{order_amount:,.0f}",
+                    available=f"₩{available_krw:,.0f}",
+                    shortage=f"₩{order_amount - available_krw:,.0f}",
+                )
+
+                # Satellite 포지션 청산하여 자본 확보
+                available_krw = await self._liquidate_satellites_for_surge(
+                    required_amount=order_amount,
+                    available_krw=available_krw,
+                )
+
+                # 청산 후에도 자본 부족하면 가능한 만큼만 진입
+                if available_krw < order_amount:
+                    if available_krw < MIN_ORDER:
+                        logger.warning(
+                            "Cannot proceed with Surge - insufficient capital after liquidation",
+                            available=f"₩{available_krw:,.0f}",
+                            required=f"₩{order_amount:,.0f}",
+                        )
+                        self.add_event(
+                            level="WARNING",
+                            event_type="SURGE",
+                            message=f"Surge skipped - insufficient capital: {symbol}",
+                            details={
+                                "required": order_amount,
+                                "available": available_krw,
+                            },
+                        )
+                        return
+
+                    # 가능한 만큼만 진입
+                    old_amount = order_amount
+                    order_amount = available_krw * 0.95  # 5% 여유
+                    logger.info(
+                        "Adjusted Surge order amount due to capital constraints",
+                        original=f"₩{old_amount:,.0f}",
+                        adjusted=f"₩{order_amount:,.0f}",
+                    )
 
             # PAPER 모드 체크
             if not self.mode_manager.should_execute_trades():
