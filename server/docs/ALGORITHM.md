@@ -1,7 +1,7 @@
 # 트레이딩 알고리즘 구조 문서
 
-> **버전**: 4.5 (Surge Capital Reallocation)
-> **최종 수정**: 2026-02-03
+> **버전**: 5.0 (Dual Candle Surge Trigger)
+> **최종 수정**: 2026-02-04
 > **목표**: 소자본(1,000만원 이하) 안정적 성장, MDD 5% 제약
 > **거래소**: Upbit (KRW 현물 전용)
 
@@ -13,14 +13,15 @@
 2. [급등 근접 종목 시스템](#급등-근접-종목-시스템)
 3. [Ignition 전략](#ignition-전략)
 4. [Structure Anti-Chase 필터](#structure-anti-chase-필터)
-5. [Pullback 눌림목 매수 전략](#pullback-눌림목-매수-전략)
-6. [MDD 방어 시스템](#mdd-방어-시스템)
-7. [Surge 자본 재배분 시스템](#surge-자본-재배분-시스템)
-8. [리스크 관리](#리스크-관리)
-9. [설정 파라미터](#설정-파라미터)
-10. [모니터링 API](#모니터링-api)
-11. [파일 구조](#파일-구조)
-12. [변경 이력](#변경-이력)
+5. [**v5.0 분봉 급등 듀얼 트리거**](#v50-분봉-급등-듀얼-트리거)
+6. [Pullback 눌림목 매수 전략](#pullback-눌림목-매수-전략)
+7. [MDD 방어 시스템](#mdd-방어-시스템)
+8. [Surge 자본 재배분 시스템](#surge-자본-재배분-시스템)
+9. [리스크 관리](#리스크-관리)
+10. [설정 파라미터](#설정-파라미터)
+11. [모니터링 API](#모니터링-api)
+12. [파일 구조](#파일-구조)
+13. [변경 이력](#변경-이력)
 
 ---
 
@@ -271,6 +272,135 @@ if abs(dist_vwap) <= 0.3 * atr_pct:
 if dist_atr > 0.9:
     entry_type = "X"
     return None  # 진입 차단
+```
+
+---
+
+## v5.0 분봉 급등 듀얼 트리거
+
+### 개요
+
+v5.0에서 도입된 분봉 기반 급등 감지 시스템. 기존 Anti-Chase Gate가 급등주를 너무 일찍 차단하는 문제를 해결.
+
+```
+문제: 급등주(+10%+)가 Anti-Chase Gate에 의해 차단됨
+→ 급등주를 잡으려는 알고리즘이 실제 급등주를 놓침
+
+해결책:
+1. Anti-Chase Gate 완화: 10% → 20%
+2. 분봉 급등 듀얼 트리거: 1분봉/5분봉 급등 감지로 보너스 점수
+```
+
+### Anti-Chase Gate 완화
+
+| 버전 | 임계값 | 동작 |
+|------|--------|------|
+| v4.x | 10% | 일일 +10% 이상 → 완전 차단 |
+| **v5.0** | **20%** | 일일 +20% 이상 → 완전 차단 |
+
+```python
+# v5.0: Anti-Chase Gate 완화
+anti_chase_threshold = settings.anti_chase_gate_threshold  # 기본 0.20 (20%)
+
+if change_rate >= anti_chase_threshold:
+    return ScoreResult(
+        score=0.0,
+        level=0,
+        gate="anti_chase",
+        reason=f"일일 +{change_rate*100:.1f}% - Anti-Chase Gate 차단",
+        components=[],
+    )
+```
+
+### 분봉 급등 듀얼 트리거 (Candle Surge Bonus)
+
+두 가지 조건 중 하나만 충족해도 보너스 점수 획득:
+
+| 트리거 | 조건1 (분봉 변화율) | 조건2 (RVOL) | 보너스 |
+|--------|---------------------|--------------|--------|
+| **1분봉 극단 급등** | +7% 이상 | 3.0x 이상 | **+30점** |
+| **5분봉 급등** | +4% 이상 | 2.0x 이상 | **+20점** |
+
+```python
+def _calc_candle_surge_bonus(self, market_data: dict) -> ScoreComponent:
+    """
+    v5.0: 분봉 급등 보너스 (0~30)
+
+    조건1: 1분봉 극단 급등 (+7%, RVOL 3x) → +30점
+    조건2: 5분봉 급등 (+4%, RVOL 2x) → +20점
+    """
+    # 1분봉 데이터
+    change_1m = market_data.get("change_1m", 0)
+    rvol_1m = market_data.get("rvol_1m", 1.0)
+
+    # 5분봉 데이터
+    change_5m = market_data.get("change_5m", 0)
+    rvol_5m = market_data.get("rvol_5m", 1.0)
+
+    # 조건1: 1분봉 극단 급등 (OR)
+    if change_1m >= 0.07 and rvol_1m >= 3.0:
+        return 30  # 최대 보너스
+
+    # 조건2: 5분봉 급등 (OR)
+    elif change_5m >= 0.04 and rvol_5m >= 2.0:
+        return 20
+
+    return 0
+```
+
+### RVOL 계산 (분봉 기준)
+
+RVOL은 **해당 분봉의 평균 거래량** 대비 현재 거래량:
+
+```python
+# 1분봉 RVOL = 현재 1분봉 거래량 / 최근 20개 1분봉 평균
+rvol_1m = current_1m_volume / avg(last_20_1m_volumes)
+
+# 5분봉 RVOL = 현재 5분봉 거래량 / 최근 12개 5분봉 평균
+rvol_5m = current_5m_volume / avg(last_12_5m_volumes)
+```
+
+### 점수 체계 변경
+
+| 컴포넌트 | v4.x | v5.0 |
+|---------|------|------|
+| Breakout Strength | 0~25 | 0~25 |
+| Volume Expansion | 0~25 | 0~25 |
+| Trend Context | 0~20 | **0~15** (축소) |
+| Orderbook Quality | 0~15 | **0~10** (축소) |
+| Overheat Penalty | -15~0 | -15~0 |
+| **Candle Surge Bonus** | - | **0~30** (신규) |
+| **총점** | 0~85 | 0~105 → 클램프 0~100 |
+
+### 예상 결과
+
+```
+Before (v4.x):
+ZORA: 일일 +14.1% → ❌ Anti-Chase Gate 차단
+G:    일일 +20.0% → ❌ Anti-Chase Gate 차단
+
+After (v5.0):
+ZORA: 일일 +14.1% → ✅ 진입 가능 (< 20%)
+      1분봉 +8% + RVOL 5x → ✅ +30점 보너스
+      총점: 75점 → Level 1 진입!
+
+G:    5분봉 +5% + RVOL 3x → ✅ +20점 보너스
+      총점: 70점 → Level 1 진입!
+```
+
+### 설정 파라미터
+
+```bash
+# v5.0 Anti-Chase Gate 완화
+ANTI_CHASE_GATE_THRESHOLD=0.20
+
+# v5.0 분봉 급등 트리거
+CANDLE_SURGE_1M_CHANGE=0.07    # 1분봉 변화율 임계값
+CANDLE_SURGE_1M_RVOL=3.0       # 1분봉 RVOL 임계값
+CANDLE_SURGE_5M_CHANGE=0.04    # 5분봉 변화율 임계값
+CANDLE_SURGE_5M_RVOL=2.0       # 5분봉 RVOL 임계값
+CANDLE_SURGE_BONUS_1M=30       # 1분봉 보너스 점수
+CANDLE_SURGE_BONUS_5M=20       # 5분봉 보너스 점수
 ```
 
 ---
@@ -641,7 +771,13 @@ server/src/
 
 | 버전 | 날짜 | 변경 내용 |
 |------|------|----------|
-| **4.5** | **2026-02-03** | **Surge 자본 재배분 시스템** |
+| **5.0** | **2026-02-04** | **분봉 급등 듀얼 트리거** |
+| | | - Anti-Chase Gate 완화: 10% → 20% |
+| | | - 1분봉 극단 급등 트리거 (+7%, RVOL 3x → +30점) |
+| | | - 5분봉 급등 트리거 (+4%, RVOL 2x → +20점) |
+| | | - market_data에 change_1m/5m, rvol_1m/5m 추가 |
+| | | - 점수 체계 재조정 (총점 105 → 클램프 100) |
+| 4.5 | 2026-02-03 | Surge 자본 재배분 시스템 |
 | | | - Satellite 포지션 자동 청산으로 자본 확보 |
 | | | - 수익 포지션 우선 청산 (이익 확정) |
 | | | - 큰 손실 포지션 보호 (-2% 초과 제외) |
@@ -669,8 +805,18 @@ server/src/
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│            v4.5 트레이딩 시스템 요약                      │
+│            v5.0 트레이딩 시스템 요약                      │
 ├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  v5.0 분봉 급등 듀얼 트리거:                             │
+│  ┌─────────────────────────────────────────────┐        │
+│  │ 🔥 1분봉 극단:  +7% AND RVOL 3x  → +30점   │        │
+│  │ 📈 5분봉 급등:  +4% AND RVOL 2x  → +20점   │        │
+│  └─────────────────────────────────────────────┘        │
+│                                                         │
+│  Anti-Chase Gate (v5.0 완화):                           │
+│  - v4.x: 일일 +10% → 차단                               │
+│  - v5.0: 일일 +20% → 차단 (완화)                        │
 │                                                         │
 │  급등 근접 조건 (6개):                                   │
 │  ┌─────────────────────────────────────────────┐        │

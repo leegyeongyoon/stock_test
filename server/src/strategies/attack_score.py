@@ -2,12 +2,19 @@
 
 급등주 공격 점수 계산기
 
-Attack Score 구성 (0~100점):
+Attack Score 구성 (0~100점) - v5.0 업데이트:
 - Breakout Strength (0~25): 고점 돌파 강도
 - Volume Expansion (0~25): RVOL, 거래대금 증가
-- Trend Context (0~20): 1h 추세, SMA 위치
-- Orderbook Quality (0~15): 스프레드, 깊이
+- Trend Context (0~15): 1h 추세, SMA 위치 (v5.0: 20→15)
+- Orderbook Quality (0~10): 스프레드, 깊이 (v5.0: 15→10)
 - Overheat Penalty (-15~0): 과열 감점
+- Candle Surge Bonus (0~30): 분봉 급등 트리거 (v5.0 신규)
+  - 1분봉 +7% & RVOL 3x → +30점
+  - 5분봉 +4% & RVOL 2x → +20점
+
+v5.0 변경사항:
+- Anti-Chase Gate: 10% → 20% 완화
+- 분봉 급등 듀얼 트리거 추가
 """
 
 from dataclasses import dataclass, field
@@ -64,16 +71,21 @@ class AttackScoreResult:
 
 class AttackScoreCalculator:
     """
-    Attack Score 계산기
+    Attack Score 계산기 (v5.0)
 
     급등주의 공격 적합성을 0~100점으로 평가
 
-    점수 구성:
+    점수 구성 (v5.0):
     - Breakout Strength (0~25): 고점 돌파 강도
     - Volume Expansion (0~25): RVOL, 거래대금
-    - Trend Context (0~20): 1h 추세, SMA 위치
-    - Orderbook Quality (0~15): 스프레드, 깊이
+    - Trend Context (0~15): 1h 추세, SMA 위치
+    - Orderbook Quality (0~10): 스프레드, 깊이
     - Overheat Penalty (-15~0): 과열 감점
+    - Candle Surge Bonus (0~30): 분봉 급등 트리거 (신규)
+
+    v5.0 변경사항:
+    - Anti-Chase Gate: 10% → 20% 완화
+    - Candle Surge Bonus 추가 (1분봉/5분봉 급등 감지)
     """
 
     def __init__(self):
@@ -113,13 +125,15 @@ class AttackScoreCalculator:
         symbol = market_data.get("symbol", "UNKNOWN")
         components = []
 
-        # v5.1: Anti-Chase Gate - 일일 +10% 이상 급등 시 진입 차단
+        # v5.0: Anti-Chase Gate - 일일 +20% 이상 급등 시 진입 차단 (완화: 10%→20%)
         change_rate = market_data.get("change_rate", 0)
-        if change_rate >= 0.10:  # +10% 이상
+        anti_chase_threshold = settings.anti_chase_gate_threshold  # 기본 0.20 (20%)
+        if change_rate >= anti_chase_threshold:
             logger.info(
                 "Attack blocked by anti-chase gate",
                 symbol=symbol,
                 change_rate=f"{change_rate*100:.1f}%",
+                threshold=f"{anti_chase_threshold*100:.0f}%",
             )
             return AttackScoreResult(
                 symbol=symbol,
@@ -130,7 +144,7 @@ class AttackScoreCalculator:
                     name="Anti-Chase Gate",
                     score=0,
                     max_score=0,
-                    details={"reason": f"Daily change {change_rate*100:.1f}% >= 10% threshold"},
+                    details={"reason": f"Daily change {change_rate*100:.1f}% >= {anti_chase_threshold*100:.0f}% threshold"},
                 )],
             )
 
@@ -142,17 +156,21 @@ class AttackScoreCalculator:
         volume_score = self._calc_volume_expansion(market_data)
         components.append(volume_score)
 
-        # 3. Trend Context (0~20)
+        # 3. Trend Context (0~15) - v5.0: 20→15 축소
         trend_score = self._calc_trend_context(market_data)
         components.append(trend_score)
 
-        # 4. Orderbook Quality (0~15)
+        # 4. Orderbook Quality (0~10) - v5.0: 15→10 축소
         orderbook_score = self._calc_orderbook_quality(market_data)
         components.append(orderbook_score)
 
         # 5. Overheat Penalty (-15~0)
         overheat_penalty = self._calc_overheat_penalty(market_data)
         components.append(overheat_penalty)
+
+        # 6. v5.0: Candle Surge Bonus (0~30) - 분봉 급등 감지
+        candle_surge = self._calc_candle_surge_bonus(market_data)
+        components.append(candle_surge)
 
         # 총점 계산
         total_score = sum(c.score for c in components)
@@ -309,7 +327,7 @@ class AttackScoreCalculator:
 
     def _calc_trend_context(self, market_data: dict) -> ScoreComponent:
         """
-        Trend Context (0~20)
+        Trend Context (0~15) - v5.0: 20→15 축소
 
         추세 맥락 평가:
         - 1h SMA50 위 위치
@@ -324,53 +342,53 @@ class AttackScoreCalculator:
         score = 0.0
         details = {}
 
-        # SMA50 위 위치 (+0~8)
+        # SMA50 위 위치 (+0~6) - v5.0: 8→6 축소
         if sma_50 > 0 and price > 0:
             sma_distance = (price - sma_50) / sma_50
             details["sma_distance"] = sma_distance
 
             if sma_distance >= 0.05:
-                score += 8
+                score += 6
             elif sma_distance >= 0.02:
-                score += 5
+                score += 4
             elif sma_distance >= 0:
-                score += 3
+                score += 2
         else:
             # SMA 데이터 없으면 중립 점수
-            score += 3
+            score += 2
 
-        # 24h 고점 갱신 (+0~7)
+        # 24h 고점 갱신 (+0~5) - v5.0: 7→5 축소
         if highest_24h > 0 and price > 0:
             high_distance = (price - highest_24h) / highest_24h
             details["high_24h_distance"] = high_distance
 
             if high_distance >= 0:
-                score += 7  # 24h 고점 돌파
+                score += 5  # 24h 고점 돌파
             elif high_distance >= -0.02:
-                score += 4  # 근접
+                score += 3  # 근접
             elif high_distance >= -0.05:
-                score += 2
+                score += 1
 
-        # 양호한 모멘텀 (+0~5)
+        # 양호한 모멘텀 (+0~4) - v5.0: 5→4 축소
         details["change_rate"] = change_rate
         if 0.03 <= change_rate < 0.10:
             # 적정 상승 (3~10%)
-            score += 5
+            score += 4
         elif 0.01 <= change_rate < 0.03:
-            score += 3
+            score += 2
         elif 0 <= change_rate < 0.01:
             score += 1
 
         return ScoreComponent(
             name="Trend Context",
-            score=min(20, score),
-            max_score=20,
+            score=min(15, score),
+            max_score=15,
             details=details,
         )
 
     def _calc_orderbook_quality(self, market_data: dict) -> ScoreComponent:
         """
-        Orderbook Quality (0~15)
+        Orderbook Quality (0~10) - v5.0: 15→10 축소
 
         호가 품질 평가:
         - 스프레드
@@ -385,31 +403,31 @@ class AttackScoreCalculator:
             "depth_ratio": depth_ratio,
         }
 
-        # 스프레드 점수 (+0~10)
+        # 스프레드 점수 (+0~7) - v5.0: 10→7 축소
         if spread_bps <= 3:
-            score += 10
+            score += 7
         elif spread_bps <= 5:
-            score += 8
-        elif spread_bps <= 8:
             score += 5
-        elif spread_bps <= 10:
+        elif spread_bps <= 8:
             score += 3
+        elif spread_bps <= 10:
+            score += 2
         elif spread_bps <= 15:
             score += 1
 
-        # 깊이 점수 (+0~5)
+        # 깊이 점수 (+0~3) - v5.0: 5→3 축소
         # depth_ratio > 1 이면 매수세 우위
         if depth_ratio >= 2.0:
-            score += 5
-        elif depth_ratio >= 1.5:
             score += 3
+        elif depth_ratio >= 1.5:
+            score += 2
         elif depth_ratio >= 1.0:
             score += 1
 
         return ScoreComponent(
             name="Orderbook Quality",
-            score=min(15, score),
-            max_score=15,
+            score=min(10, score),
+            max_score=10,
             details=details,
         )
 
@@ -471,6 +489,70 @@ class AttackScoreCalculator:
             name="Overheat Penalty",
             score=max(-15, penalty),
             max_score=0,
+            details=details,
+        )
+
+    def _calc_candle_surge_bonus(self, market_data: dict) -> ScoreComponent:
+        """
+        v5.0: 분봉 급등 보너스 (0~30)
+
+        조건1: 1분봉 극단 급등 (+7%, RVOL 3x) → +30점
+        조건2: 5분봉 급등 (+4%, RVOL 2x) → +20점
+
+        급등 시작을 더 빨리 감지하기 위한 트리거
+        """
+        score = 0.0
+        details = {}
+
+        # 1분봉 데이터
+        change_1m = market_data.get("change_1m", 0)
+        rvol_1m = market_data.get("rvol_1m", 1.0)
+
+        # 5분봉 데이터
+        change_5m = market_data.get("change_5m", 0)
+        rvol_5m = market_data.get("rvol_5m", 1.0)
+
+        details["change_1m"] = change_1m
+        details["rvol_1m"] = rvol_1m
+        details["change_5m"] = change_5m
+        details["rvol_5m"] = rvol_5m
+
+        # 임계값 (config에서)
+        threshold_1m_change = settings.candle_surge_1m_change  # 0.07
+        threshold_1m_rvol = settings.candle_surge_1m_rvol  # 3.0
+        threshold_5m_change = settings.candle_surge_5m_change  # 0.04
+        threshold_5m_rvol = settings.candle_surge_5m_rvol  # 2.0
+
+        bonus_1m = settings.candle_surge_bonus_1m  # 30
+        bonus_5m = settings.candle_surge_bonus_5m  # 20
+
+        # 조건1: 1분봉 극단 급등 (OR - 더 높은 우선순위)
+        if change_1m >= threshold_1m_change and rvol_1m >= threshold_1m_rvol:
+            score = bonus_1m
+            details["trigger"] = "1M_EXTREME"
+            logger.info(
+                "Candle surge bonus: 1M extreme",
+                change_1m=f"{change_1m*100:.1f}%",
+                rvol_1m=f"{rvol_1m:.1f}x",
+                bonus=bonus_1m,
+            )
+        # 조건2: 5분봉 급등 (OR)
+        elif change_5m >= threshold_5m_change and rvol_5m >= threshold_5m_rvol:
+            score = bonus_5m
+            details["trigger"] = "5M_SURGE"
+            logger.info(
+                "Candle surge bonus: 5M surge",
+                change_5m=f"{change_5m*100:.1f}%",
+                rvol_5m=f"{rvol_5m:.1f}x",
+                bonus=bonus_5m,
+            )
+        else:
+            details["trigger"] = "NONE"
+
+        return ScoreComponent(
+            name="Candle Surge Bonus",
+            score=score,
+            max_score=30,
             details=details,
         )
 

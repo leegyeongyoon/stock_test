@@ -315,6 +315,38 @@ class Settings(BaseSettings):
         description="Attack 최대 동시 포지션 수 (50% 단일 포지션 전략)",
     )
 
+    # === v5.0 Anti-Chase Gate 완화 ===
+    anti_chase_gate_threshold: float = Field(
+        default=0.20,
+        description="Anti-Chase Gate 임계값 (일일 +20% 이상이면 차단) - v5.0: 10%→20% 완화",
+    )
+
+    # === v5.0 분봉 급등 듀얼 트리거 ===
+    candle_surge_1m_change: float = Field(
+        default=0.07,
+        description="1분봉 극단 급등 임계값 (7%)",
+    )
+    candle_surge_1m_rvol: float = Field(
+        default=3.0,
+        description="1분봉 RVOL 임계값 (3배)",
+    )
+    candle_surge_5m_change: float = Field(
+        default=0.04,
+        description="5분봉 급등 임계값 (4%)",
+    )
+    candle_surge_5m_rvol: float = Field(
+        default=2.0,
+        description="5분봉 RVOL 임계값 (2배)",
+    )
+    candle_surge_bonus_1m: float = Field(
+        default=30.0,
+        description="1분봉 극단 급등 보너스 점수",
+    )
+    candle_surge_bonus_5m: float = Field(
+        default=20.0,
+        description="5분봉 급등 보너스 점수",
+    )
+
     # Attack 스탑 설정
     attack_stop_struct_buffer: float = Field(
         default=0.003,

@@ -501,40 +501,61 @@ class TradingEngine:
             return {"success": False, "error": "Unknown command"}
 
     async def _load_initial_candles(self, symbols: list[str]) -> None:
-        """초기 1분봉 데이터 로드 (SurgeDetector용)"""
+        """초기 1분봉/5분봉 데이터 로드 (SurgeDetector + Candle Surge Bonus용)"""
         print(f"[DEBUG] _load_initial_candles called with {len(symbols)} symbols")
-        logger.info("Loading initial 1m candles for SurgeDetector...")
+        logger.info("Loading initial 1m/5m candles for SurgeDetector...")
 
         # 상위 50개만 로드 (Rate Limit 고려)
         target_symbols = symbols[:50]
         print(f"[DEBUG] Loading candles for {len(target_symbols)} target symbols")
 
-        loaded_count = 0
+        loaded_count_1m = 0
+        loaded_count_5m = 0
         for symbol in target_symbols:
             try:
+                # 1분봉 로드
                 await self._load_candles_for_symbol(symbol, "1", 100)
-                loaded_count += 1
+                loaded_count_1m += 1
             except Exception as e:
-                print(f"[DEBUG] Failed to load candles for {symbol}: {e}")
+                print(f"[DEBUG] Failed to load 1m candles for {symbol}: {e}")
                 logger.warning(f"Failed to load 1m candles for {symbol}: {e}")
-            await asyncio.sleep(0.1)  # Rate limit 방지
+            await asyncio.sleep(0.05)  # Rate limit 방지
 
-        print(f"[DEBUG] Initial candle loading complete: {loaded_count}/{len(target_symbols)}")
+            try:
+                # 5분봉 로드 (v5.0: Candle Surge Bonus)
+                await self._load_candles_for_symbol(symbol, "5", 50)
+                loaded_count_5m += 1
+            except Exception as e:
+                print(f"[DEBUG] Failed to load 5m candles for {symbol}: {e}")
+                logger.warning(f"Failed to load 5m candles for {symbol}: {e}")
+            await asyncio.sleep(0.05)  # Rate limit 방지
+
+        print(f"[DEBUG] Initial candle loading complete: 1m={loaded_count_1m}, 5m={loaded_count_5m}/{len(target_symbols)}")
         logger.info(
-            "Initial 1m candles loaded",
+            "Initial 1m/5m candles loaded",
             symbols_count=len(target_symbols),
+            loaded_1m=loaded_count_1m,
+            loaded_5m=loaded_count_5m,
         )
 
     async def _refresh_candles(self) -> None:
-        """1분봉 데이터 갱신 (60초마다 호출)"""
+        """1분봉/5분봉 데이터 갱신 (60초마다 호출)"""
         watch_symbols = self.symbol_manager.get_qualified_symbols()[:30]
 
         for symbol in watch_symbols:
             try:
+                # 1분봉 갱신
                 await self._load_candles_for_symbol(symbol, "1", 20)
             except Exception:
                 pass
-            await asyncio.sleep(0.05)  # Rate limit 방지
+            await asyncio.sleep(0.03)  # Rate limit 방지
+
+            try:
+                # 5분봉 갱신 (v5.0: Candle Surge Bonus)
+                await self._load_candles_for_symbol(symbol, "5", 12)
+            except Exception:
+                pass
+            await asyncio.sleep(0.03)  # Rate limit 방지
 
     async def _load_candles_for_symbol(
         self, symbol: str, interval: str, limit: int
@@ -558,8 +579,9 @@ class TradingEngine:
 
         # CandleManager에 저장
         stored_count = 0
+        interval_minutes = int(interval)  # "1" -> 1, "5" -> 5
         for candle in candles:
-            kline = self._convert_upbit_candle(candle)
+            kline = self._convert_upbit_candle(candle, interval_minutes)
             self.candle_manager.update_candle(
                 symbol=symbol,
                 interval=f"{interval}m",
@@ -573,7 +595,7 @@ class TradingEngine:
         print(f"[DEBUG] After store: {symbol} {interval}m has {check_count} candles (stored {stored_count})")
         logger.debug(f"After store: {symbol} {interval}m has {check_count} candles")
 
-    def _convert_upbit_candle(self, upbit_candle: dict) -> dict:
+    def _convert_upbit_candle(self, upbit_candle: dict, interval_minutes: int = 1) -> dict:
         """Upbit 캔들을 CandleManager 형식으로 변환"""
         from datetime import timezone
 
@@ -584,9 +606,12 @@ class TradingEngine:
         else:
             timestamp_ms = 0
 
+        # Close time = Open time + interval
+        close_time_ms = timestamp_ms + (interval_minutes * 60 * 1000)
+
         return {
             "t": timestamp_ms,  # Open time
-            "T": timestamp_ms + 60000,  # Close time (1분 후)
+            "T": close_time_ms,  # Close time
             "o": upbit_candle.get("opening_price", 0),
             "h": upbit_candle.get("high_price", 0),
             "l": upbit_candle.get("low_price", 0),
@@ -595,6 +620,52 @@ class TradingEngine:
             "q": upbit_candle.get("candle_acc_trade_price", 0),
             "n": 0,  # Trade count (Upbit doesn't provide this)
         }
+
+    def _calc_candle_surge_data(self, symbol: str, current_price: float) -> dict:
+        """
+        v5.0: 분봉 급등 데이터 계산
+
+        Returns:
+            dict with change_1m, rvol_1m, change_5m, rvol_5m
+        """
+        result = {
+            "change_1m": 0.0,
+            "rvol_1m": 1.0,
+            "change_5m": 0.0,
+            "rvol_5m": 1.0,
+        }
+
+        try:
+            # 1분봉 데이터 계산
+            candles_1m = self.candle_manager.get_candles(symbol, "1m", 21)
+            if len(candles_1m) >= 2:
+                # change_1m: 현재가 vs 1분 전 종가
+                prev_close_1m = candles_1m[-2].close if len(candles_1m) >= 2 else current_price
+                if prev_close_1m > 0:
+                    result["change_1m"] = (current_price - prev_close_1m) / prev_close_1m
+
+                # rvol_1m: 최근 1분봉 거래량 / 최근 20개 평균
+                rvol_1m = self.candle_manager.calc_rvol(symbol, "1m", 20)
+                if rvol_1m is not None:
+                    result["rvol_1m"] = rvol_1m
+
+            # 5분봉 데이터 계산
+            candles_5m = self.candle_manager.get_candles(symbol, "5m", 13)
+            if len(candles_5m) >= 2:
+                # change_5m: 현재가 vs 5분 전 종가
+                prev_close_5m = candles_5m[-2].close if len(candles_5m) >= 2 else current_price
+                if prev_close_5m > 0:
+                    result["change_5m"] = (current_price - prev_close_5m) / prev_close_5m
+
+                # rvol_5m: 최근 5분봉 거래량 / 최근 12개 평균
+                rvol_5m = self.candle_manager.calc_rvol(symbol, "5m", 12)
+                if rvol_5m is not None:
+                    result["rvol_5m"] = rvol_5m
+
+        except Exception as e:
+            logger.debug(f"Failed to calc candle surge data for {symbol}: {e}")
+
+        return result
 
     async def _update_market_data(self) -> None:
         """시장 데이터 업데이트 (동적 심볼 + 일괄 조회)"""
@@ -650,6 +721,9 @@ class TradingEngine:
                 price_range = high_24h - low_24h
                 close_pos = (current_price - low_24h) / price_range if price_range > 0 else 0.5
 
+                # v5.0: 분봉 급등 데이터 계산
+                candle_surge = self._calc_candle_surge_data(symbol, current_price)
+
                 self._market_data[symbol] = {
                     "symbol": symbol,
                     "price": current_price,
@@ -670,6 +744,11 @@ class TradingEngine:
                     "close_pos": close_pos,
                     "price_change_pct": change_rate * 100,
                     "timestamp": datetime.utcnow(),
+                    # v5.0: Candle Surge Bonus 데이터
+                    "change_1m": candle_surge["change_1m"],
+                    "rvol_1m": candle_surge["rvol_1m"],
+                    "change_5m": candle_surge["change_5m"],
+                    "rvol_5m": candle_surge["rvol_5m"],
                 }
 
             # BTC 레짐 계산 (Upbit: 가격 변화율 기반)

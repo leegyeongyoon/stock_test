@@ -527,13 +527,13 @@ async def get_balance():
             },
             "assets": [
                 {
-                    "currency": b.currency,
-                    "balance": b.balance,
+                    "currency": b.asset,
+                    "balance": b.total,
                     "locked": b.locked,
                     "avg_buy_price": b.avg_buy_price,
                 }
                 for b in all_balances
-                if b.currency != "KRW" and b.balance > 0
+                if b.asset != "KRW" and b.total > 0
             ],
         }
     else:
@@ -771,6 +771,77 @@ async def test_buy(symbol: str = "BTCUSDT", amount: float = 10000):
             "quantity": quantity,
             "results": results,
         }
+
+
+@router.post("/close-all")
+async def close_all_positions(confirm: bool = False):
+    """모든 포지션 청산 (Upbit 전용)
+
+    Args:
+        confirm: True로 설정해야 실제 청산 실행
+    """
+    settings = get_settings()
+    engine = get_engine()
+
+    if not settings.is_upbit:
+        raise HTTPException(status_code=400, detail="This endpoint is for Upbit only")
+
+    if not confirm:
+        # 청산할 포지션 목록만 반환
+        positions = engine.get_positions()
+        return {
+            "success": False,
+            "message": "Set confirm=true to execute. Preview:",
+            "positions_to_close": [
+                {"symbol": p["symbol"], "quantity": p["quantity"], "notional": p["notional"]}
+                for p in positions
+            ],
+            "total_count": len(positions),
+        }
+
+    # 실제 청산 실행
+    all_balances = await engine.exchange.get_all_balances()
+    closed = []
+    errors = []
+
+    for balance in all_balances:
+        if balance.asset == "KRW" or balance.total <= 0:
+            continue
+
+        symbol = f"KRW-{balance.asset}"
+
+        try:
+            result = await engine.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                quantity=balance.total,
+            )
+
+            if result.success:
+                closed.append({
+                    "symbol": symbol,
+                    "quantity": balance.total,
+                    "price": result.avg_price,
+                    "amount": balance.total * (result.avg_price or 0),
+                })
+                engine.add_event(
+                    level="INFO",
+                    event_type="ORDER",
+                    message=f"Closed position: {symbol}",
+                    details={"quantity": balance.total, "price": result.avg_price},
+                )
+            else:
+                errors.append({"symbol": symbol, "error": result.error})
+        except Exception as e:
+            errors.append({"symbol": symbol, "error": str(e)})
+
+    return {
+        "success": len(errors) == 0,
+        "message": f"Closed {len(closed)} positions",
+        "closed": closed,
+        "errors": errors if errors else None,
+    }
 
 
 # ============================================================
