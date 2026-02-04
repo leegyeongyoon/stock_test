@@ -541,6 +541,130 @@ class Settings(BaseSettings):
         description="동일 종목 재진입 쿨다운 (60분)",
     )
 
+    # === v4.2 Rebound Scalper 전략 설정 (반등 스캘핑) ===
+    rebound_mode: Literal["OFF", "SAFE", "NORMAL", "AGGRESSIVE"] = Field(
+        default="OFF",
+        description="반등 스캘퍼 모드 (OFF/SAFE/NORMAL/AGGRESSIVE)",
+    )
+
+    # Rebound Score 임계값
+    rebound_score_l1: float = Field(
+        default=55.0,
+        description="Level 1 임계값 (55점 이상)",
+    )
+    rebound_score_l2: float = Field(
+        default=70.0,
+        description="Level 2 임계값 (70점 이상)",
+    )
+    rebound_score_l3: float = Field(
+        default=85.0,
+        description="Level 3 임계값 (85점 이상)",
+    )
+
+    # Rebound 레벨별 배분 (소액 분산)
+    rebound_alloc_l1: float = Field(
+        default=0.03,
+        description="Level 1 목표 비중 (3%)",
+    )
+    rebound_alloc_l2: float = Field(
+        default=0.05,
+        description="Level 2 목표 비중 (5%)",
+    )
+    rebound_alloc_l3: float = Field(
+        default=0.08,
+        description="Level 3 목표 비중 (8%)",
+    )
+
+    # Rebound 포지션 관리
+    rebound_max_positions: int = Field(
+        default=5,
+        description="최대 동시 포지션 수",
+    )
+
+    # Rebound 청산 설정 (스캘핑용 타이트 설정)
+    rebound_stop_loss_pct: float = Field(
+        default=-0.012,
+        description="손절 (-1.2%)",
+    )
+    rebound_tp1_pct: float = Field(
+        default=0.008,
+        description="1차 익절 (+0.8%)",
+    )
+    rebound_tp1_ratio: float = Field(
+        default=0.50,
+        description="1차 익절 비율 (50%)",
+    )
+    rebound_tp2_pct: float = Field(
+        default=0.015,
+        description="2차 익절 (+1.5%)",
+    )
+    rebound_tp2_ratio: float = Field(
+        default=0.30,
+        description="2차 익절 비율 (30%)",
+    )
+    rebound_trailing_trigger_pct: float = Field(
+        default=0.015,
+        description="트레일링 활성화 트리거 (+1.5%)",
+    )
+    rebound_trailing_stop_pct: float = Field(
+        default=0.005,
+        description="트레일링 스탑 (고점 -0.5%)",
+    )
+    rebound_time_stop_minutes: int = Field(
+        default=30,
+        description="타임스톱 (30분)",
+    )
+    rebound_cooldown_min: int = Field(
+        default=30,
+        description="동일 종목 재진입 쿨다운 (30분)",
+    )
+
+    # Rebound 연속 손실 브레이크 (3대 보호장치 #1)
+    rebound_consecutive_loss_limit: int = Field(
+        default=3,
+        description="연속 손실 제한 (3회)",
+    )
+    rebound_consecutive_loss_cooldown_min: int = Field(
+        default=120,
+        description="연속 손실 시 쿨다운 (2시간)",
+    )
+
+    # Rebound 변동성 필터 (3대 보호장치 #2)
+    rebound_volatility_atr_mult: float = Field(
+        default=2.0,
+        description="휩쏘 감지 ATR 배수 (2배 이상 변동 시 OFF)",
+    )
+    rebound_disable_on_volatile: bool = Field(
+        default=True,
+        description="급변장에서 자동 비활성화",
+    )
+
+    # Rebound 추세 필터 (3대 보호장치 #3)
+    rebound_trend_ma_period: int = Field(
+        default=20,
+        description="추세 판단 MA 기간 (5분봉 기준)",
+    )
+    rebound_disable_in_downtrend: bool = Field(
+        default=True,
+        description="하락 추세에서 자동 비활성화",
+    )
+
+    # Rebound RSI 설정
+    rebound_rsi_oversold: float = Field(
+        default=30.0,
+        description="RSI 과매도 영역 (30 이하)",
+    )
+    rebound_rsi_confirm: float = Field(
+        default=40.0,
+        description="RSI 확인 영역 (40 이하)",
+    )
+
+    # Rebound Orderbook Imbalance
+    rebound_orderbook_imbalance_threshold: float = Field(
+        default=1.5,
+        description="매수호가 우세 비율 (1.5배 이상)",
+    )
+
     # === v4.0 Ignition 전략 설정 (Pre-Breakout Setup + Ignition) ===
     ignition_mode: Literal["OFF", "NORMAL", "ATTACK"] = Field(
         default="NORMAL",

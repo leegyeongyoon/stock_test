@@ -110,3 +110,160 @@ async def get_filter_stats():
     """
     engine = get_engine()
     return FilterStats(**engine.get_filter_stats())
+
+
+# ============================================================
+# Rebound Scalper 전략 모니터링 (v4.2)
+# ============================================================
+
+class ReboundPositionInfo(BaseModel):
+    """Rebound 포지션 정보"""
+    symbol: str
+    entry_price: float
+    current_qty: float
+    tp1_hit: bool
+    tp2_hit: bool
+    be_stop_active: bool
+    trailing_active: bool
+    highest_price: float
+    hold_time_min: float
+
+
+class ReboundSignalInfo(BaseModel):
+    """Rebound 대기 시그널 정보"""
+    symbol: str
+    score: float
+    level: int
+    reason: str
+
+
+class ReboundFilterInfo(BaseModel):
+    """Rebound 필터 정보"""
+    cooldowns: dict
+    filter_settings: dict
+
+
+class ReboundStats(BaseModel):
+    """Rebound 통계"""
+    total_trades: int
+    win_rate: float
+    tp1_hits: int
+    tp2_hits: int
+    stop_loss_hits: int
+
+
+class ReboundMonitoringResponse(BaseModel):
+    """Rebound 전략 모니터링 응답"""
+    strategy: str
+    enabled: bool
+    mode: str
+    positions: dict[str, ReboundPositionInfo]
+    pending_signals: dict[str, ReboundSignalInfo]
+    stats: ReboundStats
+    filters: ReboundFilterInfo
+
+
+@router.get("/monitoring/rebound")
+async def get_rebound_status():
+    """
+    Rebound Scalper 전략 상태 조회
+
+    현재 Rebound 전략의 전체 상태를 반환합니다.
+
+    - **enabled**: 활성화 여부
+    - **mode**: 현재 모드 (OFF/SAFE/NORMAL/AGGRESSIVE)
+    - **positions**: 활성 포지션 목록
+    - **pending_signals**: 대기 중인 시그널
+    - **stats**: 거래 통계
+    - **filters**: 필터 상태 (쿨다운, 변동성, 추세)
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "rebound_strategy") or engine.rebound_strategy is None:
+        raise HTTPException(status_code=404, detail="Rebound strategy not available")
+
+    monitoring_data = engine.rebound_strategy.get_monitoring_data()
+
+    return monitoring_data
+
+
+@router.get("/monitoring/rebound/full-status")
+async def get_rebound_full_status():
+    """
+    Rebound 전략 전체 상태 (상세)
+
+    설정, 통계, 포지션, 필터 모든 정보를 포함합니다.
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "rebound_strategy") or engine.rebound_strategy is None:
+        raise HTTPException(status_code=404, detail="Rebound strategy not available")
+
+    return engine.rebound_strategy.get_status()
+
+
+@router.post("/monitoring/rebound/mode")
+async def set_rebound_mode(mode: str = Query(..., description="모드 (OFF/SAFE/NORMAL/AGGRESSIVE)")):
+    """
+    Rebound 전략 모드 변경
+
+    - **OFF**: 비활성화
+    - **SAFE**: 안전 모드 (레벨 3만 진입)
+    - **NORMAL**: 일반 모드 (레벨 2+ 진입)
+    - **AGGRESSIVE**: 공격 모드 (레벨 1+ 진입)
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "rebound_strategy") or engine.rebound_strategy is None:
+        raise HTTPException(status_code=404, detail="Rebound strategy not available")
+
+    valid_modes = ["OFF", "SAFE", "NORMAL", "AGGRESSIVE"]
+    if mode.upper() not in valid_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode: {mode}. Valid modes: {valid_modes}"
+        )
+
+    engine.rebound_strategy.set_mode(mode.upper())
+
+    return {
+        "success": True,
+        "message": f"Rebound mode set to {mode.upper()}",
+        "enabled": engine.rebound_strategy.is_enabled(),
+        "mode": mode.upper(),
+    }
+
+
+@router.get("/monitoring/rebound/positions")
+async def get_rebound_positions():
+    """
+    Rebound 전략 활성 포지션 목록
+
+    현재 보유 중인 Rebound 포지션과 상태를 반환합니다.
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "rebound_strategy") or engine.rebound_strategy is None:
+        raise HTTPException(status_code=404, detail="Rebound strategy not available")
+
+    positions = engine.rebound_strategy.get_all_positions()
+
+    return {
+        "count": len(positions),
+        "positions": {sym: pos.to_dict() for sym, pos in positions.items()},
+    }
+
+
+@router.get("/monitoring/rebound/filters")
+async def get_rebound_filters():
+    """
+    Rebound 전략 필터 상태
+
+    쿨다운, 변동성 필터, 추세 필터 상태를 반환합니다.
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "rebound_strategy") or engine.rebound_strategy is None:
+        raise HTTPException(status_code=404, detail="Rebound strategy not available")
+
+    return engine.rebound_strategy.filter_manager.get_dashboard_data()

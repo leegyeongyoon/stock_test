@@ -36,6 +36,7 @@ from src.strategies.core_safety import get_core_safety_guard
 from src.strategies.satellite import Regime, SatelliteStrategy
 from src.strategies.attack_breakout import AttackBreakoutStrategy, get_attack_strategy
 from src.strategies.pullback_strategy import PullbackStrategy, get_pullback_strategy
+from src.strategies.rebound_strategy import ReboundScalperStrategy, get_rebound_strategy
 from src.strategies.ignition import IgnitionStrategy, get_ignition_strategy, SurgeDetector, get_surge_detector
 from src.monitoring.slack import SlackNotifier, AlertLevel, SlackMessage
 from src.portfolio.position_ledger import PositionLedger, FillEvent
@@ -111,9 +112,11 @@ class TradingEngine:
         self.satellite_strategy = SatelliteStrategy()
         self.attack_strategy = get_attack_strategy()  # Attack 전략 (급등 추격 - 비권장)
         self.pullback_strategy = get_pullback_strategy()  # Pullback 전략 (눌림목 매수)
+        self.rebound_strategy = get_rebound_strategy()  # v4.2 Rebound 전략 (반등 스캘핑)
         self.ignition_strategy = get_ignition_strategy()  # v4.0 Ignition 전략 (전조 패턴 + 점화)
         self.surge_detector = get_surge_detector()  # 급등 시작 실시간 감지
         self.pullback_strategy.set_mode(settings.pullback_mode)  # 설정에서 모드 로드
+        self.rebound_strategy.set_mode(getattr(settings, "rebound_mode", "OFF"))  # Rebound 모드 로드
 
         # User Mode Manager
         self.mode_manager = get_mode_manager()
@@ -234,6 +237,29 @@ class TradingEngine:
 
         # 최대 20개로 제한 (Rate Limit 방지)
         return candidates[:20]
+
+    def _prefilter_symbols_for_rebound(self, market_data: dict) -> list[str]:
+        """Rebound 전략용 심볼 Pre-filtering (반등 후보 축소)
+
+        Rebound 조건:
+        - 거래대금 > 5천만
+        - 하락 중이거나 조정 중인 종목 (변화율 -15% ~ +3%)
+        - RSI가 낮을 가능성이 높은 종목 (하락 종목 우선)
+        """
+        candidates = []
+        for sym, md in market_data.items():
+            price_change = md.get("price_change_pct", 0)
+            volume_24h = md.get("volume_24h", 0)
+
+            # 조건: 거래대금 > 5천만 AND 변화율 -15% ~ +3% (하락/조정 종목)
+            if volume_24h > 50_000_000 and -15.0 < price_change < 3.0:
+                candidates.append((sym, price_change))
+
+        # 하락률이 큰 순으로 정렬 (과매도 종목 우선)
+        candidates.sort(key=lambda x: x[1])
+
+        # 최대 15개로 제한
+        return [c[0] for c in candidates[:15]]
 
     def _reset_filter_stats_if_new_day(self) -> None:
         """새로운 날짜면 필터 통계 리셋"""
@@ -362,7 +388,9 @@ class TradingEngine:
 
         # 메인 루프 시작
         self._running = True
-        self._candle_update_counter = 0  # 캔들 업데이트 카운터
+        self._candle_update_counter = 0  # 캔들 업데이트 카운터 (v5.3: 10초마다)
+        self._kmvi_update_counter = 0    # KMVI 업데이트 카운터 (60초마다)
+        self._candle_refresh_round = 0   # 캔들 갱신 라운드 로빈
         self._main_task = asyncio.create_task(self._main_loop())
 
         logger.info("Trading Engine started")
@@ -407,13 +435,16 @@ class TradingEngine:
                 # 2. 시장 데이터 업데이트
                 await self._update_market_data()
 
-                # 2.5. 1분봉 데이터 갱신 (60초마다)
+                # 2.5. 1분봉 데이터 갱신 (v5.3: 60초→10초로 단축, 급등 감지 속도 개선)
                 self._candle_update_counter = getattr(self, "_candle_update_counter", 0) + 1
-                if self._candle_update_counter >= 60:
+                if self._candle_update_counter >= 10:  # 60→10초
                     self._candle_update_counter = 0
                     await self._refresh_candles()
 
-                    # v4.2: KMVI 업데이트 (1분마다)
+                # v4.2: KMVI 업데이트 (60초마다 - 캔들과 분리)
+                self._kmvi_update_counter = getattr(self, "_kmvi_update_counter", 0) + 1
+                if self._kmvi_update_counter >= 60:
+                    self._kmvi_update_counter = 0
                     try:
                         symbols = self.symbol_manager.get_qualified_symbols()
                         self.risk_overlay.update_kmvi(symbols)
@@ -539,23 +570,39 @@ class TradingEngine:
         )
 
     async def _refresh_candles(self) -> None:
-        """1분봉/5분봉 데이터 갱신 (60초마다 호출)"""
-        watch_symbols = self.symbol_manager.get_qualified_symbols()[:30]
+        """
+        v5.3: 1분봉/5분봉 데이터 갱신 (10초마다 호출)
+
+        - 10초마다 상위 15개 심볼 갱신 (Rate Limit 고려)
+        - 1분당 약 90개 심볼 갱신 가능
+        - 급등 감지 속도 대폭 개선
+        """
+        # v5.3: 10초마다 호출되므로 15개씩 갱신 (30개→15개)
+        all_symbols = self.symbol_manager.get_qualified_symbols()
+
+        # 라운드 로빈으로 전체 심볼 커버
+        refresh_round = getattr(self, "_candle_refresh_round", 0)
+        start_idx = (refresh_round * 15) % max(len(all_symbols), 1)
+        end_idx = min(start_idx + 15, len(all_symbols))
+        watch_symbols = all_symbols[start_idx:end_idx]
+
+        # 다음 라운드 준비
+        self._candle_refresh_round = refresh_round + 1
 
         for symbol in watch_symbols:
             try:
-                # 1분봉 갱신
-                await self._load_candles_for_symbol(symbol, "1", 20)
+                # 1분봉 갱신 (최근 10개만 - 빠른 갱신)
+                await self._load_candles_for_symbol(symbol, "1", 10)
             except Exception:
                 pass
-            await asyncio.sleep(0.03)  # Rate limit 방지
+            await asyncio.sleep(0.02)  # Rate limit 방지
 
             try:
                 # 5분봉 갱신 (v5.0: Candle Surge Bonus)
-                await self._load_candles_for_symbol(symbol, "5", 12)
+                await self._load_candles_for_symbol(symbol, "5", 6)
             except Exception:
                 pass
-            await asyncio.sleep(0.03)  # Rate limit 방지
+            await asyncio.sleep(0.02)  # Rate limit 방지
 
     async def _load_candles_for_symbol(
         self, symbol: str, interval: str, limit: int
@@ -601,7 +648,12 @@ class TradingEngine:
 
         candle_time = upbit_candle.get("candle_date_time_utc", "")
         if candle_time:
-            dt = datetime.fromisoformat(candle_time.replace("Z", "+00:00"))
+            # v5.3: Upbit UTC 시간을 정확히 파싱 (timezone-aware)
+            # Upbit API는 "2026-02-04T07:26:00" 형식 (Z 없음, UTC 시간)
+            dt = datetime.fromisoformat(candle_time)
+            # naive datetime을 UTC로 명시
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             timestamp_ms = int(dt.timestamp() * 1000)
         else:
             timestamp_ms = 0
@@ -975,6 +1027,45 @@ class TradingEngine:
                     # 시그널 실행
                     for signal in pullback_signals:
                         await self._execute_pullback_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
+
+            # === v4.2 Rebound Scalper 전략 (반등 스캘핑) - Upbit 전용 ===
+            # Note: Rebound는 Satellite/Pullback과 독립적으로 운영됨
+            if self._is_upbit and self.rebound_strategy and self.rebound_strategy.is_enabled():
+                rebound_allowed = risk_decision.mode not in [RiskMode.HALT]
+                if rebound_allowed:
+                    # Pre-filtering: 후보 심볼 축소
+                    candidates = self._prefilter_symbols_for_rebound(self._market_data)
+                    logger.debug(f"Rebound candidates: {len(candidates)} symbols (pre-filtered)")
+
+                    # market_data에 캔들 및 호가 정보 추가
+                    enhanced_market_data = {}
+                    for sym in candidates:
+                        md = self._market_data.get(sym, {})
+                        # 캐시된 호가창 조회
+                        orderbook = await self._get_orderbook_cached(sym)
+                        # 1분봉/5분봉 조회
+                        candles_1m = self.candle_manager.get_candles(sym, "1m", 50) if self.candle_manager else []
+                        candles_5m = self.candle_manager.get_candles(sym, "5m", 50) if self.candle_manager else []
+
+                        enhanced_market_data[sym] = {
+                            **md,
+                            "symbol": sym,
+                            "orderbook": orderbook or {},
+                            "candles_1m": candles_1m,
+                            "candles_5m": candles_5m,
+                            "highest_24h": md.get("high_20", md.get("price", 0) * 1.01),
+                            "lowest_24h": md.get("low_20", md.get("price", 0) * 0.99),
+                        }
+
+                    # Rebound 시그널 스캔
+                    rebound_signals = await self.rebound_strategy.scan_for_signals(
+                        symbols=candidates,
+                        market_data_map=enhanced_market_data,
+                    )
+
+                    # 시그널 실행
+                    for signal in rebound_signals:
+                        await self._execute_rebound_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
 
             # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
             # Note: Ignition은 Satellite와 독립적으로 운영됨 (satellite_enabled와 무관)
@@ -2234,6 +2325,195 @@ class TradingEngine:
                 details={"error": str(e)},
             )
 
+    async def _execute_rebound_signal(self, signal, market_data: dict, risk_decision, current_equity: float) -> None:
+        """Rebound 시그널 실행 (v4.2 반등 스캘핑)"""
+        try:
+            symbol = signal.symbol
+            current_price = market_data.get("price", 0)
+
+            logger.info(
+                "Executing Rebound signal",
+                symbol=symbol,
+                level=signal.level,
+                score=signal.score,
+                entry_price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="REBOUND",
+                message=f"Rebound entry: {symbol} L{signal.level}",
+                details={
+                    "score": signal.score,
+                    "target_allocation": signal.target_allocation,
+                    "entry_price": signal.entry_price,
+                    "stop_loss": signal.stop_loss,
+                },
+            )
+
+            # 매수 금액 계산 (자산의 target_allocation %)
+            order_amount = current_equity * signal.target_allocation
+
+            # 최소 주문 금액만 체크
+            MIN_ORDER = 5000  # 최소 5천원
+
+            if order_amount < MIN_ORDER:
+                logger.debug("Rebound order too small", amount=order_amount, min=MIN_ORDER)
+                return
+
+            logger.info(
+                "Rebound order amount calculated",
+                symbol=symbol,
+                equity=current_equity,
+                allocation=signal.target_allocation,
+                order_amount=order_amount,
+            )
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info(
+                    "PAPER mode - skipping Rebound trade execution",
+                    symbol=symbol,
+                    amount=order_amount,
+                )
+                self.add_event(
+                    level="INFO",
+                    event_type="PAPER",
+                    message=f"[PAPER] Would have bought {symbol} (Rebound)",
+                    details={
+                        "amount": order_amount,
+                        "price": current_price,
+                        "level": signal.level,
+                    },
+                )
+                return
+
+            # 시장가 매수
+            result = await self.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                quantity=order_amount,  # KRW 금액
+            )
+
+            if not result.success:
+                logger.error("Rebound order failed", symbol=symbol, error=result.error)
+                self.add_event(
+                    level="ERROR",
+                    event_type="REBOUND",
+                    message=f"Rebound buy failed: {symbol}",
+                    details={"error": result.error},
+                )
+                return
+
+            # 체결 수량/가격 확인
+            filled_qty = result.filled_qty
+            avg_price = result.avg_price
+
+            if filled_qty <= 0 or avg_price <= 0:
+                # 잔고에서 확인
+                try:
+                    asset = symbol.replace("KRW-", "")
+                    balance = await self.exchange.get_balance(asset)
+                    if balance and balance.total > 0:
+                        ticker = await self.exchange.get_ticker(symbol)
+                        filled_qty = balance.total
+                        avg_price = ticker.get("trade_price", 0) if ticker else 0
+                        logger.info(
+                            "Rebound order filled (from balance)",
+                            symbol=symbol,
+                            filled_qty=filled_qty,
+                            avg_price=avg_price,
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to get balance for {symbol}: {e}")
+
+            logger.info(
+                "Rebound order filled",
+                symbol=symbol,
+                filled_qty=filled_qty,
+                avg_price=avg_price,
+            )
+
+            if filled_qty <= 0 or avg_price <= 0:
+                logger.warning("Rebound order not filled", symbol=symbol)
+                return
+
+            # 주문 기록
+            self.add_order(
+                symbol=symbol,
+                strategy="REBOUND",
+                side="BUY",
+                order_type="MARKET",
+                quantity=filled_qty,
+                price=avg_price,
+                status="FILLED",
+                filled_qty=filled_qty,
+                avg_fill_price=avg_price,
+                exchange_order_id=result.exchange_order_id,
+            )
+
+            # Rebound 포지션 추적
+            self.rebound_strategy.track_position(
+                symbol=symbol,
+                entry_price=avg_price,
+                quantity=filled_qty,
+            )
+
+            self.add_event(
+                level="INFO",
+                event_type="REBOUND",
+                message=f"Rebound entry completed: {symbol}",
+                details={
+                    "quantity": filled_qty,
+                    "price": avg_price,
+                    "level": signal.level,
+                    "score": signal.score,
+                },
+            )
+
+            # Slack 알림 (잔고 정보 포함)
+            if self.slack_notifier.is_enabled:
+                notional = filled_qty * avg_price
+                # 잔고 조회
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                except Exception:
+                    remaining_krw = 0
+
+                # TP 가격 계산
+                tp1_price = avg_price * (1 + self.rebound_strategy.tp1_pct)
+                tp2_price = avg_price * (1 + self.rebound_strategy.tp2_pct)
+
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+:dart: *Rebound 반등 매수 체결*
+> 심볼: `{symbol}`
+> 점수: {signal.score:.0f}점 (L{signal.level})
+> 수량: {filled_qty:.4f}
+> 가격: ₩{avg_price:,.0f}
+> 금액: ₩{notional:,.0f}
+> 손절가: ₩{signal.stop_loss:,.0f}
+> TP1 (+0.8%): ₩{tp1_price:,.0f}
+> TP2 (+1.5%): ₩{tp2_price:,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO,
+                ))
+
+        except Exception as e:
+            logger.error("Rebound signal execution error", error=str(e))
+            self.add_event(
+                level="ERROR",
+                event_type="REBOUND",
+                message=f"Rebound execution failed: {signal.symbol}",
+                details={"error": str(e)},
+            )
+
     async def _execute_ignition_entry(self, position, market_data: dict, risk_decision) -> None:
         """Ignition 진입 실행 (v4.0 전조 패턴 + 점화)"""
         try:
@@ -3343,6 +3623,120 @@ class TradingEngine:
 
                         if action == "FULL":
                             continue  # Pullback 전량 청산 후 다음 자산으로
+
+                # Rebound 포지션 청산 체크
+                if self.rebound_strategy and self.rebound_strategy.is_enabled():
+                    rebound_exit = self.rebound_strategy.should_exit(symbol, current_price)
+                    if rebound_exit:
+                        action = rebound_exit.get("action", "FULL")
+                        reason = rebound_exit.get("reason", "Unknown")
+                        exit_type = rebound_exit.get("exit_type", "unknown")
+                        exit_qty = rebound_exit.get("quantity", balance.total)
+
+                        logger.info(
+                            "Rebound exit signal",
+                            symbol=symbol,
+                            action=action,
+                            reason=reason,
+                            exit_type=exit_type,
+                            quantity=exit_qty,
+                        )
+
+                        # PAPER 모드 체크
+                        if not self.mode_manager.should_execute_trades():
+                            logger.info(
+                                "PAPER mode - skipping Rebound exit",
+                                symbol=symbol,
+                                reason=reason,
+                            )
+                            continue
+
+                        # 시장가 청산
+                        result = await self.exchange.place_order(
+                            symbol=symbol,
+                            side=OrderSide.SELL,
+                            order_type=OrderType.MARKET,
+                            quantity=exit_qty,
+                        )
+
+                        if result.success:
+                            # 포지션 업데이트
+                            rebound_pos = self.rebound_strategy.get_position(symbol)
+                            entry_price = rebound_pos.entry_price if rebound_pos else current_price
+                            realized_pnl = (result.avg_price - entry_price) * result.filled_qty
+                            pnl_pct = (result.avg_price - entry_price) / entry_price if entry_price > 0 else 0
+
+                            if action == "PARTIAL":
+                                self.rebound_strategy.close_position(symbol, partial=True, sold_qty=result.filled_qty, exit_type=exit_type, pnl_pct=pnl_pct)
+                            else:
+                                self.rebound_strategy.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
+
+                            self.add_event(
+                                level="INFO",
+                                event_type="REBOUND",
+                                message=f"Rebound exit completed: {symbol}",
+                                details={
+                                    "reason": reason,
+                                    "exit_type": exit_type,
+                                    "action": action,
+                                    "quantity": result.filled_qty,
+                                    "price": result.avg_price,
+                                    "pnl": realized_pnl,
+                                    "pnl_pct": pnl_pct,
+                                },
+                            )
+
+                            self.add_order(
+                                symbol=symbol,
+                                strategy="REBOUND",
+                                side="SELL",
+                                order_type="MARKET",
+                                quantity=exit_qty,
+                                price=result.avg_price,
+                                status="FILLED",
+                                filled_qty=result.filled_qty,
+                                avg_fill_price=result.avg_price,
+                                realized_pnl=realized_pnl,
+                            )
+
+                            # Slack 알림 (청산 - 잔고 정보 포함)
+                            if self.slack_notifier.is_enabled:
+                                pnl_emoji = ":moneybag:" if realized_pnl >= 0 else ":money_with_wings:"
+                                pnl_sign = "+" if realized_pnl >= 0 else ""
+                                pnl_display = (realized_pnl / (entry_price * result.filled_qty)) * 100 if entry_price > 0 else 0
+                                # 잔고 조회
+                                try:
+                                    krw_balance = await self.exchange.get_balance("KRW")
+                                    remaining_krw = krw_balance.available if krw_balance else 0
+                                except Exception:
+                                    remaining_krw = 0
+
+                                exit_emoji = {
+                                    "tp1": ":dart:",
+                                    "tp2": ":bullseye:",
+                                    "trailing": ":wave:",
+                                    "stop_loss": ":stop_sign:",
+                                    "be_stop": ":shield:",
+                                    "time_stop": ":alarm_clock:",
+                                }.get(exit_type, ":chart_with_downwards_trend:")
+
+                                await self.slack_notifier.send(SlackMessage(
+                                    text=f"""
+{exit_emoji} *Rebound 청산* ({exit_type.upper()})
+> 심볼: `{symbol}`
+> 사유: {reason}
+> 수량: {result.filled_qty:.4f}
+> 진입가: ₩{entry_price:,.0f}
+> 청산가: ₩{result.avg_price:,.0f}
+> 손익: {pnl_sign}₩{realized_pnl:,.0f} ({pnl_sign}{pnl_display:.2f}%)
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+                                    """.strip(),
+                                    level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
+                                ))
+
+                        if action == "FULL":
+                            continue  # Rebound 전량 청산 후 다음 자산으로
 
                 # PSM에 등록된 포지션인지 확인
                 psm_position = self.position_state_machine.get_position(symbol)

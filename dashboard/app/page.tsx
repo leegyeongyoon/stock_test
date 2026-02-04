@@ -10,6 +10,7 @@ import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
 import SurgeCandidates from '@/components/SurgeCandidates'
 import AlgorithmMonitor from '@/components/AlgorithmMonitor'
+import ReboundMonitor from '@/components/ReboundMonitor'
 import { formatKRW } from '@/lib/currency'
 
 interface SurgeStatus {
@@ -338,16 +339,17 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Surge Candidates + Algorithm Monitor */}
+      {/* Surge Candidates + Algorithm Monitors */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Surge Candidates - 2/3 width */}
         <div className="lg:col-span-2">
           <SurgeCandidates candidates={surgeCandidates} loading={loading} />
         </div>
 
-        {/* Algorithm Monitor - 1/3 width */}
-        <div>
+        {/* Algorithm Monitors - 1/3 width (stacked) */}
+        <div className="space-y-4">
           <AlgorithmMonitor refreshInterval={3000} />
+          <ReboundMonitor refreshInterval={3000} />
         </div>
       </div>
 
