@@ -543,7 +543,7 @@ class Settings(BaseSettings):
 
     # === v4.2 Rebound Scalper 전략 설정 (반등 스캘핑) ===
     rebound_mode: Literal["OFF", "SAFE", "NORMAL", "AGGRESSIVE"] = Field(
-        default="OFF",
+        default="NORMAL",
         description="반등 스캘퍼 모드 (OFF/SAFE/NORMAL/AGGRESSIVE)",
     )
 
