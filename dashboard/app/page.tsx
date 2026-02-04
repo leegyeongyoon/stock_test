@@ -48,7 +48,6 @@ export default function Dashboard() {
   const [satelliteStatus, setSatelliteStatus] = useState<SatelliteStatus | null>(null)
   const [riskStatus, setRiskStatus] = useState<RiskStatus | null>(null)
   const [surgeStatus, setSurgeStatus] = useState<SurgeStatus | null>(null)
-  const [surgeCandidates, setSurgeCandidates] = useState<SurgeCandidate[]>([])
   const [capitalProfile, setCapitalProfile] = useState<CapitalProfileStatus | null>(null)
   const [realtimeSummary, setRealtimeSummary] = useState<RealtimeSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -81,14 +80,6 @@ export default function Dashboard() {
         setSurgeStatus(surgeData)
       } catch {
         // SurgeDetector 미설치 시 무시
-      }
-
-      // 급등 근접 종목 조회
-      try {
-        const candidatesData = await api.getSurgeCandidates(70, 20)
-        setSurgeCandidates(candidatesData.candidates)
-      } catch {
-        // API 실패 시 무시
       }
 
       // Capital Profile 조회
@@ -343,7 +334,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Surge Candidates - 2/3 width */}
         <div className="lg:col-span-2">
-          <SurgeCandidates candidates={surgeCandidates} loading={loading} />
+          <SurgeCandidates refreshInterval={3000} />
         </div>
 
         {/* Algorithm Monitors - 1/3 width (stacked) */}
