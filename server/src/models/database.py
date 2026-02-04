@@ -184,6 +184,52 @@ class EquitySnapshotModel(Base):
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
 
 
+class PositionLedgerModel(Base):
+    """P0: 포지션 원장 테이블 (단일 진실 원장)"""
+
+    __tablename__ = "position_ledger"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    position_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    strategy_id: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[float] = mapped_column(Float)
+    avg_entry_price: Mapped[float] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    total_fees: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(20), index=True)  # OPEN, PARTIAL_CLOSED, CLOSED
+    entry_time: Mapped[datetime] = mapped_column(DateTime)
+    last_fill_time: Mapped[datetime] = mapped_column(DateTime)
+    fill_count: Mapped[int] = mapped_column(Integer, default=1)
+    stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    initial_stop_distance: Mapped[float] = mapped_column(Float, default=0.0)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class ExecutionCostModel(Base):
+    """P1: 체결비용 기록 테이블"""
+
+    __tablename__ = "execution_costs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(64), index=True)
+    order_type: Mapped[str] = mapped_column(String(20))  # ENTRY, EXIT, PARTIAL_EXIT, ADD
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    strategy_id: Mapped[str] = mapped_column(String(20), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    requested_price: Mapped[float] = mapped_column(Float)
+    filled_price: Mapped[float] = mapped_column(Float)
+    filled_qty: Mapped[float] = mapped_column(Float)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    fee_krw: Mapped[float] = mapped_column(Float)
+    slippage_bps: Mapped[float] = mapped_column(Float)
+    spread_bps_at_fill: Mapped[float] = mapped_column(Float, default=0.0)
+    notional_krw: Mapped[float] = mapped_column(Float)
+    total_cost_krw: Mapped[float] = mapped_column(Float)
+    cost_pct: Mapped[float] = mapped_column(Float)
+
+
 async def init_db() -> None:
     """데이터베이스 초기화"""
     async with engine.begin() as conn:

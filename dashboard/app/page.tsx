@@ -9,6 +9,7 @@ import SummaryCards from '@/components/SummaryCards'
 import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
 import SurgeCandidates from '@/components/SurgeCandidates'
+import AlgorithmMonitor from '@/components/AlgorithmMonitor'
 import { formatKRW } from '@/lib/currency'
 
 interface SurgeStatus {
@@ -337,8 +338,18 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Surge Candidates - 급등 근접 종목 */}
-      <SurgeCandidates candidates={surgeCandidates} loading={loading} />
+      {/* Surge Candidates + Algorithm Monitor */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Surge Candidates - 2/3 width */}
+        <div className="lg:col-span-2">
+          <SurgeCandidates candidates={surgeCandidates} loading={loading} />
+        </div>
+
+        {/* Algorithm Monitor - 1/3 width */}
+        <div>
+          <AlgorithmMonitor refreshInterval={3000} />
+        </div>
+      </div>
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

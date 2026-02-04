@@ -75,6 +75,7 @@ class EventType(str, Enum):
     SATELLITE = "SATELLITE"
     SATELLITE_EXIT = "SATELLITE_EXIT"
     PULLBACK = "PULLBACK"
+    FILTER = "FILTER"  # 필터링/차단 이벤트
 
 
 # === API 응답 스키마 ===

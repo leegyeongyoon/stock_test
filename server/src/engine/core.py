@@ -38,6 +38,13 @@ from src.strategies.attack_breakout import AttackBreakoutStrategy, get_attack_st
 from src.strategies.pullback_strategy import PullbackStrategy, get_pullback_strategy
 from src.strategies.ignition import IgnitionStrategy, get_ignition_strategy, SurgeDetector, get_surge_detector
 from src.monitoring.slack import SlackNotifier, AlertLevel, SlackMessage
+from src.portfolio.position_ledger import PositionLedger, FillEvent
+from src.risk.exposure_manager import (
+    ExposureManager,
+    ExposureConfig,
+    init_exposure_manager,
+    get_exposure_manager,
+)
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -124,6 +131,24 @@ class TradingEngine:
         if self.slack_notifier.is_enabled:
             logger.info("Slack notifier enabled")
 
+        # P0: 단일 진실 원장 (PositionLedger)
+        self.position_ledger = PositionLedger()
+        logger.info("PositionLedger initialized")
+
+        # P2: 노출 한도 관리 (ExposureManager)
+        exposure_config = ExposureConfig(
+            max_positions=5,
+            max_total_exposure_pct=0.70,  # 70%
+            max_symbol_exposure_pct=0.15,  # 15%
+            max_strategy_exposure_pct=0.40,  # 40%
+            min_cash_reserve_pct=0.20,  # 20%
+            max_single_order_pct=0.10,  # 10%
+        )
+        self.exposure_manager = init_exposure_manager(
+            ledger=self.position_ledger,
+            config=exposure_config,
+        )
+
         # 상태
         self._running = False
         self._last_heartbeat: Optional[datetime] = None
@@ -146,6 +171,19 @@ class TradingEngine:
         # 호가창 캐시 (Rate Limit 방지)
         self._orderbook_cache: dict[str, tuple[dict, float]] = {}  # symbol -> (data, timestamp)
         self._orderbook_cache_ttl: float = 30.0  # 30초 캐시
+
+        # v5.2: 모니터링 캐시 (Attack Score Top 후보)
+        self._attack_score_cache: dict[str, dict] = {}  # symbol -> score result
+        self._attack_score_cache_time: Optional[datetime] = None
+
+        # v5.2: 필터링 통계 (오늘 기준)
+        self._filter_stats: dict[str, int] = {
+            "anti_chase": 0,
+            "exposure_limit": 0,
+            "overheat": 0,
+            "total": 0,
+        }
+        self._filter_stats_date: Optional[str] = None  # YYYY-MM-DD
 
     @property
     def is_running(self) -> bool:
@@ -196,6 +234,88 @@ class TradingEngine:
 
         # 최대 20개로 제한 (Rate Limit 방지)
         return candidates[:20]
+
+    def _reset_filter_stats_if_new_day(self) -> None:
+        """새로운 날짜면 필터 통계 리셋"""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        if self._filter_stats_date != today:
+            self._filter_stats = {
+                "anti_chase": 0,
+                "exposure_limit": 0,
+                "overheat": 0,
+                "total": 0,
+            }
+            self._filter_stats_date = today
+
+    def increment_filter_stat(self, filter_type: str) -> None:
+        """필터링 통계 증가"""
+        self._reset_filter_stats_if_new_day()
+        if filter_type in self._filter_stats:
+            self._filter_stats[filter_type] += 1
+        self._filter_stats["total"] += 1
+
+    def get_filter_stats(self) -> dict:
+        """필터링 통계 조회"""
+        self._reset_filter_stats_if_new_day()
+        return self._filter_stats.copy()
+
+    async def update_attack_score_cache(self) -> None:
+        """Attack Score 캐시 업데이트 (상위 후보 추적용)"""
+        if not self._is_upbit or not self.attack_strategy:
+            return
+
+        try:
+            # 거래대금 상위 30개만 계산 (성능 최적화)
+            sorted_symbols = sorted(
+                self._market_data.items(),
+                key=lambda x: x[1].get("volume_24h", 0),
+                reverse=True
+            )[:30]
+
+            cache = {}
+            for symbol, md in sorted_symbols:
+                try:
+                    # market_data에 change_rate 추가
+                    market_data_for_score = {
+                        **md,
+                        "change_rate": md.get("price_change_pct", 0) / 100,
+                    }
+                    score_result = self.attack_strategy.get_attack_score(market_data_for_score)
+                    cache[symbol] = {
+                        "symbol": symbol,
+                        "score": score_result.total_score,
+                        "level": score_result.level,
+                        "distance_to_entry": max(0, 80 - score_result.total_score),
+                        "change_rate": md.get("price_change_pct", 0) / 100,
+                        "volume_24h": md.get("volume_24h", 0),
+                        "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
+                    }
+                except Exception as e:
+                    logger.debug(f"Failed to calculate attack score for {symbol}: {e}")
+                    continue
+
+            self._attack_score_cache = cache
+            self._attack_score_cache_time = datetime.utcnow()
+
+        except Exception as e:
+            logger.warning("Failed to update attack score cache", error=str(e))
+
+    def get_top_attack_candidates(self, limit: int = 5, min_score: int = 50) -> list[dict]:
+        """상위 Attack 후보 반환 (점수 높은 순)"""
+        if not self._attack_score_cache:
+            return []
+
+        # 점수로 정렬하여 상위 N개 반환
+        sorted_candidates = sorted(
+            self._attack_score_cache.values(),
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        # min_score 이상만 필터링
+        filtered = [c for c in sorted_candidates if c["score"] >= min_score]
+
+        return filtered[:limit]
 
     async def start(self) -> None:
         """엔진 시작"""
@@ -299,6 +419,12 @@ class TradingEngine:
                         self.risk_overlay.update_kmvi(symbols)
                     except Exception as e:
                         logger.warning("KMVI update failed", error=str(e))
+
+                # v5.2: Attack Score 캐시 업데이트 (10초마다)
+                self._attack_cache_counter = getattr(self, "_attack_cache_counter", 0) + 1
+                if self._attack_cache_counter >= 10:
+                    self._attack_cache_counter = 0
+                    await self.update_attack_score_cache()
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 can_open = self.risk_engine.can_open_position
@@ -1078,6 +1204,63 @@ class TradingEngine:
                 )
                 return
 
+            # P0: ExposureManager 노출 체크 (Satellite/Core 포함)
+            if signal.strategy != StrategyType.ATTACK:  # Attack은 별도 처리
+                order_amount = quantity * current_price
+
+                # 잔고 조회 (Upbit)
+                if self._is_upbit:
+                    krw_bal = await self.exchange.get_balance("KRW")
+                    total_equity = krw_bal.total if krw_bal else 0
+                    available_cash = krw_bal.free if krw_bal else 0
+                else:
+                    total_equity = available_capital
+                    available_cash = available_capital
+
+                exposure_check = await self.exposure_manager.can_open_position(
+                    symbol=symbol,
+                    strategy_id=signal.strategy.value,
+                    order_amount=order_amount,
+                    total_equity=total_equity,
+                    available_cash=available_cash,
+                )
+
+                if not exposure_check.allowed:
+                    logger.warning(
+                        "Entry blocked by ExposureManager",
+                        symbol=symbol,
+                        strategy=signal.strategy.value,
+                        reason=exposure_check.reason,
+                        current_positions=exposure_check.current_positions,
+                    )
+                    self.add_event(
+                        level="WARNING",
+                        event_type="FILTER",
+                        message=f"{symbol} 진입 차단: {exposure_check.reason}",
+                        details={
+                            "symbol": symbol,
+                            "strategy": signal.strategy.value,
+                            "filter_type": "EXPOSURE_LIMIT",
+                            "order_amount": order_amount,
+                        },
+                    )
+                    self.increment_filter_stat("exposure_limit")
+                    return
+
+                # 조정된 금액으로 수량 재계산
+                if exposure_check.adjusted_amount < order_amount:
+                    logger.info(
+                        "Order amount adjusted by ExposureManager",
+                        original=order_amount,
+                        adjusted=exposure_check.adjusted_amount,
+                        reason=exposure_check.reason,
+                    )
+                    quantity = exposure_check.adjusted_amount / current_price
+                    quantity = self._round_quantity(symbol, quantity)
+                    if quantity <= 0:
+                        logger.warning("Quantity zero after exposure adjustment")
+                        return
+
             # Core 전략
             if signal.strategy == StrategyType.CORE:
                 if self._is_upbit:
@@ -1503,6 +1686,43 @@ class TradingEngine:
             exchange_order_id=result.exchange_order_id,
         )
 
+        # P0: 단일 진실 원장에 체결 기록
+        if result.filled_qty > 0:
+            current_price = market_data.get("price", result.avg_price)
+            atr_5m = current_price * 0.01  # 1% as temp ATR
+            initial_stop = current_price - (atr_5m * 2.0) if side == OrderSide.BUY else None
+
+            fill_event = FillEvent(
+                order_id=result.order_id or str(result.exchange_order_id),
+                exchange_order_id=result.exchange_order_id or "",
+                position_id=None,  # 신규 포지션
+                symbol=symbol,
+                strategy_id=signal.strategy.value,
+                side="BUY" if side == OrderSide.BUY else "SELL",
+                filled_quantity=result.filled_qty,
+                fill_price=result.avg_price,
+                fee=result.commission or 0,
+                fee_asset="KRW",
+                timestamp=datetime.utcnow(),
+                requested_price=current_price,
+                spread_bps_at_fill=0,  # TODO: 호가창에서 계산
+                initial_stop_price=initial_stop,
+            )
+
+            try:
+                if side == OrderSide.BUY:
+                    await self.position_ledger.on_buy_fill(fill_event)
+                else:
+                    await self.position_ledger.on_sell_fill(fill_event)
+                logger.info(
+                    "Fill recorded to PositionLedger",
+                    symbol=symbol,
+                    side=side.value,
+                    qty=result.filled_qty,
+                )
+            except Exception as e:
+                logger.error("Failed to record fill to ledger", error=str(e))
+
         # Satellite의 경우 Position State Machine에 등록
         if signal.strategy == StrategyType.SATELLITE and side == OrderSide.BUY:
             # Upbit용 ATR 계산 (캔들 데이터 필요)
@@ -1572,6 +1792,50 @@ class TradingEngine:
             if order_amount < 5000:
                 logger.warning("Attack order too small", amount=order_amount)
                 return
+
+            # P2: ExposureManager 노출 체크
+            balance = await self.exchange.get_balance()
+            total_equity = balance.total if balance else 0
+            available_cash = balance.free if balance else 0
+
+            exposure_check = await self.exposure_manager.can_open_position(
+                symbol=symbol,
+                strategy_id="ATTACK",
+                order_amount=order_amount,
+                total_equity=total_equity,
+                available_cash=available_cash,
+            )
+
+            if not exposure_check.allowed:
+                logger.warning(
+                    "Attack entry blocked by ExposureManager",
+                    symbol=symbol,
+                    reason=exposure_check.reason,
+                    current_exposure=exposure_check.current_exposure,
+                )
+                self.add_event(
+                    level="WARNING",
+                    event_type="FILTER",
+                    message=f"{symbol} Attack 차단: {exposure_check.reason}",
+                    details={
+                        "symbol": symbol,
+                        "strategy": "ATTACK",
+                        "filter_type": "EXPOSURE_LIMIT",
+                        "order_amount": order_amount,
+                    },
+                )
+                self.increment_filter_stat("exposure_limit")
+                return
+
+            # 조정된 금액 사용
+            if exposure_check.adjusted_amount < order_amount:
+                logger.info(
+                    "Attack order amount adjusted",
+                    original=order_amount,
+                    adjusted=exposure_check.adjusted_amount,
+                    reason=exposure_check.reason,
+                )
+                order_amount = exposure_check.adjusted_amount
 
             # 시장가 매수
             result = await self.exchange.place_order(
@@ -1670,6 +1934,31 @@ class TradingEngine:
                     "level": metadata.get("attack_level"),
                 },
             )
+
+            # Slack 알림 (Attack 매수)
+            if self.slack_notifier.is_enabled:
+                notional = filled_qty * avg_price
+                try:
+                    krw_balance = await self.exchange.get_balance("KRW")
+                    remaining_krw = krw_balance.available if krw_balance else 0
+                except Exception:
+                    remaining_krw = 0
+
+                await self.slack_notifier.send(SlackMessage(
+                    text=f"""
+:crossed_swords: *Attack 매수 (L{metadata.get('attack_level', 1)})*
+> 심볼: `{symbol}`
+> 점수: {metadata.get('attack_score', 0):.0f}점
+> 트랜치: {metadata.get('tranche', 1)}/3
+> 수량: {filled_qty:.4f}
+> 가격: ₩{avg_price:,.0f}
+> 매수금액: ₩{notional:,.0f}
+> 손절가: ₩{metadata.get('stop_price', 0):,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+                    """.strip(),
+                    level=AlertLevel.INFO,
+                ))
 
         except Exception as e:
             logger.error("Attack signal execution error", error=str(e))
@@ -2847,6 +3136,33 @@ class TradingEngine:
                                     avg_fill_price=result.avg_price,
                                     realized_pnl=realized_pnl,
                                 )
+
+                                # Slack 알림 (Attack 청산)
+                                if self.slack_notifier.is_enabled:
+                                    pnl_emoji = "💰" if realized_pnl >= 0 else "📉"
+                                    pnl_pct = ((result.avg_price / attack_pos.entry_price) - 1) * 100 if attack_pos.entry_price > 0 else 0
+                                    try:
+                                        krw_balance = await self.exchange.get_balance("KRW")
+                                        remaining_krw = krw_balance.available if krw_balance else 0
+                                    except Exception:
+                                        remaining_krw = 0
+
+                                    await self.slack_notifier.send(SlackMessage(
+                                        text=f"""
+{pnl_emoji} *Attack 청산*
+> 심볼: `{symbol}`
+> 사유: {attack_exit.reason}
+> 수량: {result.filled_qty:.4f}
+> 진입가: ₩{attack_pos.entry_price:,.0f}
+> 청산가: ₩{result.avg_price:,.0f}
+> 수익률: {pnl_pct:+.2f}%
+> 손익: ₩{realized_pnl:,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+                                        """.strip(),
+                                        level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
+                                    ))
+
                             continue  # Attack 청산 후 다음 자산으로
 
                 # Pullback 포지션 청산 체크
@@ -3021,6 +3337,32 @@ class TradingEngine:
                                 reason=sat_exit.reason,
                                 pnl=f"₩{realized_pnl:,.0f}",
                             )
+
+                            # Slack 알림 (Satellite 청산)
+                            if self.slack_notifier.is_enabled:
+                                pnl_emoji = "💰" if realized_pnl >= 0 else "📉"
+                                pnl_pct = ((result.avg_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+                                try:
+                                    krw_balance = await self.exchange.get_balance("KRW")
+                                    remaining_krw = krw_balance.available if krw_balance else 0
+                                except Exception:
+                                    remaining_krw = 0
+
+                                await self.slack_notifier.send(SlackMessage(
+                                    text=f"""
+{pnl_emoji} *Satellite 청산*
+> 심볼: `{symbol}`
+> 사유: {sat_exit.reason}
+> 수량: {result.filled_qty:.4f}
+> 진입가: ₩{entry_price:,.0f}
+> 청산가: ₩{result.avg_price:,.0f}
+> 수익률: {pnl_pct:+.2f}%
+> 손익: ₩{realized_pnl:,.0f}
+---
+> 💰 잔여 현금: ₩{remaining_krw:,.0f}
+                                    """.strip(),
+                                    level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
+                                ))
 
         except Exception as e:
             logger.error("Upbit position management error", error=str(e))
@@ -3295,6 +3637,35 @@ class TradingEngine:
         except Exception as e:
             logger.error("Failed to update cached state", error=str(e))
 
+    async def _get_symbol_strategy_map(self) -> dict[str, str]:
+        """PositionLedger에서 심볼별 전략 매핑 조회"""
+        strategy_map: dict[str, str] = {}
+        strategy_priority = {
+            "ATTACK": 1,
+            "IGNITION": 2,
+            "SURGE": 3,
+            "PULLBACK": 4,
+            "SATELLITE": 5,
+            "CORE": 6,
+        }
+
+        try:
+            open_positions = await self.position_ledger.get_open_positions()
+            for pos in open_positions:
+                symbol = pos.symbol
+                strategy = pos.strategy_id
+                existing = strategy_map.get(symbol)
+
+                if existing is None:
+                    strategy_map[symbol] = strategy
+                elif strategy_priority.get(strategy, 99) < strategy_priority.get(existing, 99):
+                    strategy_map[symbol] = strategy
+
+        except Exception as e:
+            logger.warning("Failed to build strategy map from ledger", error=str(e))
+
+        return strategy_map
+
     async def _update_cached_state_upbit(self) -> None:
         """Upbit 상태 캐시 업데이트"""
         # 잔고 조회
@@ -3303,6 +3674,9 @@ class TradingEngine:
 
         krw_total = krw_balance.total if krw_balance else 0
         current_equity = krw_total
+
+        # PositionLedger에서 전략 매핑 조회
+        symbol_strategy_map = await self._get_symbol_strategy_map()
 
         # 보유 자산 가치 합산
         positions_value = 0
@@ -3327,9 +3701,12 @@ class TradingEngine:
                 position_pnl = (current_price - entry_price) * balance.total
                 unrealized_pnl += position_pnl
 
+                # 실제 전략 조회 (Ledger에 없으면 SATELLITE 기본값)
+                strategy = symbol_strategy_map.get(symbol, "SATELLITE")
+
                 self._cached_positions.append({
                     "symbol": symbol,
-                    "strategy": "SATELLITE",  # Upbit은 Satellite 위주
+                    "strategy": strategy,  # 실제 진입 전략 사용
                     "side": "BUY",  # 롱만 가능
                     "quantity": balance.total,
                     "avg_price": entry_price,

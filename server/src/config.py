@@ -97,8 +97,8 @@ class Settings(BaseSettings):
         description="Satellite 전략 최대 포지션 (USD)",
     )
     satellite_hard_stop_pct: float = Field(
-        default=-0.012,
-        description="하드 손절 (-1.2%) - 0.8%→1.2%: 너무 타이트한 손절 완화",
+        default=-0.008,  # v5.1: -1.2% → -0.8% (더 빠른 손절)
+        description="하드 손절 (-0.8%) - 손실 최소화 위해 타이트하게",
     )
     satellite_trailing_trigger_pct: float = Field(
         default=0.008,
@@ -247,18 +247,18 @@ class Settings(BaseSettings):
         description="공격 모드 (OFF/NORMAL/PLUS/MAX)",
     )
 
-    # Attack Score 임계값
+    # Attack Score 임계값 (v5.1: 기준 강화)
     attack_score_l1: float = Field(
-        default=70.0,
-        description="Level 1 임계값 (70점 이상)",
+        default=80.0,  # 70 → 80 (고점 추격 방지)
+        description="Level 1 임계값 (80점 이상)",
     )
     attack_score_l2: float = Field(
-        default=80.0,
-        description="Level 2 임계값 (80점 이상)",
+        default=85.0,  # 80 → 85
+        description="Level 2 임계값 (85점 이상)",
     )
     attack_score_l3: float = Field(
-        default=90.0,
-        description="Level 3 임계값 (90점 이상)",
+        default=92.0,  # 90 → 92
+        description="Level 3 임계값 (92점 이상)",
     )
 
     # Attack 목표 비중

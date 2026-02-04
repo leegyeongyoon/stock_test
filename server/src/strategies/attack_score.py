@@ -113,6 +113,27 @@ class AttackScoreCalculator:
         symbol = market_data.get("symbol", "UNKNOWN")
         components = []
 
+        # v5.1: Anti-Chase Gate - 일일 +10% 이상 급등 시 진입 차단
+        change_rate = market_data.get("change_rate", 0)
+        if change_rate >= 0.10:  # +10% 이상
+            logger.info(
+                "Attack blocked by anti-chase gate",
+                symbol=symbol,
+                change_rate=f"{change_rate*100:.1f}%",
+            )
+            return AttackScoreResult(
+                symbol=symbol,
+                total_score=0,
+                level=0,  # 진입 불가
+                target_allocation=0,
+                components=[ScoreComponent(
+                    name="Anti-Chase Gate",
+                    score=0,
+                    max_score=0,
+                    details={"reason": f"Daily change {change_rate*100:.1f}% >= 10% threshold"},
+                )],
+            )
+
         # 1. Breakout Strength (0~25)
         breakout_score = self._calc_breakout_strength(market_data)
         components.append(breakout_score)
@@ -412,13 +433,15 @@ class AttackScoreCalculator:
             "rvol": rvol,
         }
 
-        # 전일 대비 과열 (-0~8)
-        if change_rate >= 0.20:
-            penalty -= 8
-        elif change_rate >= 0.15:
-            penalty -= 5
-        elif change_rate >= 0.12:
-            penalty -= 3
+        # v5.1: 전일 대비 과열 (강화: -0~15)
+        if change_rate >= 0.15:
+            penalty -= 15  # 기존 -8 → -15
+        elif change_rate >= 0.10:
+            penalty -= 12  # 기존 없음 → -12
+        elif change_rate >= 0.08:
+            penalty -= 8   # 기존 -5 → -8
+        elif change_rate >= 0.05:
+            penalty -= 5   # 기존 -3 → -5
 
         details["daily_penalty"] = penalty
 
