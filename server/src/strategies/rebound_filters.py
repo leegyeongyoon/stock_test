@@ -115,9 +115,10 @@ class VolatilityFilter:
 
         true_ranges = []
         for i in range(1, len(candles)):
-            high = candles[i].get("high", 0)
-            low = candles[i].get("low", 0)
-            prev_close = candles[i-1].get("close", 0)
+            # Candle 객체 속성 직접 접근 (dataclass)
+            high = candles[i].high
+            low = candles[i].low
+            prev_close = candles[i-1].close
 
             if prev_close == 0:
                 continue
@@ -153,8 +154,9 @@ class VolatilityFilter:
         prev_direction = None
 
         for candle in candles:
-            open_price = candle.get("open", 0)
-            close_price = candle.get("close", 0)
+            # Candle 객체 속성 직접 접근 (dataclass)
+            open_price = candle.open
+            close_price = candle.close
 
             if open_price == 0:
                 continue
@@ -243,7 +245,8 @@ class TrendFilter:
             state.downtrend_reason = "데이터 부족"
             return state
 
-        closes = [c.get("close", 0) for c in candles if c.get("close", 0) > 0]
+        # Candle 객체 속성 직접 접근 (dataclass)
+        closes = [c.close for c in candles if c.close > 0]
         if len(closes) < self.ema_long_period:
             return state
 
@@ -320,7 +323,8 @@ class TrendFilter:
             start = i * group_size
             end = start + group_size
             group = candles[start:end]
-            group_high = max(c.get("high", 0) for c in group)
+            # Candle 객체 속성 직접 접근 (dataclass)
+            group_high = max(c.high for c in group)
             highs.append(group_high)
 
         # 모든 고점이 점점 낮아지는지 체크

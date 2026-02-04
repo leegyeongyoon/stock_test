@@ -2,15 +2,20 @@
 
 급등주 공격 점수 계산기
 
-Attack Score 구성 (0~100점) - v5.0 업데이트:
+Attack Score 구성 (0~100점) - v5.1 업데이트:
 - Breakout Strength (0~25): 고점 돌파 강도
 - Volume Expansion (0~25): RVOL, 거래대금 증가
-- Trend Context (0~15): 1h 추세, SMA 위치 (v5.0: 20→15)
-- Orderbook Quality (0~10): 스프레드, 깊이 (v5.0: 15→10)
+- Trend Context (0~15): 1h 추세, SMA 위치
+- Orderbook Quality (0~10): 스프레드, 깊이
 - Overheat Penalty (-15~0): 과열 감점
-- Candle Surge Bonus (0~30): 분봉 급등 트리거 (v5.0 신규)
+- Candle Surge Bonus (0~30): 분봉 급등 트리거
   - 1분봉 +7% & RVOL 3x → +30점
   - 5분봉 +4% & RVOL 2x → +20점
+
+v5.1 변경사항:
+- Candle Surge 감지 시 Anti-Chase Gate 우회
+  → 급등 시작 순간에는 일일 +20% 넘어도 진입 허용
+- Candle Surge를 먼저 체크하여 급등 감지 후 Anti-Chase 판단
 
 v5.0 변경사항:
 - Anti-Chase Gate: 10% → 20% 완화
@@ -71,17 +76,21 @@ class AttackScoreResult:
 
 class AttackScoreCalculator:
     """
-    Attack Score 계산기 (v5.0)
+    Attack Score 계산기 (v5.1)
 
     급등주의 공격 적합성을 0~100점으로 평가
 
-    점수 구성 (v5.0):
+    점수 구성 (v5.1):
     - Breakout Strength (0~25): 고점 돌파 강도
     - Volume Expansion (0~25): RVOL, 거래대금
     - Trend Context (0~15): 1h 추세, SMA 위치
     - Orderbook Quality (0~10): 스프레드, 깊이
     - Overheat Penalty (-15~0): 과열 감점
-    - Candle Surge Bonus (0~30): 분봉 급등 트리거 (신규)
+    - Candle Surge Bonus (0~30): 분봉 급등 트리거
+
+    v5.1 변경사항:
+    - Candle Surge 감지 시 Anti-Chase Gate 우회
+    - 급등 시작 순간에는 일일 +20% 넘어도 진입 허용
 
     v5.0 변경사항:
     - Anti-Chase Gate: 10% → 20% 완화
@@ -125,28 +134,45 @@ class AttackScoreCalculator:
         symbol = market_data.get("symbol", "UNKNOWN")
         components = []
 
-        # v5.0: Anti-Chase Gate - 일일 +20% 이상 급등 시 진입 차단 (완화: 10%→20%)
+        # v5.1: Candle Surge를 먼저 체크 (Anti-Chase 우회 판단용)
+        candle_surge = self._calc_candle_surge_bonus(market_data)
+        surge_triggered = candle_surge.score > 0
+        surge_trigger_type = candle_surge.details.get("trigger", "NONE")
+
+        # v5.1: Anti-Chase Gate - Candle Surge 감지 시 우회
         change_rate = market_data.get("change_rate", 0)
         anti_chase_threshold = settings.anti_chase_gate_threshold  # 기본 0.20 (20%)
+
         if change_rate >= anti_chase_threshold:
-            logger.info(
-                "Attack blocked by anti-chase gate",
-                symbol=symbol,
-                change_rate=f"{change_rate*100:.1f}%",
-                threshold=f"{anti_chase_threshold*100:.0f}%",
-            )
-            return AttackScoreResult(
-                symbol=symbol,
-                total_score=0,
-                level=0,  # 진입 불가
-                target_allocation=0,
-                components=[ScoreComponent(
-                    name="Anti-Chase Gate",
-                    score=0,
-                    max_score=0,
-                    details={"reason": f"Daily change {change_rate*100:.1f}% >= {anti_chase_threshold*100:.0f}% threshold"},
-                )],
-            )
+            if surge_triggered:
+                # 급등 감지됨 → Anti-Chase 우회하고 진입 허용
+                logger.info(
+                    "Anti-Chase bypassed due to Candle Surge",
+                    symbol=symbol,
+                    change_rate=f"{change_rate*100:.1f}%",
+                    surge_trigger=surge_trigger_type,
+                    surge_bonus=candle_surge.score,
+                )
+            else:
+                # 급등 감지 안 됨 → Anti-Chase 차단
+                logger.info(
+                    "Attack blocked by anti-chase gate",
+                    symbol=symbol,
+                    change_rate=f"{change_rate*100:.1f}%",
+                    threshold=f"{anti_chase_threshold*100:.0f}%",
+                )
+                return AttackScoreResult(
+                    symbol=symbol,
+                    total_score=0,
+                    level=0,  # 진입 불가
+                    target_allocation=0,
+                    components=[ScoreComponent(
+                        name="Anti-Chase Gate",
+                        score=0,
+                        max_score=0,
+                        details={"reason": f"Daily change {change_rate*100:.1f}% >= {anti_chase_threshold*100:.0f}% threshold"},
+                    )],
+                )
 
         # 1. Breakout Strength (0~25)
         breakout_score = self._calc_breakout_strength(market_data)
@@ -168,8 +194,7 @@ class AttackScoreCalculator:
         overheat_penalty = self._calc_overheat_penalty(market_data)
         components.append(overheat_penalty)
 
-        # 6. v5.0: Candle Surge Bonus (0~30) - 분봉 급등 감지
-        candle_surge = self._calc_candle_surge_bonus(market_data)
+        # 6. v5.1: Candle Surge Bonus (0~30) - 이미 위에서 계산됨
         components.append(candle_surge)
 
         # 총점 계산

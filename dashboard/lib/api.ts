@@ -262,6 +262,7 @@ export interface AttackSetModeResponse {
 
 export interface AttackCandidate {
   symbol: string
+  korean_name: string
   score: number
   level: number
   distance_to_entry: number
@@ -339,6 +340,7 @@ export interface ReboundFilterInfo {
 
 export interface ReboundCandidate {
   symbol: string
+  korean_name: string
   score: number
   level: number
   distance_to_entry: number

@@ -311,8 +311,10 @@ class TradingEngine:
                         "change_rate": md.get("price_change_pct", 0) / 100,
                     }
                     score_result = self.attack_strategy.get_attack_score(market_data_for_score)
+                    korean_name = self.symbol_manager.get_korean_name(symbol) if self.symbol_manager else ""
                     cache[symbol] = {
                         "symbol": symbol,
+                        "korean_name": korean_name,
                         "score": score_result.total_score,
                         "level": score_result.level,
                         "distance_to_entry": max(0, 80 - score_result.total_score),
@@ -384,8 +386,10 @@ class TradingEngine:
                     }
 
                     score_result = calculator.calculate(market_data_for_score)
+                    korean_name = self.symbol_manager.get_korean_name(symbol) if self.symbol_manager else ""
                     cache[symbol] = {
                         "symbol": symbol,
+                        "korean_name": korean_name,
                         "score": score_result.total_score,
                         "level": score_result.level,
                         "distance_to_entry": max(0, 55 - score_result.total_score),  # L1 = 55

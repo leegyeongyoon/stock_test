@@ -29,6 +29,7 @@ class AttackCandidate(BaseModel):
     """Attack 후보 종목"""
 
     symbol: str
+    korean_name: str = ""
     score: float
     level: int
     distance_to_entry: float
@@ -167,6 +168,7 @@ class ReboundCandidate(BaseModel):
     """Rebound 후보 종목"""
 
     symbol: str
+    korean_name: str = ""
     score: float
     level: int
     distance_to_entry: float

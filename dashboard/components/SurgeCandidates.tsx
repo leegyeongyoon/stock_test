@@ -105,10 +105,13 @@ function CandidateCard({ candidate, rank }: { candidate: AttackCandidate; rank: 
             {rank}
           </span>
 
-          {/* 심볼 + 변화율 */}
+          {/* 심볼 + 한국어 이름 + 변화율 */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="font-bold text-white">{symbolCode}</span>
+              {candidate.korean_name && (
+                <span className="text-xs text-slate-400">{candidate.korean_name}</span>
+              )}
               <span className={`text-sm ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
                 {isPositive ? '+' : ''}{changeRatePct}%
               </span>

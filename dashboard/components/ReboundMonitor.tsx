@@ -126,42 +126,60 @@ function PositionCard({ symbol, pos }: { symbol: string; pos: ReboundPositionInf
   )
 }
 
-// 후보 종목 카드 (상세 항상 표시)
+// 후보 종목 카드 (가로 스크롤용)
 function CandidateCard({ candidate, rank }: { candidate: ReboundCandidate; rank: number }) {
   const symbolCode = candidate.symbol.replace('KRW-', '')
   const canEntry = candidate.level > 0
   const changeRatePct = (candidate.change_rate * 100).toFixed(1)
   const isPositive = candidate.change_rate > 0
 
+  const rankBg = rank === 1 ? 'bg-gradient-to-br from-yellow-500 to-yellow-700' :
+                 rank === 2 ? 'bg-gradient-to-br from-slate-300 to-slate-500' :
+                 rank === 3 ? 'bg-gradient-to-br from-amber-600 to-amber-800' :
+                 'bg-slate-600'
+
   return (
-    <div className={`bg-slate-800/80 rounded-lg border ${canEntry ? 'border-green-600' : 'border-slate-700'} overflow-hidden`}>
+    <div className={`bg-slate-800 rounded-lg border ${canEntry ? 'border-green-600' : 'border-slate-700'} overflow-hidden min-w-[280px] max-w-[320px]`}>
       {/* 헤더 */}
-      <div className="p-2 flex items-center gap-2">
-        <span className="w-5 h-5 rounded-full bg-slate-600 flex items-center justify-center text-[10px] font-bold text-white">
-          {rank}
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1">
-            <span className="font-bold text-white text-xs">{symbolCode}</span>
-            <span className={`text-[10px] ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-              {isPositive ? '+' : ''}{changeRatePct}%
-            </span>
-          </div>
-        </div>
-        <div className="text-right">
-          <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${getScoreBgClass(candidate.score)}`}>
-            {candidate.score.toFixed(0)}점
+      <div className="p-3 bg-slate-800/80">
+        <div className="flex items-center gap-3">
+          {/* 순위 */}
+          <span className={`${rankBg} w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0`}>
+            {rank}
           </span>
-          {canEntry ? (
-            <div className="text-[10px] text-green-400 mt-0.5">L{candidate.level} 가능</div>
-          ) : (
-            <div className="text-[10px] text-slate-500 mt-0.5">{candidate.distance_to_entry.toFixed(0)}점 부족</div>
-          )}
+
+          {/* 심볼 + 한국어 이름 + 변화율 */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-white text-sm">{symbolCode}</span>
+              {candidate.korean_name && (
+                <span className="text-xs text-slate-400">{candidate.korean_name}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className={`text-xs ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
+                {isPositive ? '+' : ''}{changeRatePct}%
+              </span>
+              <span className="text-xs text-slate-500">RSI {candidate.rsi.toFixed(0)}</span>
+            </div>
+          </div>
+
+          {/* 점수 + 레벨 */}
+          <div className="text-right">
+            <span className={`px-2 py-1 rounded text-sm font-bold ${getScoreBgClass(candidate.score)}`}>
+              {candidate.score.toFixed(0)}점
+            </span>
+            {canEntry ? (
+              <div className="text-xs text-green-400 mt-1">L{candidate.level} 진입가능</div>
+            ) : (
+              <div className="text-xs text-slate-500 mt-1">{candidate.distance_to_entry.toFixed(0)}점 부족</div>
+            )}
+          </div>
         </div>
       </div>
 
       {/* 상세 (항상 표시) */}
-      <div className="px-2 pb-2 space-y-1">
+      <div className="px-3 pb-3 pt-2 space-y-1.5 bg-slate-850">
         {candidate.components.map((comp, idx) => {
           const pct = comp.max_score > 0 ? (comp.score / comp.max_score) * 100 : 0
           const isFull = pct >= 80
@@ -169,13 +187,13 @@ function CandidateCard({ candidate, rank }: { candidate: ReboundCandidate; rank:
 
           return (
             <div key={idx}>
-              <div className="flex items-center justify-between text-[10px] mb-0.5">
+              <div className="flex items-center justify-between text-xs mb-0.5">
                 <span className="text-slate-400">{getKoreanName(comp.name)}</span>
                 <span className={`font-medium ${isFull ? 'text-green-400' : isHalf ? 'text-yellow-400' : 'text-slate-500'}`}>
                   {comp.score.toFixed(0)}/{comp.max_score}
                 </span>
               </div>
-              <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-0.5">
+              <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-1">
                 <div
                   className={`h-full rounded-full transition-all ${
                     isFull ? 'bg-green-500' : isHalf ? 'bg-yellow-500' : 'bg-slate-500'
@@ -183,7 +201,7 @@ function CandidateCard({ candidate, rank }: { candidate: ReboundCandidate; rank:
                   style={{ width: `${Math.min(pct, 100)}%` }}
                 />
               </div>
-              <div className="text-[9px] text-slate-500">
+              <div className="text-[10px] text-slate-500">
                 {getScoreExplanation(comp.name, comp.details)}
               </div>
             </div>
@@ -346,11 +364,11 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
 
   if (loading) {
     return (
-      <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
-        <h2 className="text-base font-semibold text-white mb-3">🎯 반등 스캘퍼</h2>
-        <div className="space-y-2">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-24 bg-slate-800 rounded-lg animate-pulse" />
+      <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
+        <h2 className="text-lg font-semibold text-white mb-4">📈 반등 스캘퍼</h2>
+        <div className="flex gap-3 overflow-x-auto pb-2">
+          {[1, 2, 3, 4, 5].map((i) => (
+            <div key={i} className="bg-slate-800 rounded-lg p-3 border border-slate-700 animate-pulse min-w-[280px] h-48" />
           ))}
         </div>
       </div>
@@ -359,9 +377,9 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
 
   if (error) {
     return (
-      <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
-        <h2 className="text-base font-semibold text-white mb-3">🎯 반등 스캘퍼</h2>
-        <div className="text-center py-4 text-red-400 text-sm">{error}</div>
+      <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
+        <h2 className="text-lg font-semibold text-white mb-4">📈 반등 스캘퍼</h2>
+        <div className="text-center py-8 text-red-400">{error}</div>
       </div>
     )
   }
@@ -382,23 +400,18 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
   const { color: modeColor, label: modeLabel } = getModeInfo(data?.mode || 'OFF')
 
   return (
-    <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+    <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
       {/* 헤더 */}
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-base font-semibold text-white flex items-center gap-2">
-          🎯 반등 스캘퍼
-          <span className={`ml-1 px-2 py-0.5 text-xs rounded ${modeColor}`}>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-white">📈 반등 스캘퍼</h2>
+          <span className={`px-2 py-0.5 text-xs rounded ${modeColor}`}>
             {modeLabel}
           </span>
-        </h2>
-        <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${data?.enabled ? 'bg-green-500' : 'bg-slate-500'}`} />
           <span className="text-xs text-slate-400">{data?.enabled ? '활성' : '비활성'}</span>
         </div>
-      </div>
-
-      {/* 모드 선택 */}
-      <div className="mb-4">
+        {/* 모드 선택 */}
         <ModeSelector
           currentMode={data?.mode || 'OFF'}
           onModeChange={handleModeChange}
@@ -406,38 +419,58 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
         />
       </div>
 
-      {/* Top 5 후보 종목 (상세 표시) */}
+      {/* Top 5 후보 종목 (가로 스크롤) */}
       <div className="mb-4">
-        <div className="text-xs text-slate-400 mb-2">반등 후보 Top 5 (진입: 55점+)</div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs text-slate-400">반등 후보 Top 5 (진입: 55점+)</div>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-green-400">{candidates.filter(c => c.level > 0).length}개 진입가능</span>
+            <span className="text-slate-500">{candidates.filter(c => c.level === 0).length}개 대기</span>
+          </div>
+        </div>
         {candidates.length > 0 ? (
-          <div className="space-y-2">
+          <div className="flex gap-3 overflow-x-auto pb-2">
             {candidates.map((c, idx) => (
               <CandidateCard key={c.symbol} candidate={c} rank={idx + 1} />
             ))}
           </div>
         ) : (
-          <div className="text-center py-3 text-slate-500 text-xs bg-slate-800/30 rounded">
+          <div className="text-center py-4 text-slate-500 text-xs bg-slate-800/30 rounded">
             후보 데이터 대기 중...
           </div>
         )}
       </div>
 
-      {/* 활성 포지션 */}
-      {positionCount > 0 && (
-        <div className="mb-4">
-          <div className="text-xs text-slate-400 mb-2">보유 포지션 ({positionCount})</div>
-          <div className="space-y-2">
-            {Object.entries(positions).map(([symbol, pos]) => (
-              <PositionCard key={symbol} symbol={symbol} pos={pos} />
-            ))}
+      {/* 활성 포지션 + 통계/필터 (가로 배치) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* 활성 포지션 */}
+        {positionCount > 0 && (
+          <div className="lg:col-span-1">
+            <div className="text-xs text-slate-400 mb-2">보유 포지션 ({positionCount})</div>
+            <div className="space-y-2">
+              {Object.entries(positions).map(([symbol, pos]) => (
+                <PositionCard key={symbol} symbol={symbol} pos={pos} />
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* 통계 및 필터 */}
-      <div className="grid grid-cols-2 gap-2">
-        <StatsCard stats={stats} />
-        <FilterStatusCard filters={filters} />
+        {/* 통계 */}
+        <div className={positionCount > 0 ? '' : 'lg:col-span-1'}>
+          <StatsCard stats={stats} />
+        </div>
+
+        {/* 필터 상태 */}
+        <div className={positionCount > 0 ? '' : 'lg:col-span-1'}>
+          <FilterStatusCard filters={filters} />
+        </div>
+      </div>
+
+      {/* 하단 안내 */}
+      <div className="mt-4 pt-3 border-t border-slate-700">
+        <div className="text-xs text-slate-500">
+          <span className="text-blue-400">📈 반등 진입 조건</span>: RSI 과매도 + 지지선 근접 + 매수 호가 우위 시 발동 (L1=55점, L2=65점, L3=75점)
+        </div>
       </div>
     </div>
   )

@@ -330,17 +330,19 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Surge Candidates + Algorithm Monitors */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Surge Candidates - 2/3 width */}
-        <div className="lg:col-span-2">
-          <SurgeCandidates refreshInterval={3000} />
+      {/* Attack 후보 (가로 스크롤 카드) */}
+      <SurgeCandidates refreshInterval={3000} />
+
+      {/* Rebound 후보 + 필터 통계 */}
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        {/* Rebound Monitor - 3/4 width */}
+        <div className="lg:col-span-3">
+          <ReboundMonitor refreshInterval={3000} />
         </div>
 
-        {/* Algorithm Monitors - 1/3 width (stacked) */}
-        <div className="space-y-4">
+        {/* Algorithm Monitor (필터 통계) - 1/4 width */}
+        <div>
           <AlgorithmMonitor refreshInterval={3000} />
-          <ReboundMonitor refreshInterval={3000} />
         </div>
       </div>
 
