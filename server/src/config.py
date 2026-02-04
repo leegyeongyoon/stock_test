@@ -243,22 +243,22 @@ class Settings(BaseSettings):
 
     # === Attack Module 설정 (급등주 공격) ===
     attack_mode: Literal["OFF", "NORMAL", "PLUS", "MAX"] = Field(
-        default="OFF",  # v4.2: OFF (위험한 추격 매수 비활성화)
+        default="NORMAL",  # v5.2: NORMAL 활성화 (균형 모드)
         description="공격 모드 (OFF/NORMAL/PLUS/MAX)",
     )
 
-    # Attack Score 임계값 (v5.1: 기준 강화)
+    # Attack Score 임계값 (v5.2: 균형 조정)
     attack_score_l1: float = Field(
-        default=80.0,  # 70 → 80 (고점 추격 방지)
-        description="Level 1 임계값 (80점 이상)",
+        default=75.0,  # 80 → 75 (균형: 하루 3-8건 예상)
+        description="Level 1 임계값 (75점 이상)",
     )
     attack_score_l2: float = Field(
-        default=85.0,  # 80 → 85
-        description="Level 2 임계값 (85점 이상)",
+        default=82.0,  # v5.2: 85 → 82 (균형)
+        description="Level 2 임계값 (82점 이상)",
     )
     attack_score_l3: float = Field(
-        default=92.0,  # 90 → 92
-        description="Level 3 임계값 (92점 이상)",
+        default=88.0,  # v5.2: 92 → 88 (균형)
+        description="Level 3 임계값 (88점 이상)",
     )
 
     # Attack 목표 비중
