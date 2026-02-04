@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { api, Summary, Position, Event, CapitalProfileStatus, SurgeCandidate } from '@/lib/api'
+import { api, Summary, Position, Event, CapitalProfileStatus } from '@/lib/api'
 import { analyticsApi, RealtimeSummary } from '@/lib/analytics-api'
 import ConnectionStatus from '@/components/ConnectionStatus'
 import ModeSelector from '@/components/ModeSelector'

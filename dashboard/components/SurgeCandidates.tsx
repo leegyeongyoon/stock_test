@@ -1,292 +1,138 @@
 'use client'
 
-import { useState } from 'react'
-import { SurgeCandidate } from '@/lib/api'
-import { formatKRW } from '@/lib/currency'
+import { useEffect, useState } from 'react'
+import { api, AttackCandidate } from '@/lib/api'
 
 interface Props {
-  candidates: SurgeCandidate[]
+  candidates?: AttackCandidate[]  // 외부에서 주입 가능
   loading?: boolean
+  refreshInterval?: number
 }
 
-// 조건 설명 매핑
-const CONDITION_INFO = {
-  change_1m: {
-    name: '1분 상승률',
-    desc: '최근 1분간 가격 상승폭',
-    target: '1.5% 이상',
-    icon: '📈',
-  },
-  volume: {
-    name: '거래량 배수',
-    desc: '평균 대비 거래량',
-    target: '3배 이상',
-    icon: '📊',
-  },
-  volume_spike: {
-    name: '거래량 급증',
-    desc: '직전 1분 대비 급증',
-    target: '2배 이상',
-    icon: '⚡',
-  },
-  volume_accel: {
-    name: '거래량 가속',
-    desc: '거래량 증가 추세',
-    target: '1.5배 이상',
-    icon: '🚀',
-  },
-  vol_overheat: {
-    name: '과열 체크',
-    desc: '너무 늦은 진입 방지',
-    target: '8배 미만',
-    icon: '🌡️',
-  },
-  anti_chase: {
-    name: '추격매수 방지',
-    desc: '고점 추격 방지',
-    target: 'ATR 1.5 이내',
-    icon: '🛡️',
-  },
+// 점수별 색상
+function getScoreColor(score: number): string {
+  if (score >= 80) return 'text-green-400'
+  if (score >= 70) return 'text-yellow-400'
+  if (score >= 50) return 'text-orange-400'
+  return 'text-slate-400'
 }
 
-// 조건 충족 여부 체크
-function isConditionMet(score: number, threshold: number = 80): boolean {
-  return score >= threshold
+function getScoreBgClass(score: number): string {
+  if (score >= 80) return 'bg-green-600 text-white'
+  if (score >= 70) return 'bg-yellow-500 text-black'
+  if (score >= 50) return 'bg-orange-500 text-white'
+  return 'bg-slate-600 text-slate-300'
 }
 
-// 조건별 상태 뱃지
-function ConditionBadge({
-  met,
-  label,
-  value
-}: {
-  met: boolean
-  label: string
-  value: string
+// 컴포넌트 점수 바
+function ComponentBar({ name, score, maxScore, details }: {
+  name: string
+  score: number
+  maxScore: number
+  details?: Record<string, unknown>
 }) {
-  return (
-    <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs ${
-      met
-        ? 'bg-green-900/40 text-green-400 border border-green-700/50'
-        : 'bg-slate-800 text-slate-400 border border-slate-700'
-    }`}>
-      <span>{met ? '✓' : '○'}</span>
-      <span className="font-medium">{label}</span>
-      <span className="text-[10px] opacity-70">{value}</span>
-    </div>
-  )
-}
+  const pct = maxScore > 0 ? (score / maxScore) * 100 : 0
+  const isFull = pct >= 80
+  const isHalf = pct >= 50 && pct < 80
 
-// 조건 상태 칩 (작은 뱃지)
-function ConditionChip({ met, label, value }: { met: boolean; label: string; value: string }) {
-  return (
-    <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
-      met
-        ? 'bg-green-900/50 text-green-400'
-        : 'bg-slate-700/50 text-slate-500'
-    }`}>
-      <span>{met ? '✓' : '✗'}</span>
-      <span className="font-medium">{label}</span>
-      <span className="opacity-70">{value}</span>
-    </div>
-  )
-}
-
-// Top 5 컴팩트 카드 - 개선된 버전
-function Top5Card({ candidate, rank }: { candidate: SurgeCandidate; rank: number }) {
-  const scoreColor = candidate.total_score >= 90 ? 'text-green-400' :
-                     candidate.total_score >= 80 ? 'text-blue-400' :
-                     candidate.total_score >= 70 ? 'text-yellow-400' : 'text-slate-300'
-
-  const rankBg = rank === 1 ? 'bg-gradient-to-br from-yellow-500 to-yellow-700' :
-                 rank === 2 ? 'bg-gradient-to-br from-slate-300 to-slate-500' :
-                 rank === 3 ? 'bg-gradient-to-br from-amber-600 to-amber-800' : 'bg-slate-600'
-
-  const symbolCode = candidate.symbol.replace('KRW-', '')
-  const displayName = candidate.korean_name || symbolCode
-
-  // 충족된 조건 수 계산
-  const conditions = [
-    {
-      met: isConditionMet(candidate.change_1m.score, 70),
-      label: '상승률',
-      value: `${candidate.change_1m.value?.toFixed(1)}%`
-    },
-    {
-      met: isConditionMet(candidate.volume.score, 70),
-      label: '거래량',
-      value: `${candidate.volume.ratio?.toFixed(1)}배`
-    },
-    {
-      met: isConditionMet(candidate.volume_spike?.score ?? 0, 70),
-      label: '급증',
-      value: `${candidate.volume_spike?.ratio?.toFixed(1) ?? 0}배`
-    },
-    {
-      met: isConditionMet(candidate.volume_accel?.score ?? 0, 70),
-      label: '가속',
-      value: `${candidate.volume_accel?.ratio?.toFixed(1) ?? 0}배`
-    },
-    {
-      met: candidate.vol_overheat.score >= 100,
-      label: '과열',
-      value: candidate.vol_overheat.score >= 100 ? 'OK' : 'NO'
-    },
-    {
-      met: isConditionMet(candidate.anti_chase.score, 70),
-      label: '추격',
-      value: candidate.anti_chase.entry_type || '-'
-    },
-  ]
-  const metCount = conditions.filter(c => c.met).length
+  // 핵심 컴포넌트 강조
+  const isKey = name === 'Candle Surge Bonus'
 
   return (
-    <div className="bg-slate-800 rounded-lg p-3 border border-slate-700 min-w-[280px] hover:border-slate-600 transition-colors">
-      {/* 상단: 순위 + 코인명 + 점수 */}
-      <div className="flex items-center gap-2 mb-2">
-        <span className={`${rankBg} w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0`}>
-          {rank}
+    <div className={`${isKey ? 'bg-slate-700/50 p-2 rounded border border-slate-600' : ''}`}>
+      <div className="flex items-center justify-between text-xs mb-1">
+        <span className={`${isKey ? 'text-yellow-400 font-medium' : 'text-slate-400'}`}>
+          {isKey && '⚡ '}{name}
         </span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="font-bold text-white">{symbolCode}</span>
-            <span className="text-xs text-slate-400 truncate">{displayName}</span>
-          </div>
-        </div>
-        <div className="text-right">
-          <div className={`text-lg font-bold ${scoreColor}`}>
-            {candidate.total_score.toFixed(0)}점
-          </div>
-          <div className="text-[10px] text-slate-500">{metCount}/6 충족</div>
-        </div>
-      </div>
-
-      {/* 가격 + 변화율 */}
-      <div className="flex items-center justify-between text-xs mb-2 pb-2 border-b border-slate-700">
-        <span className="text-slate-400">{formatKRW(candidate.current_price)}</span>
-        <span className={`font-medium ${(candidate.change_1m.value ?? 0) > 0 ? 'text-green-400' : 'text-red-400'}`}>
-          {(candidate.change_1m.value ?? 0) > 0 ? '+' : ''}{candidate.change_1m.value?.toFixed(2)}%
+        <span className={`font-medium ${isFull ? 'text-green-400' : isHalf ? 'text-yellow-400' : 'text-slate-500'}`}>
+          {score.toFixed(0)}/{maxScore}
         </span>
       </div>
-
-      {/* 조건 충족 현황 - 라벨과 함께 표시 */}
-      <div className="grid grid-cols-3 gap-1">
-        {conditions.map((cond, idx) => (
-          <ConditionChip key={idx} met={cond.met} label={cond.label} value={cond.value} />
-        ))}
+      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${
+            isFull ? 'bg-green-500' : isHalf ? 'bg-yellow-500' : 'bg-slate-500'
+          }`}
+          style={{ width: `${Math.min(pct, 100)}%` }}
+        />
       </div>
-
-      {/* 전일급등 태그 */}
-      {candidate.is_hot_yesterday && (
-        <div className="mt-2 pt-2 border-t border-slate-700">
-          <span className="px-2 py-0.5 text-[10px] bg-orange-600/30 text-orange-400 rounded border border-orange-600/50">
-            ⚠️ 전일 급등 종목
-          </span>
+      {isKey && details && (
+        <div className="mt-1 text-[10px] text-slate-500">
+          1m: {((details.change_1m as number) * 100).toFixed(1)}% |
+          5m: {((details.change_5m as number) * 100).toFixed(1)}% |
+          Trigger: {details.trigger as string || 'NONE'}
         </div>
       )}
     </div>
   )
 }
 
-// 조건 상세 행
-interface ConditionRowProps {
-  icon: string
-  name: string
-  desc: string
-  targetDesc: string
-  score: number
-  currentValue: string
-  isMet: boolean
-  isPassFail?: boolean  // vol_overheat처럼 통과/차단 여부만 중요한 경우
-}
-
-function ConditionRow({ icon, name, desc, targetDesc, score, currentValue, isMet, isPassFail }: ConditionRowProps) {
-  return (
-    <div className={`flex items-center gap-3 p-2 rounded-lg ${
-      isMet ? 'bg-green-900/20' : 'bg-slate-800/50'
-    }`}>
-      <span className="text-lg">{icon}</span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-white text-sm">{name}</span>
-          <span className="text-[10px] text-slate-500">{desc}</span>
-        </div>
-        <div className="flex items-center gap-2 text-xs mt-0.5">
-          <span className={`font-medium ${isMet ? 'text-green-400' : 'text-slate-400'}`}>
-            {currentValue}
-          </span>
-          <span className="text-slate-600">목표: {targetDesc}</span>
-        </div>
-      </div>
-      <div className="shrink-0">
-        {isPassFail ? (
-          <span className={`px-2 py-1 rounded text-xs font-bold ${
-            isMet
-              ? 'bg-green-600 text-white'
-              : 'bg-red-600 text-white'
-          }`}>
-            {isMet ? '통과' : '차단'}
-          </span>
-        ) : (
-          <div className="text-right">
-            <div className={`text-sm font-bold ${
-              isMet ? 'text-green-400' : score >= 50 ? 'text-yellow-400' : 'text-red-400'
-            }`}>
-              {score.toFixed(0)}점
-            </div>
-            <div className={`text-[10px] ${isMet ? 'text-green-500' : 'text-slate-500'}`}>
-              {isMet ? '✓ 충족' : '미충족'}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// 상세 카드
-function CandidateCard({ candidate }: { candidate: SurgeCandidate }) {
+// 후보 카드
+function CandidateCard({ candidate, rank }: { candidate: AttackCandidate; rank: number }) {
   const [expanded, setExpanded] = useState(false)
-
   const symbolCode = candidate.symbol.replace('KRW-', '')
-  const displayName = candidate.korean_name || symbolCode
 
-  // 충족된 조건 수 계산
-  const conditions = [
-    isConditionMet(candidate.change_1m.score, 70),
-    isConditionMet(candidate.volume.score, 70),
-    isConditionMet(candidate.volume_spike?.score ?? 0, 70),
-    isConditionMet(candidate.volume_accel?.score ?? 0, 70),
-    candidate.vol_overheat.score >= 100,
-    isConditionMet(candidate.anti_chase.score, 70),
-  ]
-  const metCount = conditions.filter(Boolean).length
+  const rankBg = rank === 1 ? 'bg-gradient-to-br from-yellow-500 to-yellow-700' :
+                 rank === 2 ? 'bg-gradient-to-br from-slate-300 to-slate-500' :
+                 rank === 3 ? 'bg-gradient-to-br from-amber-600 to-amber-800' :
+                 'bg-slate-600'
 
-  const scoreColor = candidate.total_score >= 90 ? 'text-green-400' :
-                     candidate.total_score >= 80 ? 'text-blue-400' :
-                     candidate.total_score >= 70 ? 'text-yellow-400' : 'text-slate-300'
+  const canEntry = candidate.level > 0
+  const changeRatePct = (candidate.change_rate * 100).toFixed(1)
+  const isPositive = candidate.change_rate > 0
+
+  // Candle Surge Bonus 찾기
+  const surgeBonusComp = candidate.components.find(c => c.name === 'Candle Surge Bonus')
+  const hasSurgeBonus = surgeBonusComp && surgeBonusComp.score > 0
 
   return (
-    <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
-      {/* Header */}
-      <button
-        className="w-full p-3 flex items-center justify-between hover:bg-slate-750 transition-colors"
+    <div className={`bg-slate-800 rounded-lg border ${canEntry ? 'border-green-600' : 'border-slate-700'} overflow-hidden min-w-[300px]`}>
+      {/* 헤더 */}
+      <div
+        className="p-3 cursor-pointer hover:bg-slate-750 transition-colors"
         onClick={() => setExpanded(!expanded)}
       >
         <div className="flex items-center gap-3">
-          <span className="text-base font-bold text-white">{symbolCode}</span>
-          <span className="text-sm text-slate-400">{displayName}</span>
-          {candidate.is_hot_yesterday && (
-            <span className="px-1.5 py-0.5 text-[10px] bg-orange-600/30 text-orange-400 rounded">
-              전일급등
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-500">{metCount}/6</span>
-          <span className={`text-lg font-bold ${scoreColor}`}>
-            {candidate.total_score.toFixed(0)}점
+          {/* 순위 */}
+          <span className={`${rankBg} w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0`}>
+            {rank}
           </span>
+
+          {/* 심볼 + 변화율 */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-white text-sm">{symbolCode}</span>
+              <span className={`text-xs ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
+                {isPositive ? '+' : ''}{changeRatePct}%
+              </span>
+              {hasSurgeBonus && (
+                <span className="px-1.5 py-0.5 text-[10px] bg-yellow-600 text-black rounded font-bold">
+                  SURGE
+                </span>
+              )}
+            </div>
+            {candidate.distance_to_entry > 0 ? (
+              <div className="text-xs text-slate-500 mt-0.5">
+                진입까지 {candidate.distance_to_entry.toFixed(0)}점 부족
+              </div>
+            ) : canEntry && (
+              <div className="text-xs text-green-400 mt-0.5">
+                ✓ 진입 조건 충족
+              </div>
+            )}
+          </div>
+
+          {/* 점수 + 레벨 */}
+          <div className="text-right">
+            <span className={`px-2 py-1 rounded text-sm font-bold ${getScoreBgClass(candidate.score)}`}>
+              {candidate.score.toFixed(0)}점
+            </span>
+            {canEntry && (
+              <div className="text-xs text-green-400 mt-1">L{candidate.level}</div>
+            )}
+          </div>
+
+          {/* 확장 아이콘 */}
           <svg
             className={`w-4 h-4 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
             fill="none"
@@ -296,232 +142,151 @@ function CandidateCard({ candidate }: { candidate: SurgeCandidate }) {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
           </svg>
         </div>
-      </button>
+      </div>
 
-      {/* Expanded Content */}
+      {/* 상세 (확장 시) */}
       {expanded && (
         <div className="px-3 pb-3 border-t border-slate-700 pt-3 space-y-2">
-          <ConditionRow
-            icon="📈"
-            name="1분 상승률"
-            desc="최근 1분간 상승폭"
-            targetDesc="1.5% 이상"
-            score={candidate.change_1m.score}
-            currentValue={`${candidate.change_1m.value?.toFixed(2)}%`}
-            isMet={isConditionMet(candidate.change_1m.score, 70)}
-          />
-          <ConditionRow
-            icon="📊"
-            name="거래량 배수"
-            desc="평균 대비"
-            targetDesc="3배 이상"
-            score={candidate.volume.score}
-            currentValue={`${candidate.volume.ratio?.toFixed(1)}배`}
-            isMet={isConditionMet(candidate.volume.score, 70)}
-          />
-          <ConditionRow
-            icon="⚡"
-            name="거래량 급증"
-            desc="직전 1분 대비"
-            targetDesc="2배 이상"
-            score={candidate.volume_spike?.score ?? 0}
-            currentValue={`${candidate.volume_spike?.ratio?.toFixed(1) ?? 0}배`}
-            isMet={isConditionMet(candidate.volume_spike?.score ?? 0, 70)}
-          />
-          <ConditionRow
-            icon="🚀"
-            name="거래량 가속"
-            desc="증가 추세"
-            targetDesc="1.5배 이상"
-            score={candidate.volume_accel?.score ?? 0}
-            currentValue={`${candidate.volume_accel?.ratio?.toFixed(2) ?? 0}배`}
-            isMet={isConditionMet(candidate.volume_accel?.score ?? 0, 70)}
-          />
-          <ConditionRow
-            icon="🌡️"
-            name="과열 체크"
-            desc="너무 늦으면 차단"
-            targetDesc="8배 미만"
-            score={candidate.vol_overheat.score}
-            currentValue={candidate.vol_overheat.score >= 100 ? '정상' : candidate.vol_overheat.reason || '과열'}
-            isMet={candidate.vol_overheat.score >= 100}
-            isPassFail={true}
-          />
-          <ConditionRow
-            icon="🛡️"
-            name="추격매수 방지"
-            desc="고점 추격 방지"
-            targetDesc="ATR 1.5 이내"
-            score={candidate.anti_chase.score}
-            currentValue={`${candidate.anti_chase.entry_type || '-'} (ATR ${candidate.anti_chase.dist_atr?.toFixed(2) || '-'})`}
-            isMet={isConditionMet(candidate.anti_chase.score, 70)}
-          />
+          {candidate.components.map((comp, idx) => (
+            <ComponentBar
+              key={idx}
+              name={comp.name}
+              score={comp.score}
+              maxScore={comp.max_score}
+              details={comp.details}
+            />
+          ))}
+          <div className="pt-2 border-t border-slate-700 text-xs text-slate-500">
+            거래대금: ₩{(candidate.volume_24h / 100000000).toFixed(1)}억
+          </div>
         </div>
       )}
     </div>
   )
 }
 
-export default function SurgeCandidates({ candidates, loading }: Props) {
-  const [showAll, setShowAll] = useState(false)
-  const [showHelp, setShowHelp] = useState(false)
+export default function SurgeCandidates({ candidates: externalCandidates, loading: externalLoading, refreshInterval = 5000 }: Props) {
+  const [candidates, setCandidates] = useState<AttackCandidate[]>(externalCandidates || [])
+  const [loading, setLoading] = useState(externalLoading ?? true)
+  const [error, setError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+
+  // 외부에서 주입되지 않으면 직접 fetch
+  useEffect(() => {
+    if (externalCandidates !== undefined) {
+      setCandidates(externalCandidates)
+      setLoading(false)
+      return
+    }
+
+    const fetchData = async () => {
+      try {
+        const response = await api.getMonitoringCandidates(20, 30)  // 30점 이상, 20개
+        setCandidates(response.attack_candidates)
+        setLastUpdated(new Date())
+        setError(null)
+      } catch (err) {
+        setError('데이터를 불러올 수 없습니다')
+        console.error('Attack candidates fetch error:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchData()
+    const interval = setInterval(fetchData, refreshInterval)
+    return () => clearInterval(interval)
+  }, [externalCandidates, refreshInterval])
 
   if (loading) {
     return (
       <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
-        <h2 className="text-lg font-semibold text-white mb-4">🎯 급등 근접 종목</h2>
+        <h2 className="text-lg font-semibold text-white mb-4">🎯 Attack 후보 종목</h2>
         <div className="flex gap-3 overflow-x-auto pb-2">
           {[1, 2, 3, 4, 5].map((i) => (
-            <div key={i} className="bg-slate-800 rounded-lg p-3 border border-slate-700 animate-pulse min-w-[240px]">
-              <div className="flex items-center gap-3">
-                <div className="w-6 h-6 bg-slate-700 rounded-full"></div>
-                <div className="flex-1">
-                  <div className="h-4 bg-slate-700 rounded w-20 mb-1"></div>
-                  <div className="h-3 bg-slate-700 rounded w-16"></div>
-                </div>
-              </div>
-            </div>
+            <div key={i} className="bg-slate-800 rounded-lg p-3 border border-slate-700 animate-pulse min-w-[280px] h-24" />
           ))}
         </div>
       </div>
     )
   }
 
-  if (!candidates || candidates.length === 0) {
+  if (error) {
     return (
       <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
-        <h2 className="text-lg font-semibold text-white mb-4">🎯 급등 근접 종목</h2>
-        <div className="text-center py-8 text-slate-500">
-          <div className="text-4xl mb-3">😴</div>
-          <p>현재 급등 조건에 근접한 종목이 없습니다</p>
-          <p className="text-sm mt-1">종합 점수 70점 이상 종목만 표시됩니다</p>
-        </div>
+        <h2 className="text-lg font-semibold text-white mb-4">🎯 Attack 후보 종목</h2>
+        <div className="text-center py-8 text-red-400">{error}</div>
       </div>
     )
   }
 
-  const top5 = candidates.slice(0, 5)
-  const rest = candidates.slice(5)
+  // 진입 가능한 것과 아닌 것 분리
+  const entryReady = candidates.filter(c => c.level > 0)
+  const watching = candidates.filter(c => c.level === 0)
 
   return (
     <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold text-white">🎯 급등 근접 종목</h2>
-          <button
-            onClick={() => setShowHelp(!showHelp)}
-            className="w-5 h-5 rounded-full bg-slate-700 text-slate-400 text-xs hover:bg-slate-600 hover:text-white transition-colors"
-            title="도움말"
-          >
-            ?
-          </button>
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-white">🎯 Attack 후보 종목</h2>
+          <span className="px-2 py-0.5 text-xs bg-slate-700 text-slate-300 rounded">
+            진입: 80점+
+          </span>
         </div>
-        <span className="text-sm text-slate-400">
-          {candidates.length}개 감지
-        </span>
+        <div className="text-xs text-slate-500">
+          {lastUpdated && `갱신: ${lastUpdated.toLocaleTimeString('ko-KR')}`}
+        </div>
       </div>
 
-      {/* 도움말 패널 */}
-      {showHelp && (
-        <div className="mb-4 p-4 bg-slate-800 rounded-lg border border-slate-700">
-          <h3 className="font-medium text-white mb-3">📖 조건 설명</h3>
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div className="flex items-start gap-2">
-              <span>📈</span>
-              <div>
-                <div className="font-medium text-white">1분 상승률</div>
-                <div className="text-slate-400">최근 1분간 1.5% 이상 상승</div>
-              </div>
-            </div>
-            <div className="flex items-start gap-2">
-              <span>📊</span>
-              <div>
-                <div className="font-medium text-white">거래량 배수</div>
-                <div className="text-slate-400">평균 대비 3배 이상 거래량</div>
-              </div>
-            </div>
-            <div className="flex items-start gap-2">
-              <span>⚡</span>
-              <div>
-                <div className="font-medium text-white">거래량 급증</div>
-                <div className="text-slate-400">직전 1분 대비 2배 이상 급증</div>
-              </div>
-            </div>
-            <div className="flex items-start gap-2">
-              <span>🚀</span>
-              <div>
-                <div className="font-medium text-white">거래량 가속</div>
-                <div className="text-slate-400">거래량 증가 추세 감지</div>
-              </div>
-            </div>
-            <div className="flex items-start gap-2">
-              <span>🌡️</span>
-              <div>
-                <div className="font-medium text-white">과열 체크</div>
-                <div className="text-slate-400">이미 급등한 종목 차단</div>
-              </div>
-            </div>
-            <div className="flex items-start gap-2">
-              <span>🛡️</span>
-              <div>
-                <div className="font-medium text-white">추격매수 방지</div>
-                <div className="text-slate-400">고점에서 진입 방지</div>
-              </div>
-            </div>
+      {/* 진입 가능 종목 */}
+      {entryReady.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-sm font-medium text-green-400">✓ 진입 가능 ({entryReady.length})</span>
           </div>
-          <div className="mt-3 pt-3 border-t border-slate-700 text-xs text-slate-500">
-            💡 6개 조건 중 많이 충족할수록 급등 가능성이 높습니다
+          <div className="flex gap-3 overflow-x-auto pb-2">
+            {entryReady.map((c, idx) => (
+              <CandidateCard key={c.symbol} candidate={c} rank={idx + 1} />
+            ))}
           </div>
         </div>
       )}
 
-      {/* Top 5 */}
-      <div className="mb-4">
-        <div className="flex items-center gap-2 mb-3">
-          <span className="text-sm font-medium text-yellow-400">🏆 TOP 5</span>
-          <span className="text-xs text-slate-500">급등 조건에 가장 근접</span>
-        </div>
-        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-700">
-          {top5.map((candidate, idx) => (
-            <Top5Card key={candidate.symbol} candidate={candidate} rank={idx + 1} />
-          ))}
-        </div>
-      </div>
-
-      {/* 나머지 종목 */}
-      {rest.length > 0 && (
-        <div className="border-t border-slate-700 pt-4">
-          <button
-            onClick={() => setShowAll(!showAll)}
-            className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors mb-3"
-          >
-            <svg
-              className={`w-4 h-4 transition-transform ${showAll ? 'rotate-180' : ''}`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-            {showAll ? '접기' : `나머지 ${rest.length}개 더 보기`}
-          </button>
-
-          {showAll && (
-            <div className="space-y-2">
-              {rest.map((candidate) => (
-                <CandidateCard key={candidate.symbol} candidate={candidate} />
-              ))}
+      {/* 대기 종목 */}
+      {watching.length > 0 ? (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-sm font-medium text-slate-400">
+              👀 대기 중 ({watching.length})
+            </span>
+            <span className="text-xs text-slate-600">
+              Candle Surge Bonus 대기
+            </span>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-2">
+            {watching.slice(0, 10).map((c, idx) => (
+              <CandidateCard key={c.symbol} candidate={c} rank={entryReady.length + idx + 1} />
+            ))}
+          </div>
+          {watching.length > 10 && (
+            <div className="text-xs text-slate-500 mt-2">
+              +{watching.length - 10}개 더 있음
             </div>
           )}
+        </div>
+      ) : candidates.length === 0 && (
+        <div className="text-center py-8 text-slate-500">
+          <div className="text-4xl mb-3">😴</div>
+          <p>현재 Attack 조건에 근접한 종목이 없습니다</p>
+          <p className="text-sm mt-1">30점 이상 종목만 표시됩니다</p>
         </div>
       )}
 
       {/* 하단 안내 */}
       <div className="mt-4 pt-3 border-t border-slate-700">
-        <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>점수 = 6개 조건의 가중 평균</span>
-          <span>70점 이상만 표시</span>
+        <div className="text-xs text-slate-500">
+          <span className="text-yellow-400">⚡ Candle Surge Bonus</span>: 1분봉 +7% & RVOL 3x 또는 5분봉 +4% & RVOL 2x 시 발동 (최대 30점)
         </div>
       </div>
     </div>
