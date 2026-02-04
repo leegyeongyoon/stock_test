@@ -181,7 +181,8 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
 
     const fetchData = async () => {
       try {
-        const response = await api.getMonitoringCandidates(20, 30)  // 30점 이상, 20개
+        // 항상 Top 5 표시 (min_score=0)
+        const response = await api.getMonitoringCandidates(5, 0)
         setCandidates(response.attack_candidates)
         setLastUpdated(new Date())
         setError(null)
@@ -239,49 +240,26 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
         </div>
       </div>
 
-      {/* 진입 가능 종목 */}
-      {entryReady.length > 0 && (
-        <div className="mb-4">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-medium text-green-400">✓ 진입 가능 ({entryReady.length})</span>
-          </div>
-          <div className="flex gap-3 overflow-x-auto pb-2">
-            {entryReady.map((c, idx) => (
-              <CandidateCard key={c.symbol} candidate={c} rank={idx + 1} />
-            ))}
-          </div>
+      {/* Top 5 후보 (항상 표시) */}
+      {candidates.length > 0 ? (
+        <div className="flex gap-3 overflow-x-auto pb-2">
+          {candidates.map((c, idx) => (
+            <CandidateCard key={c.symbol} candidate={c} rank={idx + 1} />
+          ))}
+        </div>
+      ) : (
+        <div className="text-center py-8 text-slate-500">
+          <div className="text-4xl mb-3">😴</div>
+          <p>현재 Attack 후보 데이터가 없습니다</p>
+          <p className="text-sm mt-1">캐시 업데이트 대기 중...</p>
         </div>
       )}
 
-      {/* 대기 종목 */}
-      {watching.length > 0 ? (
-        <div>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-medium text-slate-400">
-              👀 대기 중 ({watching.length})
-            </span>
-            <span className="text-xs text-slate-600">
-              Candle Surge Bonus 대기
-            </span>
-          </div>
-          <div className="flex gap-3 overflow-x-auto pb-2">
-            {watching.slice(0, 10).map((c, idx) => (
-              <CandidateCard key={c.symbol} candidate={c} rank={entryReady.length + idx + 1} />
-            ))}
-          </div>
-          {watching.length > 10 && (
-            <div className="text-xs text-slate-500 mt-2">
-              +{watching.length - 10}개 더 있음
-            </div>
-          )}
-        </div>
-      ) : candidates.length === 0 && (
-        <div className="text-center py-8 text-slate-500">
-          <div className="text-4xl mb-3">😴</div>
-          <p>현재 Attack 조건에 근접한 종목이 없습니다</p>
-          <p className="text-sm mt-1">30점 이상 종목만 표시됩니다</p>
-        </div>
-      )}
+      {/* 진입 가능 수 표시 */}
+      <div className="mt-3 flex gap-4 text-xs">
+        <span className="text-green-400">✓ 진입가능: {entryReady.length}개</span>
+        <span className="text-slate-400">👀 대기중: {watching.length}개</span>
+      </div>
 
       {/* 하단 안내 */}
       <div className="mt-4 pt-3 border-t border-slate-700">

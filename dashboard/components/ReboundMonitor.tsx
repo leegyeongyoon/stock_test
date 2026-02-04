@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { api, ReboundMonitoringResponse, ReboundMode, ReboundPositionInfo, ReboundSignalInfo } from '@/lib/api'
+import { api, ReboundMonitoringResponse, ReboundMode, ReboundPositionInfo, ReboundSignalInfo, ReboundCandidate } from '@/lib/api'
 
 interface Props {
   refreshInterval?: number  // ms
@@ -160,6 +160,49 @@ function FilterStatusCard({ filters }: { filters: ReboundMonitoringResponse['fil
   )
 }
 
+// 후보 종목 카드
+function CandidateCard({ candidate, rank }: { candidate: ReboundCandidate; rank: number }) {
+  const symbolCode = candidate.symbol.replace('KRW-', '')
+  const canEntry = candidate.level > 0
+  const changeRatePct = (candidate.change_rate * 100).toFixed(1)
+  const isPositive = candidate.change_rate > 0
+
+  return (
+    <div className={`p-2 bg-slate-800/80 rounded border ${canEntry ? 'border-green-600' : 'border-slate-700'}`}>
+      <div className="flex items-center gap-2">
+        <span className="w-5 h-5 rounded-full bg-slate-600 flex items-center justify-center text-[10px] font-bold text-white">
+          {rank}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1">
+            <span className="font-bold text-white text-xs">{symbolCode}</span>
+            <span className={`text-[10px] ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
+              {isPositive ? '+' : ''}{changeRatePct}%
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-slate-500">
+            <span>RSI: {candidate.rsi.toFixed(0)}</span>
+            <span>|</span>
+            <span>지지선: {(candidate.support_distance_pct * 100).toFixed(1)}%</span>
+          </div>
+        </div>
+        <div className="text-right">
+          <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+            candidate.score >= 70 ? 'bg-green-600 text-white' :
+            candidate.score >= 55 ? 'bg-yellow-500 text-black' :
+            'bg-slate-600 text-slate-300'
+          }`}>
+            {candidate.score.toFixed(0)}
+          </span>
+          {canEntry && (
+            <div className="text-[10px] text-green-400 mt-0.5">L{candidate.level}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // 모드 선택 버튼
 function ModeSelector({
   currentMode,
@@ -194,14 +237,19 @@ function ModeSelector({
 
 export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
   const [data, setData] = useState<ReboundMonitoringResponse | null>(null)
+  const [candidates, setCandidates] = useState<ReboundCandidate[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [changingMode, setChangingMode] = useState(false)
 
   const fetchData = async () => {
     try {
-      const response = await api.getReboundStatus()
-      setData(response)
+      const [statusResponse, candidatesResponse] = await Promise.all([
+        api.getReboundStatus(),
+        api.getReboundCandidates(5, 0),  // Top 5, min_score=0
+      ])
+      setData(statusResponse)
+      setCandidates(candidatesResponse.candidates)
       setError(null)
     } catch (err) {
       setError('Rebound 모니터링 데이터를 불러올 수 없습니다')
@@ -297,6 +345,22 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
           onModeChange={handleModeChange}
           disabled={changingMode}
         />
+      </div>
+
+      {/* Top 5 후보 종목 */}
+      <div className="mb-4">
+        <div className="text-xs text-slate-400 mb-2">Top 5 후보 (진입: 55점+)</div>
+        {candidates.length > 0 ? (
+          <div className="space-y-1.5">
+            {candidates.map((c, idx) => (
+              <CandidateCard key={c.symbol} candidate={c} rank={idx + 1} />
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-3 text-slate-500 text-xs bg-slate-800/30 rounded">
+            후보 데이터 대기 중...
+          </div>
+        )}
       </div>
 
       {/* 활성 포지션 */}

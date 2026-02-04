@@ -337,6 +337,30 @@ export interface ReboundFilterInfo {
   }
 }
 
+export interface ReboundCandidate {
+  symbol: string
+  score: number
+  level: number
+  distance_to_entry: number
+  change_rate: number
+  volume_24h: number
+  rsi: number
+  support_distance_pct: number
+  orderbook_ratio: number
+  components: {
+    name: string
+    score: number
+    max_score: number
+    details?: Record<string, unknown>
+  }[]
+}
+
+export interface ReboundCandidatesResponse {
+  candidates: ReboundCandidate[]
+  cache_updated_at: string | null
+  entry_threshold: number
+}
+
 export interface ReboundMonitoringResponse {
   strategy: string
   enabled: boolean
@@ -546,6 +570,13 @@ class ApiClient {
 
   async getReboundFilters(): Promise<ReboundFilterInfo> {
     return this.fetch<ReboundFilterInfo>('/monitoring/rebound/filters')
+  }
+
+  async getReboundCandidates(limit: number = 5, minScore: number = 0): Promise<ReboundCandidatesResponse> {
+    const params = new URLSearchParams()
+    params.set('limit', limit.toString())
+    params.set('min_score', minScore.toString())
+    return this.fetch<ReboundCandidatesResponse>(`/monitoring/rebound/candidates?${params}`)
   }
 }
 

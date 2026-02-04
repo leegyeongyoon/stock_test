@@ -163,6 +163,54 @@ class ReboundMonitoringResponse(BaseModel):
     filters: ReboundFilterInfo
 
 
+class ReboundCandidate(BaseModel):
+    """Rebound 후보 종목"""
+
+    symbol: str
+    score: float
+    level: int
+    distance_to_entry: float
+    change_rate: float
+    volume_24h: float
+    rsi: float
+    support_distance_pct: float
+    orderbook_ratio: float
+    components: list[dict]
+
+
+class ReboundCandidatesResponse(BaseModel):
+    """Rebound 후보 응답"""
+
+    candidates: list[ReboundCandidate]
+    cache_updated_at: Optional[datetime]
+    entry_threshold: int = 55
+
+
+@router.get("/monitoring/rebound/candidates", response_model=ReboundCandidatesResponse)
+async def get_rebound_candidates(
+    limit: int = Query(5, ge=1, le=20, description="반환할 후보 수"),
+    min_score: int = Query(0, ge=0, le=100, description="최소 점수"),
+):
+    """
+    Rebound Scalper 후보 목록
+
+    반등 매수 전략의 상위 후보 종목과 점수를 반환합니다.
+
+    - **candidates**: 점수 높은 순으로 정렬된 Rebound 후보
+    - **entry_threshold**: 진입 기준 점수 (L1 = 55점)
+    """
+    engine = get_engine()
+
+    # 상위 Rebound 후보 조회
+    rebound_candidates = engine.get_top_rebound_candidates(limit=limit, min_score=min_score)
+
+    return ReboundCandidatesResponse(
+        candidates=[ReboundCandidate(**c) for c in rebound_candidates],
+        cache_updated_at=engine._rebound_score_cache_time,
+        entry_threshold=55,
+    )
+
+
 @router.get("/monitoring/rebound")
 async def get_rebound_status():
     """

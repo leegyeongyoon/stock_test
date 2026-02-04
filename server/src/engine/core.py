@@ -179,6 +179,10 @@ class TradingEngine:
         self._attack_score_cache: dict[str, dict] = {}  # symbol -> score result
         self._attack_score_cache_time: Optional[datetime] = None
 
+        # v5.2: Rebound Score 캐시 (Top 후보)
+        self._rebound_score_cache: dict[str, dict] = {}  # symbol -> score result
+        self._rebound_score_cache_time: Optional[datetime] = None
+
         # v5.2: 필터링 통계 (오늘 기준)
         self._filter_stats: dict[str, int] = {
             "anti_chase": 0,
@@ -343,6 +347,82 @@ class TradingEngine:
 
         return filtered[:limit]
 
+    async def update_rebound_score_cache(self) -> None:
+        """Rebound Score 캐시 업데이트 (상위 후보 추적용)"""
+        if not self._is_upbit or not self.rebound_strategy:
+            return
+
+        try:
+            from src.strategies.rebound_score import get_rebound_score_calculator
+
+            calculator = get_rebound_score_calculator()
+
+            # Rebound 후보 pre-filtering
+            candidates = self._prefilter_symbols_for_rebound(self._market_data)
+
+            cache = {}
+            for symbol in candidates[:15]:
+                try:
+                    md = self._market_data.get(symbol, {})
+                    if not md:
+                        continue
+
+                    # Rebound 점수 계산을 위한 market_data 구성
+                    market_data_for_score = {
+                        "symbol": symbol,
+                        "price": md.get("price", 0),
+                        "vwap": md.get("vwap", md.get("price", 0)),
+                        "sma_20": md.get("sma_20", md.get("price", 0)),
+                        "bb_lower": md.get("bb_lower", md.get("price", 0) * 0.98),
+                        "rsi": md.get("rsi", 50),
+                        "atr": md.get("atr", md.get("price", 0) * 0.02),
+                        "bid_volume": md.get("bid_volume", 0),
+                        "ask_volume": md.get("ask_volume", 0),
+                        "recent_candles": md.get("recent_candles", []),
+                        "change_1m": md.get("change_1m", 0),
+                        "change_5m": md.get("change_5m", 0),
+                    }
+
+                    score_result = calculator.calculate(market_data_for_score)
+                    cache[symbol] = {
+                        "symbol": symbol,
+                        "score": score_result.total_score,
+                        "level": score_result.level,
+                        "distance_to_entry": max(0, 55 - score_result.total_score),  # L1 = 55
+                        "change_rate": md.get("price_change_pct", 0) / 100,
+                        "volume_24h": md.get("volume_24h", 0),
+                        "rsi": score_result.rsi,
+                        "support_distance_pct": score_result.support_distance_pct,
+                        "orderbook_ratio": score_result.orderbook_ratio,
+                        "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
+                    }
+                except Exception as e:
+                    logger.debug(f"Failed to calculate rebound score for {symbol}: {e}")
+                    continue
+
+            self._rebound_score_cache = cache
+            self._rebound_score_cache_time = datetime.utcnow()
+
+        except Exception as e:
+            logger.warning("Failed to update rebound score cache", error=str(e))
+
+    def get_top_rebound_candidates(self, limit: int = 5, min_score: int = 30) -> list[dict]:
+        """상위 Rebound 후보 반환 (점수 높은 순)"""
+        if not self._rebound_score_cache:
+            return []
+
+        # 점수로 정렬하여 상위 N개 반환
+        sorted_candidates = sorted(
+            self._rebound_score_cache.values(),
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        # min_score 이상만 필터링
+        filtered = [c for c in sorted_candidates if c["score"] >= min_score]
+
+        return filtered[:limit]
+
     async def start(self) -> None:
         """엔진 시작"""
         if self._running:
@@ -456,6 +536,7 @@ class TradingEngine:
                 if self._attack_cache_counter >= 10:
                     self._attack_cache_counter = 0
                     await self.update_attack_score_cache()
+                    await self.update_rebound_score_cache()
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 can_open = self.risk_engine.can_open_position
