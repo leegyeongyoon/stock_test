@@ -249,8 +249,8 @@ class Settings(BaseSettings):
 
     # Attack Score 임계값 (v5.2: 균형 조정)
     attack_score_l1: float = Field(
-        default=75.0,  # 80 → 75 (균형: 하루 3-8건 예상)
-        description="Level 1 임계값 (75점 이상)",
+        default=70.0,  # 75 → 70 (하루 5-12건 예상)
+        description="Level 1 임계값 (70점 이상)",
     )
     attack_score_l2: float = Field(
         default=82.0,  # v5.2: 85 → 82 (균형)
