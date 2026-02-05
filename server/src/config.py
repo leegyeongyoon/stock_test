@@ -247,18 +247,18 @@ class Settings(BaseSettings):
         description="공격 모드 (OFF/NORMAL/PLUS/MAX)",
     )
 
-    # Attack Score 임계값 (v5.2: 균형 조정)
+    # Attack Score 임계값 (v5.4: 대폭 완화)
     attack_score_l1: float = Field(
-        default=70.0,  # 75 → 70 (하루 5-12건 예상)
-        description="Level 1 임계값 (70점 이상)",
+        default=50.0,  # v5.4: 70 → 50 (하루 10-20건 예상, Candle Surge 없이도 진입)
+        description="Level 1 임계값 (50점 이상)",
     )
     attack_score_l2: float = Field(
-        default=82.0,  # v5.2: 85 → 82 (균형)
-        description="Level 2 임계값 (82점 이상)",
+        default=70.0,  # v5.4: 82 → 70 (기존 L1 수준)
+        description="Level 2 임계값 (70점 이상)",
     )
     attack_score_l3: float = Field(
-        default=88.0,  # v5.2: 92 → 88 (균형)
-        description="Level 3 임계값 (88점 이상)",
+        default=85.0,  # v5.4: 88 → 85 (약간 완화)
+        description="Level 3 임계값 (85점 이상)",
     )
 
     # Attack 목표 비중

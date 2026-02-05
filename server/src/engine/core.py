@@ -319,7 +319,7 @@ class TradingEngine:
                         "korean_name": korean_name,
                         "score": score_result.total_score,
                         "level": score_result.level,
-                        "distance_to_entry": max(0, 80 - score_result.total_score),
+                        "distance_to_entry": max(0, get_settings().attack_score_l1 - score_result.total_score),  # v5.4: 동적 임계값
                         "change_rate": md.get("price_change_pct", 0) / 100,
                         "volume_24h": md.get("volume_24h", 0),
                         "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
@@ -394,7 +394,7 @@ class TradingEngine:
                         "korean_name": korean_name,
                         "score": score_result.total_score,
                         "level": score_result.level,
-                        "distance_to_entry": max(0, 55 - score_result.total_score),  # L1 = 55
+                        "distance_to_entry": max(0, get_settings().rebound_score_l1 - score_result.total_score),  # 동적 임계값
                         "change_rate": md.get("price_change_pct", 0) / 100,
                         "volume_24h": md.get("volume_24h", 0),
                         "rsi": score_result.rsi,

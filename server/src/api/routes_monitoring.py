@@ -6,6 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from src.config import get_settings
+
 router = APIRouter(tags=["monitoring"])
 
 # 엔진 인스턴스 (app.py에서 주입)
@@ -53,7 +55,7 @@ class MonitoringCandidatesResponse(BaseModel):
     attack_candidates: list[AttackCandidate]
     filter_stats: FilterStats
     cache_updated_at: Optional[datetime]
-    entry_threshold: int = 80
+    entry_threshold: float
 
 
 @router.get("/monitoring/candidates", response_model=MonitoringCandidatesResponse)
@@ -68,7 +70,7 @@ async def get_monitoring_candidates(
 
     - **attack_candidates**: 점수 높은 순으로 정렬된 Attack 후보
     - **filter_stats**: 오늘의 필터링 통계 (차단 횟수)
-    - **entry_threshold**: 진입 기준 점수 (기본 80점)
+    - **entry_threshold**: 진입 기준 점수 (L1, v5.4: 50점)
     """
     engine = get_engine()
 
@@ -82,7 +84,7 @@ async def get_monitoring_candidates(
         attack_candidates=[AttackCandidate(**c) for c in attack_candidates],
         filter_stats=FilterStats(**filter_stats),
         cache_updated_at=engine._attack_score_cache_time,
-        entry_threshold=80,
+        entry_threshold=get_settings().attack_score_l1,  # v5.4: config에서 동적으로 가져옴
     )
 
 
