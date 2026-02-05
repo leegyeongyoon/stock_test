@@ -187,7 +187,7 @@ class ReboundCandidatesResponse(BaseModel):
 
     candidates: list[ReboundCandidate]
     cache_updated_at: Optional[datetime]
-    entry_threshold: int = 55
+    entry_threshold: float
 
 
 @router.get("/monitoring/rebound/candidates", response_model=ReboundCandidatesResponse)
@@ -201,7 +201,7 @@ async def get_rebound_candidates(
     반등 매수 전략의 상위 후보 종목과 점수를 반환합니다.
 
     - **candidates**: 점수 높은 순으로 정렬된 Rebound 후보
-    - **entry_threshold**: 진입 기준 점수 (L1 = 55점)
+    - **entry_threshold**: 진입 기준 점수 (L1, v5.4: 48점)
     """
     engine = get_engine()
 
@@ -211,7 +211,7 @@ async def get_rebound_candidates(
     return ReboundCandidatesResponse(
         candidates=[ReboundCandidate(**c) for c in rebound_candidates],
         cache_updated_at=engine._rebound_score_cache_time,
-        entry_threshold=55,
+        entry_threshold=get_settings().rebound_score_l1,  # v5.4: 동적 임계값 (48점)
     )
 
 

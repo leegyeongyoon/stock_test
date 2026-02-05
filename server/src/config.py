@@ -247,10 +247,10 @@ class Settings(BaseSettings):
         description="공격 모드 (OFF/NORMAL/PLUS/MAX)",
     )
 
-    # Attack Score 임계값 (v5.4: 대폭 완화)
+    # Attack Score 임계값 (v5.4: 조정)
     attack_score_l1: float = Field(
-        default=50.0,  # v5.4: 70 → 50 (하루 10-20건 예상)
-        description="Level 1 임계값 (50점 이상)",
+        default=65.0,  # v5.4: 보수적 진입 (하루 1-3건 예상)
+        description="Level 1 임계값 (65점 이상)",
     )
     attack_score_l2: float = Field(
         default=70.0,  # v5.4: 82 → 70 (기존 L1 수준)
@@ -549,8 +549,8 @@ class Settings(BaseSettings):
 
     # Rebound Score 임계값
     rebound_score_l1: float = Field(
-        default=55.0,
-        description="Level 1 임계값 (55점 이상)",
+        default=48.0,  # v5.4: 55→48 완화 (2틀 동안 진입 0건으로 인한 조정)
+        description="Level 1 임계값 (48점 이상)",
     )
     rebound_score_l2: float = Field(
         default=70.0,

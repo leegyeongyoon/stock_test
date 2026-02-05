@@ -69,12 +69,12 @@ function getScoreExplanation(name: string, details?: Record<string, unknown>): s
   }
 }
 
-// 점수별 배지 색상
+// 점수별 배지 색상 (v5.4: L3=85, L2=70, L1=48)
 function getScoreBgClass(score: number): string {
-  if (score >= 70) return 'bg-green-600 text-white'
-  if (score >= 55) return 'bg-yellow-500 text-black'
-  if (score >= 40) return 'bg-orange-500 text-white'
-  return 'bg-slate-600 text-slate-300'
+  if (score >= 85) return 'bg-green-600 text-white'        // L3 진입 가능
+  if (score >= 70) return 'bg-yellow-500 text-black'       // L2 진입 가능
+  if (score >= 48) return 'bg-orange-500 text-white'       // L1 진입 가능
+  return 'bg-slate-600 text-slate-300'                     // 진입 불가
 }
 
 // 포지션 상태 배지
@@ -422,7 +422,7 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
       {/* Top 5 후보 종목 (가로 스크롤) */}
       <div className="mb-4">
         <div className="flex items-center justify-between mb-2">
-          <div className="text-xs text-slate-400">반등 후보 Top 5 (진입: 55점+)</div>
+          <div className="text-xs text-slate-400">반등 후보 Top 5 (진입: 48점+)</div>
           <div className="flex items-center gap-2 text-xs">
             <span className="text-green-400">{candidates.filter(c => c.level > 0).length}개 진입가능</span>
             <span className="text-slate-500">{candidates.filter(c => c.level === 0).length}개 대기</span>
@@ -469,7 +469,7 @@ export default function ReboundMonitor({ refreshInterval = 3000 }: Props) {
       {/* 하단 안내 */}
       <div className="mt-4 pt-3 border-t border-slate-700">
         <div className="text-xs text-slate-500">
-          <span className="text-blue-400">📈 반등 진입 조건</span>: RSI 과매도 + 지지선 근접 + 매수 호가 우위 시 발동 (L1=55점, L2=65점, L3=75점)
+          <span className="text-blue-400">📈 반등 진입 조건</span>: RSI 과매도 + 지지선 근접 + 매수 호가 우위 시 발동 (L1=48점, L2=70점, L3=85점)
         </div>
       </div>
     </div>
