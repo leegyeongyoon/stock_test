@@ -8,8 +8,8 @@ Surge Detector - 급등 시작 실시간 감지
 - A(첫 점화) + B(리테스트) 진입 모드 지원
 
 감지 조건:
-1. 1분 변화율 >= 1.5% (급등 시작)
-2. 거래량 >= 평균의 3배 (거래량 급증)
+1. 1분 변화율 >= 3.0% (급등 시작, surge_min_change_1m 설정값)
+2. 거래량 >= 평균의 3배 (거래량 급증, surge_min_volume_mult 설정값)
 3. 구조적 Anti-Chase 통과 (돌파레벨/VWAP 거리 기반)
 
 필터 4종 (v4.2):
@@ -122,12 +122,12 @@ class SurgePosition:
     trailing_stop: Optional[float] = None
     entered_at: datetime = field(default_factory=datetime.utcnow)
 
-    def update_trailing(self, current_price: float) -> None:
+    def update_trailing(self, current_price: float, trailing_stop_pct: float = -0.06) -> None:
         """트레일링 스톱 업데이트"""
         if current_price > self.highest_price:
             self.highest_price = current_price
-            # 고점에서 1.5% 하락 시 청산
-            self.trailing_stop = self.highest_price * 0.985
+            # 고점에서 설정값% 하락 시 청산 (기본 -6%)
+            self.trailing_stop = self.highest_price * (1 + trailing_stop_pct)
 
 
 @dataclass
@@ -281,8 +281,8 @@ class SurgeDetector:
         개별 심볼 급등 체크
 
         조건:
-        1. 1분 변화율 >= 1.5%
-        2. 거래량 >= 평균 3배 (HotYesterday시 조정)
+        1. 1분 변화율 >= 3.0% (설정값: surge_min_change_1m)
+        2. 거래량 >= 평균 3배 (설정값: surge_min_volume_mult, HotYesterday시 조정)
         3. 5분 변화율 < 5% (이미 급등 제외)
         4. VolOverheatGuard: 8x 초과시 차단 (너무 늦음)
         """
@@ -342,8 +342,9 @@ class SurgeDetector:
             return None
 
         # === 급등 조건 체크 ===
-        # 조건 1: 1분 변화율 >= 1.5%
-        if change_1m_pct < 1.5:
+        # 조건 1: 1분 변화율 >= 설정값 (기본 3.0%)
+        min_change_1m = self._settings.surge_min_change_1m * 100  # 0.03 -> 3.0
+        if change_1m_pct < min_change_1m:
             return None
 
         # 조건 2: 거래량 >= 조정된 배수 (기본 3배, HotYesterday시 강화)
@@ -385,14 +386,15 @@ class SurgeDetector:
         position_mult_structure = chase_result.position_mult
 
         # === 신호 생성 ===
-        # 손절가: 1분 전 저가 또는 -2%
-        low_1m = candles_1m[-1].low if candles_1m else current_price * 0.98
-        stop_loss = max(low_1m * 0.995, current_price * 0.98)
+        # 손절가: 설정값 사용 (기본 -4%)
+        stop_loss_pct = self._settings.surge_stop_loss_pct  # -0.04
+        stop_loss = current_price * (1 + stop_loss_pct)
 
-        # 목표가
+        # 목표가: 설정값 사용 (기본 3R)
         risk = current_price - stop_loss
-        take_profit_1 = current_price + risk * 1.5  # 1.5R
-        take_profit_2 = current_price + risk * 3.0  # 3R
+        take_profit_mult = self._settings.surge_take_profit_mult  # 3.0
+        take_profit_1 = current_price + risk * take_profit_mult  # 3R
+        take_profit_2 = current_price + risk * (take_profit_mult * 2)  # 6R
 
         # 포지션 배수 결합: HotYesterday * Structure AntiChase
         combined_position_mult = adjustment.position_size_mult * position_mult_structure
@@ -534,8 +536,9 @@ class SurgeDetector:
         if not pos:
             return None
 
-        # 트레일링 스톱 업데이트
-        pos.update_trailing(current_price)
+        # 트레일링 스톱 업데이트 (설정값 사용)
+        trailing_stop_pct = self._settings.surge_trailing_stop_pct  # -0.06
+        pos.update_trailing(current_price, trailing_stop_pct)
 
         # 1. 손절 체크
         if current_price <= pos.stop_loss:
@@ -549,9 +552,10 @@ class SurgeDetector:
         if pos.trailing_stop and current_price <= pos.trailing_stop:
             return "TRAILING_STOP", 1.0
 
-        # 4. 시간 청산 (10분 경과 후 손실이면 청산)
+        # 4. 시간 청산 (설정 시간 경과 후 손실이면 청산)
+        time_stop_sec = self._settings.surge_time_stop_minutes * 60  # 15분 -> 900초
         elapsed = (datetime.utcnow() - pos.entered_at).total_seconds()
-        if elapsed > 600 and current_price < pos.entry_price:
+        if elapsed > time_stop_sec and current_price < pos.entry_price:
             return "TIME_STOP", 1.0
 
         return None
@@ -700,8 +704,9 @@ class SurgeDetector:
             return None
 
         # === 점수 계산 ===
-        # 1. 1분 변화율 점수 (목표: 1.5%, 최대 100%)
-        change_1m_score = min(100, max(0, (change_1m_pct / 1.5) * 100))
+        # 1. 1분 변화율 점수 (목표: surge_min_change_1m * 100, 최대 100%)
+        min_change_target = self._settings.surge_min_change_1m * 100  # 0.03 -> 3.0
+        change_1m_score = min(100, max(0, (change_1m_pct / min_change_target) * 100))
 
         # 2. 거래량 점수 (목표: volume_target, 최대 100%)
         volume_score = min(100, max(0, (volume_ratio / volume_target) * 100))

@@ -47,6 +47,11 @@ class StrategyType(str, Enum):
     CORE = "CORE"  # 캐시앤캐리 / Defensive Core
     SATELLITE = "SATELLITE"  # 5m 스캐너
     ATTACK = "ATTACK"  # 급등주 공격
+    DIP_SCALPER = "DIP_SCALPER"  # 급락 스캘핑
+    PULLBACK = "PULLBACK"  # 눌림목 매수
+    REBOUND = "REBOUND"  # 반등 스캘핑
+    IGNITION = "IGNITION"  # 점화 전략
+    SURGE = "SURGE"  # 급등 감지
 
 
 class EventLevel(str, Enum):

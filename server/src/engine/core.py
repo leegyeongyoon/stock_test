@@ -8,7 +8,7 @@ import structlog
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.models.database import OrderModel, async_session
+from src.models.database import OrderModel, PositionModel, async_session
 from src.data.candle_manager import get_candle_manager
 from src.data.symbol_manager import init_symbol_manager, get_symbol_manager
 from src.engine.command_queue import Command, CommandQueue, CommandType
@@ -469,8 +469,8 @@ class TradingEngine:
         # 초기 1분봉 데이터 로드 (SurgeDetector용)
         await self._load_initial_candles(qualified_symbols)
 
-        # Upbit 기존 포지션 동기화 (서버 재시작 시 포지션 추적 복구)
-        await self._sync_satellite_positions()
+        # DB에서 오픈 포지션 복구 (서버 재시작 시 전략별 포지션 복구)
+        await self._restore_positions_from_db()
 
         # 메인 루프 시작
         self._running = True
@@ -620,7 +620,49 @@ class TradingEngine:
             return {"success": success, "mode": self.mode.value}
 
         elif command.command_type == CommandType.FLATTEN:
-            # TODO: 포지션 정리 로직
+            # 모든 포지션 청산
+            strategy = command.params.get("strategy")
+            symbol = command.params.get("symbol")
+
+            logger.info("Flatten command received", strategy=strategy, symbol=symbol)
+
+            # Upbit: 잔고 기반 청산
+            if self._is_upbit:
+                all_balances = await self.exchange.get_all_balances()
+                closed_count = 0
+
+                for balance in all_balances:
+                    if balance.asset == "KRW":
+                        continue
+                    if balance.total <= 0:
+                        continue
+
+                    asset_symbol = f"KRW-{balance.asset}"
+
+                    # symbol 필터
+                    if symbol and asset_symbol != symbol:
+                        continue
+
+                    # 시장가 매도
+                    try:
+                        logger.info(f"Flattening {asset_symbol}", quantity=balance.total)
+                        result = await self.exchange.place_order(
+                            symbol=asset_symbol,
+                            side=OrderSide.SELL,
+                            order_type=OrderType.MARKET,
+                            quantity=balance.total,
+                        )
+
+                        if result.success:
+                            closed_count += 1
+                            logger.info(f"Flattened {asset_symbol}", quantity=balance.total)
+                        else:
+                            logger.error(f"Failed to flatten {asset_symbol}", error=result.error)
+                    except Exception as e:
+                        logger.error(f"Flatten error for {asset_symbol}", error=str(e))
+
+                return {"success": True, "message": f"Flattened {closed_count} positions"}
+
             return {"success": True, "message": "Flatten initiated"}
 
         elif command.command_type == CommandType.FLATTEN_SYMBOL:
@@ -1542,6 +1584,7 @@ class TradingEngine:
                         symbol=symbol,
                         strategy="DIP_SCALPER",
                         side="BUY",
+                        order_type="LIMIT",
                         quantity=order_quantity,
                         price=signal.entry_price,
                         status="PENDING",
@@ -1577,6 +1620,7 @@ class TradingEngine:
                 symbol=symbol,
                 strategy="DIP_SCALPER",
                 side="BUY",
+                order_type="LIMIT" if use_limit else "MARKET",
                 quantity=filled_qty,
                 price=avg_price,
                 status="FILLED",
@@ -1645,6 +1689,7 @@ class TradingEngine:
                 symbol=symbol,
                 strategy="DIP_SCALPER",
                 side="SELL",
+                order_type="MARKET",
                 quantity=filled_qty,
                 price=exit_price,
                 status="FILLED",
@@ -1715,6 +1760,7 @@ class TradingEngine:
                             symbol=symbol,
                             strategy="DIP_SCALPER",
                             side="BUY",
+                            order_type="LIMIT",
                             quantity=filled_qty,
                             price=avg_price,
                             status="FILLED",
@@ -5165,6 +5211,175 @@ class TradingEngine:
         except Exception as e:
             logger.error("Failed to sync satellite positions", error=str(e))
 
+    async def _restore_positions_from_db(self) -> None:
+        """서버 시작 시 DB에서 오픈 포지션을 복구하고 각 전략에 재등록"""
+        if not self._is_upbit:
+            return
+
+        try:
+            # 1. 시장 데이터 먼저 업데이트 (현재가 필요)
+            watch_symbols = self.symbol_manager.get_qualified_symbols()
+            await self._update_market_data_upbit(watch_symbols)
+
+            # 2. DB에서 열린 포지션 조회
+            async with async_session() as session:
+                stmt = select(PositionModel).where(PositionModel.is_open == True)
+                result = await session.execute(stmt)
+                open_positions = result.scalars().all()
+
+            if not open_positions:
+                logger.info("No open positions to restore from database")
+                return
+
+            # 3. Upbit 현재 잔고 조회
+            all_balances = await self.exchange.get_all_balances()
+            balance_map = {f"KRW-{bal.asset}": bal for bal in all_balances if bal.asset != "KRW"}
+
+            restored_count = 0
+            skipped_count = 0
+
+            # 4. 각 포지션을 해당 전략에 복구
+            for position in open_positions:
+                symbol = position.symbol
+                strategy = position.strategy
+
+                # Upbit 잔고 확인
+                if symbol not in balance_map:
+                    logger.warning(
+                        f"Position {symbol} in DB but no balance on Upbit - skipping",
+                        strategy=strategy.value,
+                    )
+                    skipped_count += 1
+                    continue
+
+                balance = balance_map[symbol]
+                if balance.total <= 0:
+                    logger.warning(
+                        f"Position {symbol} has zero balance - skipping",
+                        strategy=strategy.value,
+                    )
+                    skipped_count += 1
+                    continue
+
+                # 현재가 조회
+                market_data = self._market_data.get(symbol)
+                if not market_data:
+                    logger.warning(f"No market data for {symbol} - skipping")
+                    skipped_count += 1
+                    continue
+
+                current_price = market_data.get("close", 0)
+                if current_price <= 0:
+                    logger.warning(f"Invalid price for {symbol} - skipping")
+                    skipped_count += 1
+                    continue
+
+                # 전략별 포지션 복구
+                try:
+                    if strategy == StrategyType.DIP_SCALPER and self.dip_scalper:
+                        # DIP_SCALPER 포지션 복구
+                        self.dip_scalper.track_position(
+                            symbol=symbol,
+                            entry_price=position.avg_price,
+                            quantity=balance.total,
+                            bid_ratio=0.5,  # 기본값
+                        )
+                        logger.info(
+                            f"Restored DIP_SCALPER position: {symbol}",
+                            entry_price=position.avg_price,
+                            quantity=balance.total,
+                        )
+
+                    elif strategy == StrategyType.SATELLITE and self.satellite_strategy:
+                        # SATELLITE 포지션 복구
+                        synced = self.satellite_strategy.sync_positions_from_balances(
+                            balances=[balance],
+                            market_data=self._market_data,
+                            return_details=True,
+                        )
+                        if synced:
+                            logger.info(f"Restored SATELLITE position: {symbol}")
+
+                    elif strategy == StrategyType.ATTACK and self.attack_strategy:
+                        # ATTACK 포지션은 현재 상태 추적 기능이 제한적이므로 로깅만
+                        logger.info(
+                            f"ATTACK position detected: {symbol} - manual monitoring required",
+                            entry_price=position.avg_price,
+                            quantity=balance.total,
+                        )
+
+                    elif strategy == StrategyType.REBOUND and self.rebound_strategy:
+                        # REBOUND 포지션도 로깅 (추후 track_position 구현 가능)
+                        logger.info(
+                            f"REBOUND position detected: {symbol} - manual monitoring required",
+                            entry_price=position.avg_price,
+                            quantity=balance.total,
+                        )
+
+                    elif strategy == StrategyType.IGNITION:
+                        # IGNITION 포지션 로깅
+                        logger.info(
+                            f"IGNITION position detected: {symbol} - manual monitoring required",
+                            entry_price=position.avg_price,
+                            quantity=balance.total,
+                        )
+
+                    else:
+                        logger.warning(
+                            f"Unknown strategy type for position {symbol}: {strategy}",
+                            entry_price=position.avg_price,
+                            quantity=balance.total,
+                        )
+                        skipped_count += 1
+                        continue
+
+                    # 주문 기록 추가 (SYNCED 상태)
+                    self.add_order(
+                        symbol=symbol,
+                        strategy=strategy.value,
+                        side="BUY",
+                        order_type="MARKET",
+                        quantity=balance.total,
+                        price=position.avg_price,
+                        status="SYNCED",
+                    )
+
+                    # 이벤트 기록
+                    self.add_event(
+                        level="INFO",
+                        event_type=strategy.value,
+                        message=f"Position restored from DB: {symbol}",
+                        details={
+                            "source": "DATABASE",
+                            "strategy": strategy.value,
+                            "entry_price": position.avg_price,
+                            "quantity": balance.total,
+                            "current_price": current_price,
+                            "pnl_pct": ((current_price - position.avg_price) / position.avg_price * 100),
+                        },
+                    )
+
+                    restored_count += 1
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to restore position {symbol}",
+                        strategy=strategy.value,
+                        error=str(e),
+                    )
+                    skipped_count += 1
+                    continue
+
+            logger.info(
+                "Position restoration complete",
+                restored=restored_count,
+                skipped=skipped_count,
+                total_in_db=len(open_positions),
+            )
+
+        except Exception as e:
+            logger.error("Failed to restore positions from database", error=str(e))
+
     async def _load_orders_from_db(self, limit: int = 500) -> None:
         """서버 시작 시 DB에서 주문 히스토리 로드 (Upbit KRW 마켓만)"""
         try:
@@ -5318,8 +5533,93 @@ class TradingEngine:
                     trades_count=1,
                     **{pnl_field: 0.0},  # TODO: 실제 PnL
                 )
+
+                # 포지션 상태 업데이트 (BUY는 포지션 오픈, SELL은 포지션 종료)
+                await self._update_position_in_db(
+                    symbol=symbol,
+                    strategy=strategy,
+                    side=side,
+                    quantity=filled_qty if filled_qty and filled_qty > 0 else quantity,
+                    price=trade_price,
+                    realized_pnl=realized_pnl,
+                )
+
         except Exception as e:
             logger.error("Failed to record order to DB", error=str(e))
+
+    async def _update_position_in_db(
+        self,
+        symbol: str,
+        strategy: str,
+        side: str,
+        quantity: float,
+        price: float,
+        realized_pnl: float = 0.0,
+    ) -> None:
+        """포지션 상태를 DB에 업데이트"""
+        try:
+            async with async_session() as session:
+                if side == "BUY":
+                    # BUY: 포지션 생성 or 평균가 업데이트
+                    stmt = select(PositionModel).where(
+                        PositionModel.symbol == symbol,
+                        PositionModel.is_open == True,
+                    )
+                    result = await session.execute(stmt)
+                    position = result.scalar_one_or_none()
+
+                    if position:
+                        # 기존 포지션에 추가 매수
+                        total_quantity = position.quantity + quantity
+                        position.avg_price = (
+                            (position.avg_price * position.quantity + price * quantity) / total_quantity
+                        )
+                        position.quantity = total_quantity
+                        logger.debug(
+                            f"Updated position in DB: {symbol}",
+                            avg_price=position.avg_price,
+                            quantity=total_quantity,
+                        )
+                    else:
+                        # 신규 포지션 생성
+                        position = PositionModel(
+                            symbol=symbol,
+                            strategy=StrategyType(strategy),
+                            side=OrderSide.BUY,
+                            quantity=quantity,
+                            avg_price=price,
+                            realized_pnl=0.0,
+                            is_open=True,
+                            opened_at=datetime.utcnow(),
+                        )
+                        session.add(position)
+                        logger.debug(f"Created position in DB: {symbol}", avg_price=price, quantity=quantity)
+
+                    await session.commit()
+
+                elif side == "SELL":
+                    # SELL: 포지션 종료 (부분 청산은 미지원, 전체 청산으로 간주)
+                    stmt = select(PositionModel).where(
+                        PositionModel.symbol == symbol,
+                        PositionModel.is_open == True,
+                    )
+                    result = await session.execute(stmt)
+                    position = result.scalar_one_or_none()
+
+                    if position:
+                        position.is_open = False
+                        position.closed_at = datetime.utcnow()
+                        position.realized_pnl += realized_pnl
+                        await session.commit()
+                        logger.debug(
+                            f"Closed position in DB: {symbol}",
+                            realized_pnl=realized_pnl,
+                        )
+                    else:
+                        logger.warning(f"SELL order but no open position in DB: {symbol}")
+
+        except Exception as e:
+            logger.error("Failed to update position in DB", symbol=symbol, error=str(e))
 
     def update_order(self, order_id: str, status: str, filled_qty: float = None, avg_price: float = None) -> None:
         """주문 상태 업데이트"""
@@ -5409,3 +5709,17 @@ class TradingEngine:
         # 최대 1000개 유지
         if len(self._cached_events) > 1000:
             self._cached_events = self._cached_events[-1000:]
+
+    async def _send_slack_notification(self, level: AlertLevel, title: str, message: str) -> None:
+        """Slack 알림 전송 헬퍼 메서드"""
+        if not self.slack_notifier.is_enabled:
+            return
+
+        try:
+            await self.slack_notifier.send(SlackMessage(
+                level=level,
+                title=title,
+                message=message,
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to send Slack notification: {e}")

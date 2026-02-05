@@ -1139,6 +1139,42 @@ class Settings(BaseSettings):
         description="급락 감지 캔들 인터벌 (1분 또는 3분)",
     )
 
+    # === Dip Scalper v2.3 급등주 필터 ===
+    dip_hot_stock_threshold: float = Field(
+        default=0.07,
+        description="급등주 차단 기준 (5분봉 +7% 이상 오른 종목 차단)",
+    )
+    dip_hot_stock_lookback_min: int = Field(
+        default=30,
+        description="급등주 감지 기간 (최근 30분 이내)",
+    )
+
+    # === Surge Detector (급등 감지) ===
+    surge_min_change_1m: float = Field(
+        default=0.040,
+        description="최소 1분 변화율 (4.0% 이상만 급등으로 인정)",
+    )
+    surge_min_volume_mult: float = Field(
+        default=3.0,
+        description="최소 거래량 배수 (평균 대비 3배 이상)",
+    )
+    surge_stop_loss_pct: float = Field(
+        default=-0.04,
+        description="손절률 (-4%, 충분한 여유)",
+    )
+    surge_trailing_stop_pct: float = Field(
+        default=-0.06,
+        description="트레일링 스톱 (고점 -6%, 되돌림 견딤)",
+    )
+    surge_take_profit_mult: float = Field(
+        default=3.0,
+        description="익절 목표 (리스크의 3배, 3R)",
+    )
+    surge_time_stop_minutes: int = Field(
+        default=15,
+        description="타임스톱 (15분, 충분한 시간 부여)",
+    )
+
     @property
     def is_paper_mode(self) -> bool:
         """Paper 모드 여부"""

@@ -1,5 +1,5 @@
 """
-Dip Scalper Strategy v2.0
+Dip Scalper Strategy v2.3
 
 핵심 철학:
 - "1분봉에서 급락한 종목 즉시 매수"
@@ -16,6 +16,11 @@ v2.0 추가 조건 (떨어지는 칼날 방지):
 - BTC 안정성 확인 (BTC가 폭락 중이면 매수 안함)
 - 호가창 매수벽 확인 (bid wall 존재 여부)
 
+v2.3 급등주 필터 (펌프 앤 덤프 방지):
+- 5분봉 기준 +7% 이상 급등한 종목은 차단
+- 급등 후 급락은 바닥 모름, 연속 폭락 가능
+- "급락 스캘핑"이 아닌 "펌프 앤 덤프 희생양" 방지
+
 청산:
 - TP: +0.8% (기본)
 - SL: -1.2% (기본)
@@ -25,6 +30,7 @@ v2.0 추가 조건 (떨어지는 칼날 방지):
 - 복잡한 점수 시스템 없음
 - ATR 기반 동적 임계값
 - 금액 기준 지정가 매수
+- 펌프 앤 덤프 회피
 """
 
 from dataclasses import dataclass, field
@@ -381,6 +387,18 @@ class DipScalperStrategy:
             rvol = market_data.get("rvol", 1.0)
             bid_volume = market_data.get("bid_volume", 0)
             ask_volume = market_data.get("ask_volume", 0)
+
+            # v2.3: 급등주 필터 - 최근 급등한 종목의 급락은 차단
+            change_5m = market_data.get("change_5m", 0)
+            hot_threshold = getattr(settings, "dip_hot_stock_threshold", 0.07)  # 0.07 (7%)
+            if change_5m > hot_threshold:
+                logger.debug(
+                    "DipScalper blocked by hot stock filter",
+                    symbol=symbol,
+                    change_5m=f"{change_5m*100:.1f}%",
+                    threshold=f"{hot_threshold*100:.0f}%",
+                )
+                continue
 
             # 기본 필터
             if price <= 0:
