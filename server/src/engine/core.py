@@ -470,9 +470,6 @@ class TradingEngine:
         # DB에서 주문 히스토리 로드
         await self._load_orders_from_db()
 
-        # 초기 1분봉 데이터 로드 (SurgeDetector용)
-        await self._load_initial_candles(qualified_symbols)
-
         # DB에서 오픈 포지션 복구 (서버 재시작 시 전략별 포지션 복구)
         await self._restore_positions_from_db()
 
@@ -481,10 +478,14 @@ class TradingEngine:
         self._candle_update_counter = 0  # 캔들 업데이트 카운터 (v5.3: 10초마다)
         self._kmvi_update_counter = 0    # KMVI 업데이트 카운터 (60초마다)
         self._candle_refresh_round = 0   # 캔들 갱신 라운드 로빈
+        self._pending_order_cleanup_counter = 0  # v5.5: 미체결 주문 정리 카운터
         self._main_task = asyncio.create_task(self._main_loop())
 
         # v2.3: 근접 종목 1초 모니터링 태스크
         self._near_trigger_task = asyncio.create_task(self._near_trigger_monitor_loop())
+
+        # v5.5: 초기 캔들 로드를 백그라운드로 이동 (엔진 시작 블로킹 방지)
+        asyncio.create_task(self._load_initial_candles_background(qualified_symbols))
 
         logger.info("Trading Engine started")
 
@@ -567,14 +568,9 @@ class TradingEngine:
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 can_open = self.risk_engine.can_open_position
-                print(f"[DEBUG] can_open={can_open}, type={type(can_open)}", flush=True)
-                logger.info(f"[CAN_OPEN CHECK] can_open_position={can_open}, mode={self.risk_engine.mode}, mode_manager={self.risk_engine.mode_manager.mode}")
                 if not can_open:
-                    print(f"[DEBUG] Strategy skipped, can_open is False", flush=True)
-                    logger.info(f"Strategy execution skipped: can_open_position={can_open}")
+                    logger.debug(f"Strategy execution skipped: can_open_position={can_open}")
                 if can_open:
-                    print(f"[DEBUG] Calling _execute_strategies()", flush=True)
-                    logger.info("[CAN_OPEN CHECK] Calling _execute_strategies()")
                     await self._execute_strategies()
 
                 # 4. 포지션 관리 (SAFE 모드에서도 실행)
@@ -734,6 +730,25 @@ class TradingEngine:
             loaded_3m=loaded_count_3m,
             loaded_5m=loaded_count_5m,
         )
+
+    async def _load_initial_candles_background(self, symbols: list[str]) -> None:
+        """
+        v5.5: 백그라운드 초기 캔들 로드 (엔진 시작 블로킹 방지)
+
+        메인 루프가 시작된 후 백그라운드에서 캔들을 로드하여
+        엔진 시작이 캔들 로딩에 의해 지연되지 않도록 함
+        """
+        try:
+            logger.info("Starting background candle loading...")
+            await asyncio.wait_for(
+                self._load_initial_candles(symbols),
+                timeout=120.0  # 2분 타임아웃
+            )
+            logger.info("Background candle loading completed successfully")
+        except asyncio.TimeoutError:
+            logger.warning("Background candle loading timed out (120s)")
+        except Exception as e:
+            logger.error("Background candle loading failed", error=str(e), exc_info=True)
 
     async def _refresh_candles(self) -> None:
         """
@@ -1093,8 +1108,6 @@ class TradingEngine:
 
     async def _execute_strategies(self) -> None:
         """전략 실행 (우선순위 체인 적용)"""
-        print("[DEBUG] Inside _execute_strategies() start", flush=True)
-        logger.info("[STRATEGY EXECUTION] _execute_strategies() called")
         try:
             # === 우선순위 1-3: Risk Overlay 평가 ===
             # 현재 자산 조회
@@ -1220,15 +1233,9 @@ class TradingEngine:
 
             # === v4.2 Rebound Scalper 전략 (반등 스캘핑) - Upbit 전용 ===
             # Note: Rebound는 Satellite/Pullback과 독립적으로 운영됨
-            print(f"[DEBUG] REBOUND CHECK: is_upbit={self._is_upbit}, strategy={self.rebound_strategy is not None}", flush=True)
-            logger.info(f"[REBOUND CHECK] is_upbit={self._is_upbit}, strategy={self.rebound_strategy is not None}, enabled={self.rebound_strategy.is_enabled() if self.rebound_strategy else False}, mode={settings.rebound_mode}")
             if self._is_upbit and self.rebound_strategy and self.rebound_strategy.is_enabled():
-                print(f"[DEBUG] REBOUND conditions met, checking risk_decision", flush=True)
                 rebound_allowed = risk_decision.mode not in [RiskMode.HALT]
-                logger.info(f"[REBOUND] rebound_allowed={rebound_allowed}, risk_mode={risk_decision.mode}")
                 if rebound_allowed:
-                    print(f"[DEBUG] REBOUND scan starting...", flush=True)
-                    logger.info("[REBOUND] Starting scan...")
                     # Pre-filtering: 후보 심볼 축소
                     candidates = self._prefilter_symbols_for_rebound(self._market_data)
                     logger.debug(f"Rebound candidates: {len(candidates)} symbols (pre-filtered)")
