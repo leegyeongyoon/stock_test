@@ -448,6 +448,10 @@ class TradingEngine:
             raise RuntimeError("Upbit connection failed")
         logger.info("Connected to Upbit exchange")
 
+        # 데이터베이스에서 오픈 포지션 복원
+        await self.position_ledger.restore_from_database()
+        logger.info("Position ledger restore complete")
+
         # 동적 심볼 목록 초기화
         qualified_symbols = await self.symbol_manager.refresh()
         logger.info(
@@ -2712,6 +2716,15 @@ class TradingEngine:
                 initial_stop_price=initial_stop,
             )
 
+            logger.info(
+                "Created FillEvent",
+                symbol=symbol,
+                strategy_id=signal.strategy.value,
+                side=side.value,
+                qty=result.filled_qty,
+                price=result.avg_price,
+            )
+
             try:
                 if side == OrderSide.BUY:
                     await self.position_ledger.on_buy_fill(fill_event)
@@ -4958,18 +4971,36 @@ class TradingEngine:
 
         try:
             open_positions = await self.position_ledger.get_open_positions()
+            logger.info(
+                "Building strategy map from ledger",
+                open_position_count=len(open_positions),
+            )
+
             for pos in open_positions:
                 symbol = pos.symbol
                 strategy = pos.strategy_id
                 existing = strategy_map.get(symbol)
+
+                logger.debug(
+                    "Processing ledger position",
+                    symbol=symbol,
+                    strategy=strategy,
+                    existing=existing,
+                )
 
                 if existing is None:
                     strategy_map[symbol] = strategy
                 elif strategy_priority.get(strategy, 99) < strategy_priority.get(existing, 99):
                     strategy_map[symbol] = strategy
 
+            logger.info(
+                "Strategy map built",
+                symbols=list(strategy_map.keys()),
+                strategies=list(strategy_map.values()),
+            )
+
         except Exception as e:
-            logger.warning("Failed to build strategy map from ledger", error=str(e))
+            logger.warning("Failed to build strategy map from ledger", error=str(e), exc_info=True)
 
         return strategy_map
 
@@ -5010,6 +5041,12 @@ class TradingEngine:
 
                 # 실제 전략 조회 (Ledger에 없으면 SATELLITE 기본값)
                 strategy = symbol_strategy_map.get(symbol, "SATELLITE")
+                if symbol not in symbol_strategy_map:
+                    logger.warning(
+                        "Symbol not in strategy map, defaulting to SATELLITE",
+                        symbol=symbol,
+                        available_symbols=list(symbol_strategy_map.keys()),
+                    )
 
                 self._cached_positions.append({
                     "symbol": symbol,

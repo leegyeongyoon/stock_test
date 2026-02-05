@@ -9,13 +9,16 @@
 """
 
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
 import structlog
+from sqlalchemy import select
 
+from src.models.database import PositionLedgerModel, async_session
 from src.models.schemas import OrderSide, StrategyType
 
 logger = structlog.get_logger()
@@ -159,6 +162,131 @@ class PositionLedger:
         # 체결 히스토리 (최근 100건)
         self._fill_history: list[FillEvent] = []
 
+    async def restore_from_database(self) -> None:
+        """데이터베이스에서 오픈 포지션 복원"""
+        try:
+            async with async_session() as session:
+                stmt = select(PositionLedgerModel).where(
+                    PositionLedgerModel.status == "OPEN"
+                )
+                result = await session.execute(stmt)
+                db_positions = result.scalars().all()
+
+                restored_count = 0
+                for db_pos in db_positions:
+                    # 메타데이터 파싱
+                    metadata = {}
+                    if db_pos.metadata_json:
+                        try:
+                            metadata = json.loads(db_pos.metadata_json)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Failed to parse metadata JSON",
+                                position_id=db_pos.position_id,
+                            )
+
+                    # PositionLedgerEntry 재구성
+                    position = PositionLedgerEntry(
+                        position_id=db_pos.position_id,
+                        strategy_id=db_pos.strategy_id,
+                        symbol=db_pos.symbol,
+                        side=db_pos.side,
+                        quantity=db_pos.quantity,
+                        avg_entry_price=db_pos.avg_entry_price,
+                        realized_pnl=db_pos.realized_pnl,
+                        unrealized_pnl=0.0,  # 재계산 필요
+                        total_fees=db_pos.total_fees,
+                        status=db_pos.status,
+                        entry_time=db_pos.entry_time,
+                        last_fill_time=db_pos.last_fill_time,
+                        fill_count=db_pos.fill_count,
+                        stop_price=db_pos.stop_price,
+                        initial_stop_distance=db_pos.initial_stop_distance,
+                        metadata=metadata,
+                    )
+
+                    # 인덱스에 추가
+                    self._positions[position.position_id] = position
+                    self._add_to_index(position)
+                    restored_count += 1
+
+                logger.info(
+                    "Positions restored from database",
+                    restored_count=restored_count,
+                    symbols=[p.symbol for p in self._positions.values()],
+                    strategies=[p.strategy_id for p in self._positions.values()],
+                )
+
+        except Exception as e:
+            logger.error(
+                "Failed to restore positions from database",
+                error=str(e),
+                exc_info=True,
+            )
+
+    async def _persist_position_to_db(self, position: PositionLedgerEntry) -> None:
+        """포지션을 데이터베이스에 저장/업데이트"""
+        try:
+            async with async_session() as session:
+                # 기존 포지션 조회
+                stmt = select(PositionLedgerModel).where(
+                    PositionLedgerModel.position_id == position.position_id
+                )
+                result = await session.execute(stmt)
+                db_position = result.scalar_one_or_none()
+
+                # 메타데이터 JSON 직렬화
+                metadata_json = json.dumps(position.metadata) if position.metadata else None
+
+                if db_position:
+                    # 업데이트
+                    db_position.quantity = position.quantity
+                    db_position.avg_entry_price = position.avg_entry_price
+                    db_position.realized_pnl = position.realized_pnl
+                    db_position.total_fees = position.total_fees
+                    db_position.status = position.status
+                    db_position.last_fill_time = position.last_fill_time
+                    db_position.fill_count = position.fill_count
+                    db_position.stop_price = position.stop_price
+                    db_position.metadata_json = metadata_json
+                else:
+                    # 신규 생성
+                    db_position = PositionLedgerModel(
+                        position_id=position.position_id,
+                        strategy_id=position.strategy_id,
+                        symbol=position.symbol,
+                        side=position.side,
+                        quantity=position.quantity,
+                        avg_entry_price=position.avg_entry_price,
+                        realized_pnl=position.realized_pnl,
+                        total_fees=position.total_fees,
+                        status=position.status,
+                        entry_time=position.entry_time,
+                        last_fill_time=position.last_fill_time,
+                        fill_count=position.fill_count,
+                        stop_price=position.stop_price,
+                        initial_stop_distance=position.initial_stop_distance,
+                        metadata_json=metadata_json,
+                    )
+                    session.add(db_position)
+
+                await session.commit()
+
+                logger.debug(
+                    "Position persisted to database",
+                    position_id=position.position_id,
+                    symbol=position.symbol,
+                    strategy_id=position.strategy_id,
+                )
+
+        except Exception as e:
+            logger.error(
+                "Failed to persist position to database",
+                position_id=position.position_id,
+                error=str(e),
+                exc_info=True,
+            )
+
     async def on_buy_fill(self, fill: FillEvent) -> PositionLedgerEntry:
         """
         매수 체결 처리 - 신규 또는 추가 매수
@@ -248,12 +376,24 @@ class PositionLedger:
             },
         )
 
+        logger.info(
+            "Created new position in ledger",
+            position_id=position_id,
+            symbol=fill.symbol,
+            strategy_id=fill.strategy_id,
+            quantity=fill.filled_quantity,
+            entry_price=fill.fill_price,
+        )
+
         # 인덱스 업데이트
         self._positions[position_id] = position
         self._add_to_index(position)
 
         # 체결 히스토리 추가
         self._add_fill_history(fill)
+
+        # 데이터베이스에 저장 (비동기)
+        asyncio.create_task(self._persist_position_to_db(position))
 
         logger.info(
             "New position created",
@@ -300,6 +440,9 @@ class PositionLedger:
             new_avg=new_avg,
         )
 
+        # 데이터베이스에 저장
+        asyncio.create_task(self._persist_position_to_db(position))
+
         return position
 
     def _close_position(
@@ -340,6 +483,9 @@ class PositionLedger:
                 fill_count=position.fill_count,
             )
 
+            # 데이터베이스에 저장
+            asyncio.create_task(self._persist_position_to_db(position))
+
             return position
         else:
             # 부분 청산
@@ -353,6 +499,9 @@ class PositionLedger:
                 remaining_qty=position.quantity,
                 pnl_this_close=pnl,
             )
+
+            # 데이터베이스에 저장
+            asyncio.create_task(self._persist_position_to_db(position))
 
             return position
 
@@ -455,7 +604,15 @@ class PositionLedger:
 
     async def get_open_positions(self) -> list[PositionLedgerEntry]:
         """모든 오픈 포지션 조회"""
-        return [pos for pos in self._positions.values() if pos.is_open]
+        open_positions = [pos for pos in self._positions.values() if pos.is_open]
+        logger.debug(
+            "get_open_positions called",
+            total_positions=len(self._positions),
+            open_positions=len(open_positions),
+            symbols=[p.symbol for p in open_positions],
+            strategies=[p.strategy_id for p in open_positions],
+        )
+        return open_positions
 
     async def get_all_positions(self) -> list[PositionLedgerEntry]:
         """모든 포지션 조회 (청산 포함)"""
