@@ -1622,6 +1622,23 @@ class TradingEngine:
                 bid_ratio=signal.bid_strength,  # v2.1: 동적 익절용
             )
 
+            # PositionLedger에 포지션 추가
+            from src.portfolio.position_ledger import FillEvent
+            fill_event = FillEvent(
+                order_id=order_id if 'order_id' in locals() else f"DIP-{symbol}-{int(datetime.utcnow().timestamp())}",
+                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
+                position_id=None,
+                symbol=symbol,
+                strategy_id="DIP_SCALPER",
+                side="BUY",
+                filled_quantity=filled_qty,
+                fill_price=avg_price,
+                fee=0.0,
+                fee_asset="KRW",
+                timestamp=datetime.utcnow(),
+            )
+            await self.position_ledger.on_buy_fill(fill_event)
+
             # 주문 기록
             self.add_order(
                 symbol=symbol,
@@ -1692,6 +1709,23 @@ class TradingEngine:
 
             # 전략에서 포지션 제거
             self.dip_scalper.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
+
+            # PositionLedger에서 포지션 청산
+            from src.portfolio.position_ledger import FillEvent
+            sell_fill_event = FillEvent(
+                order_id=f"DIP-SELL-{symbol}-{int(datetime.utcnow().timestamp())}",
+                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
+                position_id=None,
+                symbol=symbol,
+                strategy_id="DIP_SCALPER",
+                side="SELL",
+                filled_quantity=filled_qty,
+                fill_price=exit_price,
+                fee=0.0,
+                fee_asset="KRW",
+                timestamp=datetime.utcnow(),
+            )
+            await self.position_ledger.on_sell_fill(sell_fill_event)
 
             # 주문 기록 (매도)
             self.add_order(
@@ -3314,6 +3348,23 @@ class TradingEngine:
                 quantity=filled_qty,
             )
 
+            # PositionLedger에 포지션 추가
+            from src.portfolio.position_ledger import FillEvent
+            fill_event = FillEvent(
+                order_id=f"REB-{symbol}-{int(datetime.utcnow().timestamp())}",
+                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
+                position_id=None,
+                symbol=symbol,
+                strategy_id="REBOUND",
+                side="BUY",
+                filled_quantity=filled_qty,
+                fill_price=avg_price,
+                fee=0.0,
+                fee_asset="KRW",
+                timestamp=datetime.utcnow(),
+            )
+            await self.position_ledger.on_buy_fill(fill_event)
+
             self.add_event(
                 level="INFO",
                 event_type="REBOUND",
@@ -4522,6 +4573,23 @@ class TradingEngine:
                                 self.rebound_strategy.close_position(symbol, partial=True, sold_qty=result.filled_qty, exit_type=exit_type, pnl_pct=pnl_pct)
                             else:
                                 self.rebound_strategy.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
+
+                            # PositionLedger에서 포지션 청산
+                            from src.portfolio.position_ledger import FillEvent
+                            sell_fill_event = FillEvent(
+                                order_id=f"REB-SELL-{symbol}-{int(datetime.utcnow().timestamp())}",
+                                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
+                                position_id=None,
+                                symbol=symbol,
+                                strategy_id="REBOUND",
+                                side="SELL",
+                                filled_quantity=result.filled_qty,
+                                fill_price=result.avg_price,
+                                fee=0.0,
+                                fee_asset="KRW",
+                                timestamp=datetime.utcnow(),
+                            )
+                            await self.position_ledger.on_sell_fill(sell_fill_event)
 
                             self.add_event(
                                 level="INFO",
