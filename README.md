@@ -250,13 +250,55 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
+## DB 마이그레이션
+
+Postgres 사용 시 새로운 전략 타입을 추가했다면 enum 업데이트 필요:
+
+```bash
+# Postgres에 접속
+psql -h localhost -p 5433 -U trading -d trading
+
+# 또는 Python 스크립트로
+source .venv/bin/activate
+python3 << EOF
+import asyncio
+import asyncpg
+
+async def add_strategy_types():
+    conn = await asyncpg.connect(
+        host='localhost', port=5433,
+        user='trading', password='trading123',
+        database='trading'
+    )
+
+    # 추가할 전략 타입들
+    new_types = ['DIP_SCALPER', 'PULLBACK', 'REBOUND', 'IGNITION', 'SURGE']
+
+    for type_name in new_types:
+        try:
+            await conn.execute(f"ALTER TYPE strategytype ADD VALUE IF NOT EXISTS '{type_name}'")
+            print(f'✓ Added {type_name}')
+        except Exception as e:
+            print(f'⚠ {type_name}: {e}')
+
+    await conn.close()
+
+asyncio.run(add_strategy_types())
+EOF
+```
+
+**주의**: Postgres enum은 트랜잭션 내에서 추가할 수 없으므로 개별 실행 필요
+
 ## 변경 이력
 
-### v5.4 (2026-02-05) - 급등 감지 알고리즘 완화
+### v5.4 (2026-02-05) - 급등 감지 알고리즘 완화 + DB 수정
 - **Candle Surge 임계값 완화**: 조기 진입 기회 확대
   - 1분봉: 7% → 5% (RVOL 3x 유지)
   - 5분봉: 4% → 3% (RVOL 2x 유지)
 - **Anti-Chase Gate 상향**: 20% → 30% (급등주 진입 허용 범위 확대)
+- **DB enum 수정 (Critical)**: Postgres strategytype에 누락된 전략 타입 추가
+  - DIP_SCALPER, PULLBACK, REBOUND, IGNITION, SURGE
+  - 이제 모든 전략의 DB 저장/복구가 정상 작동
 - **예상 효과**: 일일 신호 2-3건 → 8-12건 증가
 - **위험**: 거짓 신호 증가 가능 (모니터링 필요)
 
