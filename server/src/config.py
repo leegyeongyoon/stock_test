@@ -913,12 +913,12 @@ class Settings(BaseSettings):
 
     # === v4.0 Anti-Chase (조정 - 강화) ===
     structure_chase_dist_atr_max: float = Field(
-        default=0.7,
-        description="dist_atr 차단 임계값 - 0.9→0.7: VWAP에서 멀면 더 빨리 차단",
+        default=10.0,
+        description="dist_atr 차단 임계값 - 10.0: 20%까지 허용",
     )
     structure_chase_dist_breakout_max: float = Field(
-        default=0.4,
-        description="dist_breakout 차단 배수 - 0.6→0.4: 돌파레벨에서 멀면 더 빨리 차단",
+        default=10.0,
+        description="dist_breakout 차단 배수 - 10.0: 20%까지 허용",
     )
 
     # === v4.0 DD Tier 연동 ===
@@ -1063,6 +1063,80 @@ class Settings(BaseSettings):
     stop_watchdog_fast_crash_window_sec: int = Field(
         default=5,
         description="Fast Crash 감지 윈도우 (초)",
+    )
+
+    # === Dip Scalper (급락 스캘퍼) ===
+    dip_scalper_enabled: bool = Field(
+        default=True,
+        description="급락 스캘퍼 활성화",
+    )
+    dip_min_drop_pct: float = Field(
+        default=-0.02,
+        description="최소 급락률 (-2%)",
+    )
+    dip_max_drop_pct: float = Field(
+        default=-0.08,
+        description="최대 급락률 (-8%)",
+    )
+    dip_atr_multiplier: float = Field(
+        default=1.2,
+        description="ATR 배수 (급락 기준 = ATR * 이 값) - 1.2x로 완화",
+    )
+    dip_buy_amount_krw: float = Field(
+        default=100000,
+        description="매수 금액 (KRW)",
+    )
+    dip_max_positions: int = Field(
+        default=5,
+        description="최대 포지션 수",
+    )
+    dip_use_limit_order: bool = Field(
+        default=True,
+        description="지정가 주문 사용 여부",
+    )
+    dip_limit_offset_pct: float = Field(
+        default=0.001,
+        description="지정가 오프셋 (0.1% 아래)",
+    )
+    dip_take_profit_pct: float = Field(
+        default=0.008,
+        description="익절률 (+0.8%)",
+    )
+    dip_stop_loss_pct: float = Field(
+        default=-0.012,
+        description="손절률 (-1.2%)",
+    )
+    dip_time_stop_minutes: int = Field(
+        default=10,
+        description="타임스톱 (분)",
+    )
+    dip_cooldown_minutes: int = Field(
+        default=5,
+        description="동일 종목 재진입 쿨다운 (분)",
+    )
+    dip_min_volume_krw: float = Field(
+        default=100000000,
+        description="최소 거래대금 (1억원)",
+    )
+
+    # === Dip Scalper v2.0 추가 필터 ===
+    dip_min_rvol: float = Field(
+        default=2.0,
+        description="최소 상대거래량 (RVOL) - 평소의 2배",
+    )
+    dip_btc_crash_threshold: float = Field(
+        default=-0.03,
+        description="BTC 급락 기준 (-3% 이하면 매수 중단)",
+    )
+    dip_min_bid_ratio: float = Field(
+        default=0.4,
+        description="최소 매수호가 비율 (40% 이상)",
+    )
+
+    # === Dip Scalper v2.2 캔들 인터벌 ===
+    dip_candle_interval: int = Field(
+        default=1,
+        description="급락 감지 캔들 인터벌 (1분 또는 3분)",
     )
 
     @property

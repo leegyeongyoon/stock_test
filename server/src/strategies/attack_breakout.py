@@ -94,6 +94,7 @@ class AttackPosition:
     # Attack 정보
     attack_level: int = 0
     attack_score: float = 0.0
+    overheat_score: float = 0.0  # v5.2: 과열 점수 (-15~0) - 동적 청산 전략에 사용
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +111,7 @@ class AttackPosition:
             "max_pnl_pct": self.max_pnl_pct,
             "attack_level": self.attack_level,
             "attack_score": self.attack_score,
+            "overheat_score": self.overheat_score,
         }
 
 
@@ -342,6 +344,7 @@ class AttackBreakoutStrategy(BaseStrategy):
             metadata={
                 "attack_level": gate_result.final_level,
                 "attack_score": score_result.total_score,
+                "overheat_score": score_result.overheat_score,  # v5.2: 동적 청산 전략용
                 "tranche": 1,
                 "total_tranches": len(sizing.tranches),
                 "stop_price": sizing.stop_price,
@@ -451,14 +454,54 @@ class AttackBreakoutStrategy(BaseStrategy):
 
         return None
 
+    def _get_dynamic_exit_params(self, overheat_score: float) -> dict:
+        """
+        v5.2: 과열도 기반 동적 청산 파라미터 계산
+
+        과열도 높음 (overheat <= -10): 이미 많이 올랐음 → 빨리 익절
+        과열도 중간 (-10 < overheat <= -5): 기본값
+        과열도 낮음 (overheat > -5): 초기 단계 → 오래 홀드
+        """
+        if overheat_score <= -10:
+            # 과열 심함: 빠른 익절, 타이트한 트레일링
+            return {
+                "trail_trigger_r": 0.8,       # 0.8R에서 트레일링 활성화 (빠름)
+                "trail_trigger_pct": 0.015,   # 1.5%에서 활성화
+                "trailing_mult": 0.7,         # 손절거리의 70%로 타이트하게
+                "time_stop_min": 30,          # 30분 타임스톱 (짧게)
+                "profit_extend_threshold": 0.01,  # 1% 이상 수익 시만 연장
+            }
+        elif overheat_score <= -5:
+            # 과열 중간: 기본값
+            return {
+                "trail_trigger_r": self.trail_trigger_r,
+                "trail_trigger_pct": self.trail_trigger_pct,
+                "trailing_mult": 0.5,
+                "time_stop_min": self.time_stop_min,
+                "profit_extend_threshold": 0.005,
+            }
+        else:
+            # 과열 낮음: 오래 홀드, 느슨한 트레일링
+            return {
+                "trail_trigger_r": 1.5,       # 1.5R에서 트레일링 활성화 (느림)
+                "trail_trigger_pct": 0.025,   # 2.5%에서 활성화
+                "trailing_mult": 0.3,         # 손절거리의 30%로 느슨하게
+                "time_stop_min": 60,          # 60분 타임스톱 (길게)
+                "profit_extend_threshold": 0.003,  # 0.3% 이상 수익 시 연장
+            }
+
     async def should_exit(self, position: dict, market_data: dict) -> Optional[Signal]:
         """
         청산 조건 확인
 
+        v5.2 업데이트: 과열도 기반 동적 청산 전략
+        - 과열 높음 → 빠른 익절 (1.5%, 0.8R)
+        - 과열 낮음 → 오래 홀드 (2.5%, 1.5R)
+
         조건:
         1. 구조적 손절 (스탑 가격 이탈)
-        2. 트레일링 스탑 (+1.2R 또는 +2%)
-        3. 타임스톱 (45분)
+        2. 트레일링 스탑 (과열도에 따라 동적)
+        3. 타임스톱 (과열도에 따라 동적)
         4. VOLATILE 레짐 (선택적)
         """
         symbol = position.get("symbol")
@@ -475,6 +518,9 @@ class AttackBreakoutStrategy(BaseStrategy):
         attack_pos = self._active_positions.get(symbol)
         if not attack_pos:
             return None
+
+        # v5.2: 과열도 기반 동적 파라미터
+        exit_params = self._get_dynamic_exit_params(attack_pos.overheat_score)
 
         # 고점 업데이트
         if current_price > attack_pos.highest_price:
@@ -507,32 +553,36 @@ class AttackBreakoutStrategy(BaseStrategy):
                 metadata={"exit_type": "stop_loss"},
             )
 
-        # 2. 트레일링 스탑
+        # 2. 트레일링 스탑 (v5.2: 과열도 기반 동적 파라미터)
         # R 배수 계산 (리스크 대비 수익)
         r_multiple = pnl_pct / attack_pos.stop_distance_pct if attack_pos.stop_distance_pct > 0 else 0
 
-        # 트레일링 활성화 체크
+        # 트레일링 활성화 체크 (동적 임계값)
         if not attack_pos.trailing_active:
-            if r_multiple >= self.trail_trigger_r or pnl_pct >= self.trail_trigger_pct:
+            if r_multiple >= exit_params["trail_trigger_r"] or pnl_pct >= exit_params["trail_trigger_pct"]:
                 attack_pos.trailing_active = True
                 logger.info(
-                    "Attack trailing activated",
+                    "Attack trailing activated (dynamic)",
                     symbol=symbol,
                     r_multiple=f"{r_multiple:.1f}R",
                     pnl_pct=f"{pnl_pct:.2%}",
+                    overheat=f"{attack_pos.overheat_score:.0f}",
+                    trigger_r=exit_params["trail_trigger_r"],
+                    trigger_pct=f"{exit_params['trail_trigger_pct']:.1%}",
                 )
 
-        # 트레일링 스탑 체크
+        # 트레일링 스탑 체크 (동적 배수)
         if attack_pos.trailing_active:
-            # 고점 대비 하락폭이 손절 거리의 50% 초과 시 청산
-            trailing_stop_pct = attack_pos.stop_distance_pct * 0.5
+            # 고점 대비 하락폭이 손절 거리의 X% 초과 시 청산 (X는 과열도에 따라 다름)
+            trailing_stop_pct = attack_pos.stop_distance_pct * exit_params["trailing_mult"]
             if from_high_drop <= -trailing_stop_pct:
                 self._stats["exits_trailing"] += 1
                 logger.info(
-                    "Attack trailing stop triggered",
+                    "Attack trailing stop triggered (dynamic)",
                     symbol=symbol,
                     from_high=f"{from_high_drop:.2%}",
                     pnl_pct=f"{pnl_pct:.2%}",
+                    trailing_mult=exit_params["trailing_mult"],
                 )
                 return Signal(
                     strategy=StrategyType.ATTACK,
@@ -541,26 +591,33 @@ class AttackBreakoutStrategy(BaseStrategy):
                     side=OrderSide.SELL,
                     quantity=quantity,
                     reason=f"Trailing stop: {from_high_drop:.2%}",
-                    metadata={"exit_type": "trailing", "r_multiple": r_multiple},
+                    metadata={
+                        "exit_type": "trailing",
+                        "r_multiple": r_multiple,
+                        "overheat_score": attack_pos.overheat_score,
+                    },
                 )
 
-        # 3. 타임스톱
+        # 3. 타임스톱 (v5.2: 과열도 기반 동적)
         if entry_time:
             if isinstance(entry_time, str):
                 entry_time = datetime.fromisoformat(entry_time)
 
             elapsed = datetime.utcnow() - entry_time
-            if elapsed > timedelta(minutes=self.time_stop_min):
-                # 수익 중이면 타임스톱 연장
-                if pnl_pct > 0.005:  # +0.5% 이상이면 유지
-                    pass
+            dynamic_time_stop = exit_params["time_stop_min"]
+
+            if elapsed > timedelta(minutes=dynamic_time_stop):
+                # 수익 중이면 타임스톱 연장 (동적 임계값)
+                if pnl_pct > exit_params["profit_extend_threshold"]:
+                    pass  # 충분한 수익 시 연장
                 else:
                     self._stats["exits_time"] += 1
                     logger.info(
-                        "Attack time stop triggered",
+                        "Attack time stop triggered (dynamic)",
                         symbol=symbol,
                         elapsed_min=elapsed.total_seconds() / 60,
                         pnl_pct=f"{pnl_pct:.2%}",
+                        time_stop_min=dynamic_time_stop,
                     )
                     return Signal(
                         strategy=StrategyType.ATTACK,
@@ -569,7 +626,10 @@ class AttackBreakoutStrategy(BaseStrategy):
                         side=OrderSide.SELL,
                         quantity=quantity,
                         reason=f"Time stop: {elapsed.total_seconds()/60:.0f}min",
-                        metadata={"exit_type": "time_stop"},
+                        metadata={
+                            "exit_type": "time_stop",
+                            "overheat_score": attack_pos.overheat_score,
+                        },
                     )
 
         # 4. VOLATILE 레짐 (선택적 - 손익 상태에 따라)
@@ -607,6 +667,7 @@ class AttackBreakoutStrategy(BaseStrategy):
         attack_level: int = 0,
         attack_score: float = 0.0,
         total_target_quantity: float = 0.0,
+        overheat_score: float = 0.0,  # v5.2: 과열 점수
     ) -> None:
         """포지션 추적 시작"""
         self._active_positions[symbol] = AttackPosition(
@@ -621,6 +682,7 @@ class AttackBreakoutStrategy(BaseStrategy):
             highest_price=entry_price,
             attack_level=attack_level,
             attack_score=attack_score,
+            overheat_score=overheat_score,
         )
         self._stats["signals_entered"] += 1
 

@@ -37,6 +37,7 @@ from src.strategies.satellite import Regime, SatelliteStrategy
 from src.strategies.attack_breakout import AttackBreakoutStrategy, get_attack_strategy
 from src.strategies.pullback_strategy import PullbackStrategy, get_pullback_strategy
 from src.strategies.rebound_strategy import ReboundScalperStrategy, get_rebound_strategy
+from src.strategies.dip_scalper import DipScalperStrategy, get_dip_scalper
 from src.strategies.ignition import IgnitionStrategy, get_ignition_strategy, SurgeDetector, get_surge_detector
 from src.monitoring.slack import SlackNotifier, AlertLevel, SlackMessage
 from src.portfolio.position_ledger import PositionLedger, FillEvent
@@ -113,6 +114,7 @@ class TradingEngine:
         self.attack_strategy = get_attack_strategy()  # Attack 전략 (급등 추격 - 비권장)
         self.pullback_strategy = get_pullback_strategy()  # Pullback 전략 (눌림목 매수)
         self.rebound_strategy = get_rebound_strategy()  # v4.2 Rebound 전략 (반등 스캘핑)
+        self.dip_scalper = get_dip_scalper()  # v5.0 Dip Scalper (급락 스캘핑)
         self.ignition_strategy = get_ignition_strategy()  # v4.0 Ignition 전략 (전조 패턴 + 점화)
         self.surge_detector = get_surge_detector()  # 급등 시작 실시간 감지
         self.pullback_strategy.set_mode(settings.pullback_mode)  # 설정에서 모드 로드
@@ -477,6 +479,9 @@ class TradingEngine:
         self._candle_refresh_round = 0   # 캔들 갱신 라운드 로빈
         self._main_task = asyncio.create_task(self._main_loop())
 
+        # v2.3: 근접 종목 1초 모니터링 태스크
+        self._near_trigger_task = asyncio.create_task(self._near_trigger_monitor_loop())
+
         logger.info("Trading Engine started")
 
     async def stop(self) -> None:
@@ -493,6 +498,14 @@ class TradingEngine:
             self._main_task.cancel()
             try:
                 await self._main_task
+            except asyncio.CancelledError:
+                pass
+
+        # v2.3: 근접 종목 모니터 중지
+        if hasattr(self, '_near_trigger_task') and self._near_trigger_task:
+            self._near_trigger_task.cancel()
+            try:
+                await self._near_trigger_task
             except asyncio.CancelledError:
                 pass
 
@@ -541,6 +554,12 @@ class TradingEngine:
                     self._attack_cache_counter = 0
                     await self.update_attack_score_cache()
                     await self.update_rebound_score_cache()
+
+                # v2.3: 미체결 주문 자동 정리 (30초마다 체크, 3분 초과 시 취소)
+                self._pending_order_cleanup_counter = getattr(self, "_pending_order_cleanup_counter", 0) + 1
+                if self._pending_order_cleanup_counter >= 30:
+                    self._pending_order_cleanup_counter = 0
+                    await self._cleanup_stale_pending_orders()
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 can_open = self.risk_engine.can_open_position
@@ -626,6 +645,7 @@ class TradingEngine:
         print(f"[DEBUG] Loading candles for {len(target_symbols)} target symbols")
 
         loaded_count_1m = 0
+        loaded_count_3m = 0
         loaded_count_5m = 0
         for symbol in target_symbols:
             try:
@@ -638,6 +658,15 @@ class TradingEngine:
             await asyncio.sleep(0.05)  # Rate limit 방지
 
             try:
+                # 3분봉 로드 (v2.2: Dip Scalper 3분봉 지원)
+                await self._load_candles_for_symbol(symbol, "3", 50)
+                loaded_count_3m += 1
+            except Exception as e:
+                print(f"[DEBUG] Failed to load 3m candles for {symbol}: {e}")
+                logger.warning(f"Failed to load 3m candles for {symbol}: {e}")
+            await asyncio.sleep(0.05)  # Rate limit 방지
+
+            try:
                 # 5분봉 로드 (v5.0: Candle Surge Bonus)
                 await self._load_candles_for_symbol(symbol, "5", 50)
                 loaded_count_5m += 1
@@ -646,11 +675,12 @@ class TradingEngine:
                 logger.warning(f"Failed to load 5m candles for {symbol}: {e}")
             await asyncio.sleep(0.05)  # Rate limit 방지
 
-        print(f"[DEBUG] Initial candle loading complete: 1m={loaded_count_1m}, 5m={loaded_count_5m}/{len(target_symbols)}")
+        print(f"[DEBUG] Initial candle loading complete: 1m={loaded_count_1m}, 3m={loaded_count_3m}, 5m={loaded_count_5m}/{len(target_symbols)}")
         logger.info(
-            "Initial 1m/5m candles loaded",
+            "Initial 1m/3m/5m candles loaded",
             symbols_count=len(target_symbols),
             loaded_1m=loaded_count_1m,
+            loaded_3m=loaded_count_3m,
             loaded_5m=loaded_count_5m,
         )
 
@@ -678,6 +708,13 @@ class TradingEngine:
             try:
                 # 1분봉 갱신 (최근 10개만 - 빠른 갱신)
                 await self._load_candles_for_symbol(symbol, "1", 10)
+            except Exception:
+                pass
+            await asyncio.sleep(0.02)  # Rate limit 방지
+
+            try:
+                # 3분봉 갱신 (v2.2: Dip Scalper 3분봉 지원)
+                await self._load_candles_for_symbol(symbol, "3", 6)
             except Exception:
                 pass
             await asyncio.sleep(0.02)  # Rate limit 방지
@@ -763,11 +800,13 @@ class TradingEngine:
         v5.0: 분봉 급등 데이터 계산
 
         Returns:
-            dict with change_1m, rvol_1m, change_5m, rvol_5m
+            dict with change_1m, rvol_1m, change_3m, rvol_3m, change_5m, rvol_5m
         """
         result = {
             "change_1m": 0.0,
             "rvol_1m": 1.0,
+            "change_3m": 0.0,
+            "rvol_3m": 1.0,
             "change_5m": 0.0,
             "rvol_5m": 1.0,
         }
@@ -785,6 +824,19 @@ class TradingEngine:
                 rvol_1m = self.candle_manager.calc_rvol(symbol, "1m", 20)
                 if rvol_1m is not None:
                     result["rvol_1m"] = rvol_1m
+
+            # 3분봉 데이터 계산 (v2.2: Dip Scalper 3분봉 지원)
+            candles_3m = self.candle_manager.get_candles(symbol, "3m", 21)
+            if len(candles_3m) >= 2:
+                # change_3m: 현재가 vs 3분 전 종가
+                prev_close_3m = candles_3m[-2].close if len(candles_3m) >= 2 else current_price
+                if prev_close_3m > 0:
+                    result["change_3m"] = (current_price - prev_close_3m) / prev_close_3m
+
+                # rvol_3m: 최근 3분봉 거래량 / 최근 20개 평균
+                rvol_3m = self.candle_manager.calc_rvol(symbol, "3m", 20)
+                if rvol_3m is not None:
+                    result["rvol_3m"] = rvol_3m
 
             # 5분봉 데이터 계산
             candles_5m = self.candle_manager.get_candles(symbol, "5m", 13)
@@ -1263,8 +1315,658 @@ class TradingEngine:
                     except Exception as e:
                         logger.error("Surge detector error", error=str(e))
 
+            # === Dip Scalper (급락 스캘퍼) v2.0 - Upbit 전용 ===
+            if self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled():
+                dip_allowed = risk_decision.mode not in [RiskMode.HALT]
+                if dip_allowed:
+                    try:
+                        # v2.0: BTC 1분 변화율 설정
+                        btc_data = self._market_data.get("KRW-BTC", {})
+                        btc_change_1m = btc_data.get("change_1m", 0)
+                        self.dip_scalper.set_btc_status(btc_change_1m)
+
+                        # 1분봉 급락 종목 스캔
+                        qualified_symbols = self.symbol_manager.get_qualified_symbols()
+
+                        # v2.0: Pre-filter - 급락 중인 종목만 추출 (호가창 조회 최소화)
+                        dip_candidates = []
+                        for symbol in qualified_symbols:
+                            md = self._market_data.get(symbol, {})
+                            if not md or md.get("price", 0) <= 0:
+                                continue
+
+                            change_1m = md.get("change_1m", 0)
+                            # 급락 기준 (min_drop_pct = -2%)보다 낮은 종목만
+                            if change_1m <= -0.01:  # -1% 이상 하락 시 후보
+                                dip_candidates.append(symbol)
+
+                        # v2.0: 후보에 대해 호가창 조회 및 데이터 구성
+                        market_data_list = []
+                        for symbol in dip_candidates[:20]:  # 최대 20개만 조회 (Rate Limit)
+                            md = self._market_data.get(symbol, {})
+                            price = md.get("price", 0)
+
+                            # ATR 계산 (5분봉 기반)
+                            atr = md.get("atr", 0)
+                            atr_pct = atr / price if price > 0 and atr > 0 else 0.02
+
+                            # v2.0: 호가창 조회 (캐시 사용)
+                            orderbook = await self._get_orderbook_cached(symbol)
+                            if orderbook:
+                                bid_volume = sum(b[1] for b in orderbook.get("bids", [])[:5])
+                                ask_volume = sum(a[1] for a in orderbook.get("asks", [])[:5])
+                            else:
+                                bid_volume = 0
+                                ask_volume = 0
+
+                            market_data_list.append({
+                                "symbol": symbol,
+                                "price": price,
+                                "change_1m": md.get("change_1m", 0),
+                                "change_3m": md.get("change_3m", 0),  # v2.2: 3분봉 지원
+                                "atr_pct": atr_pct,
+                                "volume_24h_krw": md.get("volume_24h", 0),
+                                # v2.0 추가 데이터
+                                "rvol": md.get("rvol", 1.0),
+                                "bid_volume": bid_volume,
+                                "ask_volume": ask_volume,
+                            })
+
+                        # 급락 시그널 스캔 (v2.0: 추가 조건 포함)
+                        dip_signals = self.dip_scalper.scan_for_dips(market_data_list)
+
+                        # 시그널 실행
+                        for signal in dip_signals:
+                            await self._execute_dip_signal(signal, self._market_data.get(signal.symbol, {}), risk_decision, current_equity)
+
+                        # 기존 포지션 청산 체크
+                        for symbol, pos in self.dip_scalper.get_all_positions().items():
+                            md = self._market_data.get(symbol, {})
+                            current_price = md.get("price", 0)
+
+                            exit_result = self.dip_scalper.should_exit(symbol, current_price)
+                            if exit_result:
+                                await self._execute_dip_exit(symbol, pos, exit_result, current_price)
+
+                        # v2.3: 미체결 주문 체결 확인
+                        await self._check_dip_pending_orders()
+
+                        # v2.3: 근접 종목 추적 (1초 모니터링 대상 업데이트)
+                        near_symbols = self.dip_scalper.update_near_trigger_symbols(market_data_list)
+                        if near_symbols:
+                            logger.debug(
+                                "Near-trigger symbols updated",
+                                count=len(near_symbols),
+                                symbols=near_symbols[:5],
+                            )
+
+                    except Exception as e:
+                        logger.error("Dip scalper error", error=str(e))
+
         except Exception as e:
             logger.error("Strategy execution error", error=str(e))
+
+    async def _execute_dip_signal(self, signal, market_data: dict, risk_decision, current_equity: float) -> None:
+        """Dip Scalper 시그널 실행 (급락 스캘핑)"""
+        try:
+            symbol = signal.symbol
+            current_price = market_data.get("price", 0)
+
+            logger.info(
+                "Executing Dip signal",
+                symbol=symbol,
+                drop=f"{signal.drop_pct:.2%}",
+                threshold=f"{signal.threshold_pct:.2%}",
+                entry_price=signal.entry_price,
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="DIP_SCALPER",
+                message=f"Dip entry: {symbol} {signal.drop_pct:.1%}",
+                details={
+                    "drop_pct": signal.drop_pct,
+                    "atr_pct": signal.atr_pct,
+                    "entry_price": signal.entry_price,
+                    "stop_loss": signal.stop_loss,
+                    "take_profit": signal.take_profit,
+                },
+            )
+
+            # 매수 금액 (설정에서 가져옴)
+            order_amount = signal.buy_amount_krw
+
+            # 최소 주문 금액 체크
+            MIN_ORDER = 5000
+            if order_amount < MIN_ORDER:
+                logger.debug("Dip order too small", amount=order_amount, min=MIN_ORDER)
+                return
+
+            # 잔고 체크
+            krw_balance = await self.exchange.get_balance("KRW")
+            available = krw_balance.free if krw_balance else 0
+
+            if available < order_amount:
+                logger.warning("Insufficient balance for dip", available=available, required=order_amount)
+                return
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info(
+                    "PAPER mode - skipping Dip trade execution",
+                    symbol=symbol,
+                    amount=order_amount,
+                )
+                return
+
+            # 금액 → 수량 변환
+            order_quantity = order_amount / signal.entry_price
+
+            logger.info(
+                "Dip order executing",
+                symbol=symbol,
+                amount_krw=order_amount,
+                price=signal.entry_price,
+                quantity=order_quantity,
+            )
+
+            # v2.3: 지정가 또는 시장가 매수
+            # 지정가 = 임계값 가격 (예: -2.4% 레벨)
+            # 현재가가 임계값 아래이면 지정가로 주문해도 즉시 체결됨
+            use_limit = self.dip_scalper.use_limit_order
+
+            if use_limit:
+                # 지정가 매수 (임계값 가격)
+                result = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    quantity=order_quantity,
+                    price=signal.entry_price,
+                )
+                logger.info(
+                    "Dip limit order placed",
+                    symbol=symbol,
+                    limit_price=signal.entry_price,
+                    current_price=current_price,
+                )
+            else:
+                # 시장가 매수
+                result = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.MARKET,
+                    quantity=order_quantity,
+                )
+
+            if not result.success:
+                logger.error("Dip order failed", symbol=symbol, error=result.error)
+                return
+
+            # 체결 수량/가격 확인
+            filled_qty = result.filled_qty
+            avg_price = result.avg_price
+
+            if filled_qty <= 0 or avg_price <= 0:
+                # 잔고에서 확인
+                try:
+                    asset = symbol.replace("KRW-", "")
+                    balance = await self.exchange.get_balance(asset)
+                    if balance and balance.total > 0:
+                        ticker = await self.exchange.get_ticker(symbol)
+                        filled_qty = balance.total
+                        avg_price = ticker.get("trade_price", 0) if ticker else 0
+                except Exception as e:
+                    logger.warning(f"Failed to get balance for {symbol}: {e}")
+
+            if filled_qty <= 0 or avg_price <= 0:
+                # v2.3: 미체결 주문 추적 (지정가인 경우)
+                if use_limit:
+                    order_id = result.order_id if hasattr(result, 'order_id') and result.order_id else f"DIP-{symbol}-{int(datetime.utcnow().timestamp())}"
+                    self.dip_scalper.add_pending_order(
+                        symbol=symbol,
+                        order_id=order_id,
+                        entry_price=signal.entry_price,
+                        quantity=order_quantity,
+                        signal=signal,
+                    )
+                    logger.info(
+                        "Dip order pending (limit order not filled yet)",
+                        symbol=symbol,
+                        entry_price=signal.entry_price,
+                        order_id=order_id,
+                    )
+                    # 주문 기록 (PENDING 상태)
+                    self.add_order(
+                        symbol=symbol,
+                        strategy="DIP_SCALPER",
+                        side="BUY",
+                        quantity=order_quantity,
+                        price=signal.entry_price,
+                        status="PENDING",
+                    )
+
+                    # Slack 알림 (미체결)
+                    await self._send_slack_notification(
+                        level=AlertLevel.INFO,
+                        title=f"급락 매수 주문: {symbol}",
+                        message=f"지정가 대기중\n급락: {signal.drop_pct:.1%}\n주문가: {signal.entry_price:,.0f}원",
+                    )
+                else:
+                    logger.warning("Dip order not filled (market order)", symbol=symbol)
+                return
+
+            logger.info(
+                "Dip order filled",
+                symbol=symbol,
+                filled_qty=filled_qty,
+                avg_price=avg_price,
+            )
+
+            # 포지션 추적 시작 (v2.1: bid_ratio 전달)
+            self.dip_scalper.track_position(
+                symbol=symbol,
+                entry_price=avg_price,
+                quantity=filled_qty,
+                bid_ratio=signal.bid_strength,  # v2.1: 동적 익절용
+            )
+
+            # 주문 기록
+            self.add_order(
+                symbol=symbol,
+                strategy="DIP_SCALPER",
+                side="BUY",
+                quantity=filled_qty,
+                price=avg_price,
+                status="FILLED",
+            )
+
+            # Slack 알림
+            await self._send_slack_notification(
+                level=AlertLevel.INFO,
+                title=f"급락 매수: {symbol}",
+                message=f"급락: {signal.drop_pct:.1%}\n진입가: {avg_price:,.0f}원\n수량: {filled_qty:.8f}",
+            )
+
+        except Exception as e:
+            logger.error("Dip signal execution error", symbol=signal.symbol, error=str(e))
+
+    async def _execute_dip_exit(self, symbol: str, pos, exit_result: dict, current_price: float) -> None:
+        """Dip Scalper 청산 실행"""
+        try:
+            exit_reason = exit_result.get("reason", "unknown")
+            exit_type = exit_result.get("exit_type", "unknown")
+            quantity = exit_result.get("quantity", pos.quantity)
+
+            logger.info(
+                "Executing Dip exit",
+                symbol=symbol,
+                reason=exit_reason,
+                exit_type=exit_type,
+                quantity=quantity,
+            )
+
+            # PAPER 모드 체크
+            if not self.mode_manager.should_execute_trades():
+                logger.info("PAPER mode - skipping Dip exit", symbol=symbol)
+                return
+
+            # 시장가 매도
+            result = await self.exchange.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                quantity=quantity,
+            )
+
+            if not result.success:
+                logger.error("Dip exit order failed", symbol=symbol, error=result.error)
+                return
+
+            # PnL 계산
+            exit_price = result.avg_price if result.avg_price > 0 else current_price
+            filled_qty = result.filled_qty if result.filled_qty > 0 else quantity
+            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+
+            logger.info(
+                "Dip position closed",
+                symbol=symbol,
+                exit_price=exit_price,
+                pnl_pct=f"{pnl_pct:.2%}",
+                exit_type=exit_type,
+            )
+
+            # 전략에서 포지션 제거
+            self.dip_scalper.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
+
+            # 주문 기록 (매도)
+            self.add_order(
+                symbol=symbol,
+                strategy="DIP_SCALPER",
+                side="SELL",
+                quantity=filled_qty,
+                price=exit_price,
+                status="FILLED",
+            )
+
+            # 이벤트 기록
+            self.add_event(
+                level="INFO",
+                event_type="DIP_SCALPER",
+                message=f"Dip exit: {symbol} {pnl_pct:.1%}",
+                details={
+                    "exit_type": exit_type,
+                    "exit_price": exit_price,
+                    "pnl_pct": pnl_pct,
+                },
+            )
+
+            # Slack 알림
+            emoji = "✅" if pnl_pct >= 0 else "❌"
+            await self._send_slack_notification(
+                level=AlertLevel.INFO if pnl_pct >= 0 else AlertLevel.WARNING,
+                title=f"{emoji} 급락 청산: {symbol}",
+                message=f"사유: {exit_reason}\nPnL: {pnl_pct:.2%}",
+            )
+
+        except Exception as e:
+            logger.error("Dip exit execution error", symbol=symbol, error=str(e))
+
+    async def _check_dip_pending_orders(self) -> None:
+        """v2.3: 미체결 Dip 주문 체결 확인"""
+        try:
+            pending_orders = self.dip_scalper.get_pending_orders()
+            if not pending_orders:
+                return
+
+            for symbol, order_info in list(pending_orders.items()):
+                try:
+                    # 잔고에서 체결 확인
+                    asset = symbol.replace("KRW-", "")
+                    balance = await self.exchange.get_balance(asset)
+
+                    if balance and balance.total > 0:
+                        # 체결됨! 포지션 추적 시작
+                        signal = order_info["signal"]
+                        filled_qty = balance.total
+                        avg_price = balance.avg_buy_price if balance.avg_buy_price > 0 else order_info["entry_price"]
+
+                        logger.info(
+                            "Dip pending order filled!",
+                            symbol=symbol,
+                            filled_qty=filled_qty,
+                            avg_price=avg_price,
+                        )
+
+                        # 포지션 추적 시작
+                        self.dip_scalper.track_position(
+                            symbol=symbol,
+                            entry_price=avg_price,
+                            quantity=filled_qty,
+                            bid_ratio=signal.bid_strength,
+                        )
+
+                        # 미체결에서 제거
+                        self.dip_scalper.remove_pending_order(symbol, reason="filled")
+
+                        # 주문 상태 업데이트 (PENDING -> FILLED)
+                        self.add_order(
+                            symbol=symbol,
+                            strategy="DIP_SCALPER",
+                            side="BUY",
+                            quantity=filled_qty,
+                            price=avg_price,
+                            status="FILLED",
+                        )
+
+                        # 이벤트 기록
+                        self.add_event(
+                            level="INFO",
+                            event_type="DIP_SCALPER",
+                            message=f"Pending order filled: {symbol}",
+                            details={
+                                "entry_price": avg_price,
+                                "quantity": filled_qty,
+                                "wait_time_sec": (datetime.utcnow() - order_info["placed_at"]).total_seconds(),
+                            },
+                        )
+
+                        # Slack 알림
+                        await self._send_slack_notification(
+                            level=AlertLevel.INFO,
+                            title=f"급락 매수 체결: {symbol}",
+                            message=f"대기 후 체결!\n진입가: {avg_price:,.0f}원\n수량: {filled_qty:.8f}",
+                        )
+                    else:
+                        # 미체결 상태 유지 - 타임아웃 체크 (5분)
+                        elapsed = (datetime.utcnow() - order_info["placed_at"]).total_seconds()
+                        if elapsed > 300:  # 5분 초과
+                            logger.warning(
+                                "Dip pending order timeout, cancelling",
+                                symbol=symbol,
+                                elapsed_sec=elapsed,
+                            )
+                            # 주문 취소 시도
+                            try:
+                                await self.exchange.cancel_order(symbol, order_info.get("order_id", ""))
+                            except Exception:
+                                pass
+                            self.dip_scalper.remove_pending_order(symbol, reason="timeout")
+
+                            self.add_event(
+                                level="WARNING",
+                                event_type="DIP_SCALPER",
+                                message=f"Pending order cancelled (timeout): {symbol}",
+                                details={"elapsed_sec": elapsed},
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Failed to check pending order for {symbol}: {e}")
+
+        except Exception as e:
+            logger.error("Check dip pending orders error", error=str(e))
+
+    async def _cleanup_stale_pending_orders(self) -> None:
+        """
+        v2.3: 미체결 주문 자동 정리
+
+        Upbit에서 3분 이상 미체결 상태인 주문을 자동 취소
+        """
+        if not self._is_upbit:
+            return
+
+        try:
+            # Upbit 미체결 주문 조회
+            open_orders = await self.exchange.get_open_orders()
+            if not open_orders:
+                return
+
+            now = datetime.utcnow()
+            cancelled_count = 0
+            max_pending_seconds = 180  # 3분
+
+            for order in open_orders:
+                try:
+                    order_id = order.get("uuid", "")
+                    symbol = order.get("market", "")
+                    created_at_str = order.get("created_at", "")
+                    side = order.get("side", "")
+                    price = float(order.get("price", 0) or 0)
+                    volume = float(order.get("volume", 0) or 0)
+                    remaining = float(order.get("remaining_volume", 0) or 0)
+
+                    if not order_id or not created_at_str:
+                        continue
+
+                    # 생성 시간 파싱 (ISO 8601)
+                    # Upbit: "2024-01-01T12:00:00+09:00"
+                    try:
+                        created_at = datetime.fromisoformat(created_at_str.replace("+09:00", ""))
+                    except Exception:
+                        continue
+
+                    elapsed_sec = (now - created_at).total_seconds()
+
+                    # 3분 초과 시 취소
+                    if elapsed_sec > max_pending_seconds:
+                        logger.warning(
+                            "Cancelling stale pending order",
+                            symbol=symbol,
+                            order_id=order_id,
+                            side=side,
+                            price=price,
+                            remaining=remaining,
+                            elapsed_sec=int(elapsed_sec),
+                        )
+
+                        # 주문 취소
+                        cancelled = await self.exchange.cancel_order(symbol, order_id)
+                        if cancelled:
+                            cancelled_count += 1
+
+                            # 이벤트 기록
+                            self.add_event(
+                                level="WARNING",
+                                event_type="ORDER_CLEANUP",
+                                message=f"Stale order cancelled: {symbol}",
+                                details={
+                                    "order_id": order_id,
+                                    "side": side,
+                                    "price": price,
+                                    "remaining_volume": remaining,
+                                    "elapsed_minutes": round(elapsed_sec / 60, 1),
+                                },
+                            )
+
+                            # Dip Scalper 미체결 추적에서도 제거
+                            if self.dip_scalper.has_pending_order(symbol):
+                                self.dip_scalper.remove_pending_order(symbol, reason="auto_cancelled")
+
+                except Exception as e:
+                    logger.warning(f"Failed to process pending order: {e}")
+
+            if cancelled_count > 0:
+                logger.info(
+                    "Stale pending orders cleaned up",
+                    cancelled_count=cancelled_count,
+                    total_pending=len(open_orders),
+                )
+
+        except Exception as e:
+            logger.error("Cleanup stale pending orders error", error=str(e))
+
+    async def _near_trigger_monitor_loop(self) -> None:
+        """
+        v2.3: 근접 종목 1초 모니터링 루프
+
+        급락 기준 75% 이상 근접한 종목을 1초마다 체크하여
+        기준 도달 시 즉시 시그널 발생
+        """
+        logger.info("Near-trigger monitor loop started")
+
+        while self._running:
+            try:
+                await asyncio.sleep(1)  # 1초 간격
+
+                if not self.dip_scalper._enabled:
+                    continue
+
+                near_symbols = self.dip_scalper.get_near_trigger_symbols()
+                if not near_symbols:
+                    continue
+
+                # 근접 종목들의 실시간 가격 체크
+                for symbol, info in near_symbols.items():
+                    try:
+                        # 현재 시세 조회
+                        ticker = await self.exchange.get_ticker(symbol)
+                        if not ticker:
+                            continue
+
+                        current_price = ticker.get("trade_price", 0)
+                        if current_price <= 0:
+                            continue
+
+                        # 이전 가격 대비 변화율 계산 (실시간)
+                        # 캔들 대신 마지막 추적 가격 사용
+                        last_price = info.get("price", current_price)
+                        if last_price <= 0:
+                            continue
+
+                        # 실시간 변화율 (추적 시작 가격 대비)
+                        realtime_change = (current_price - last_price) / last_price
+                        threshold = info.get("threshold", -0.02)
+
+                        # 급락 기준 도달 체크
+                        total_change = info.get("change", 0) + realtime_change
+                        if total_change <= threshold:
+                            logger.info(
+                                "Near-trigger symbol crossed threshold!",
+                                symbol=symbol,
+                                total_change=f"{total_change:.2%}",
+                                threshold=f"{threshold:.2%}",
+                                realtime_change=f"{realtime_change:.2%}",
+                            )
+
+                            # 즉시 시그널 생성 및 실행
+                            md = self._market_data.get(symbol, {})
+                            atr_pct = info.get("atr_pct", 0.02)
+
+                            # 호가창 데이터 조회
+                            orderbook = await self.exchange.get_orderbook(symbol)
+                            if orderbook:
+                                bid_volume = sum(b[1] for b in orderbook.get("bids", [])[:5])
+                                ask_volume = sum(a[1] for a in orderbook.get("asks", [])[:5])
+                            else:
+                                bid_volume = 0
+                                ask_volume = 0
+
+                            # 시그널 생성을 위한 데이터 구성
+                            market_data_item = {
+                                "symbol": symbol,
+                                "price": current_price,
+                                "change_1m": total_change if self.dip_scalper.candle_interval == 1 else md.get("change_1m", 0),
+                                "change_3m": total_change if self.dip_scalper.candle_interval == 3 else md.get("change_3m", 0),
+                                "atr_pct": atr_pct,
+                                "volume_24h_krw": md.get("volume_24h", 0),
+                                "rvol": md.get("rvol", 1.0),
+                                "bid_volume": bid_volume,
+                                "ask_volume": ask_volume,
+                            }
+
+                            # 시그널 스캔 (단일 종목)
+                            signals = self.dip_scalper.scan_for_dips([market_data_item])
+
+                            if signals:
+                                for sig in signals:
+                                    # 현재 자본금 조회
+                                    krw_balance = await self.exchange.get_balance("KRW")
+                                    current_equity = krw_balance.total if krw_balance else 0
+
+                                    await self._execute_dip_signal(sig, md, None, current_equity)
+
+                                    self.add_event(
+                                        level="INFO",
+                                        event_type="DIP_SCALPER",
+                                        message=f"Near-trigger executed: {symbol}",
+                                        details={
+                                            "total_change": total_change,
+                                            "threshold": threshold,
+                                            "trigger_mode": "1sec_monitor",
+                                        },
+                                    )
+
+                    except Exception as e:
+                        logger.debug(f"Near-trigger check error for {symbol}: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Near-trigger monitor loop error", error=str(e))
+                await asyncio.sleep(5)  # 에러 시 5초 대기
+
+        logger.info("Near-trigger monitor loop stopped")
 
     async def _execute_signal(self, signal, market_data: dict, risk_decision=None) -> None:
         """시그널 실행 - 실제 주문 발행 (Risk Overlay 적용)"""
@@ -2170,6 +2872,7 @@ class TradingEngine:
                     attack_level=metadata.get("attack_level", 0),
                     attack_score=metadata.get("attack_score", 0),
                     total_target_quantity=metadata.get("target_total_quantity", 0),
+                    overheat_score=metadata.get("overheat_score", 0),  # v5.2: 동적 청산용
                 )
             else:
                 # 2차/3차 트랜치: 기존 포지션 업데이트
@@ -4423,15 +5126,39 @@ class TradingEngine:
             # 2. Upbit 잔고 조회
             all_balances = await self.exchange.get_all_balances()
 
-            # 3. Satellite 전략에 포지션 동기화
-            synced = self.satellite_strategy.sync_positions_from_balances(
+            # 3. Satellite 전략에 포지션 동기화 + 매수 주문 기록
+            synced_positions = self.satellite_strategy.sync_positions_from_balances(
                 balances=all_balances,
                 market_data=self._market_data,
+                return_details=True,  # 상세 정보 반환
             )
+
+            # 4. 동기화된 포지션에 대해 매수 주문 기록 추가
+            for pos_info in synced_positions:
+                self.add_order(
+                    symbol=pos_info["symbol"],
+                    strategy="SATELLITE",
+                    side="BUY",
+                    quantity=pos_info["quantity"],
+                    price=pos_info["entry_price"],
+                    status="SYNCED",  # 동기화된 포지션 표시
+                )
+                self.add_event(
+                    level="INFO",
+                    event_type="SATELLITE",
+                    message=f"Satellite position synced: {pos_info['symbol']}",
+                    details={
+                        "source": "UPBIT_BALANCE",
+                        "entry_price": pos_info["entry_price"],
+                        "quantity": pos_info["quantity"],
+                        "current_price": pos_info.get("current_price", 0),
+                        "pnl_pct": pos_info.get("pnl_pct", 0),
+                    },
+                )
 
             logger.info(
                 "Satellite positions synced from Upbit",
-                synced_count=synced,
+                synced_count=len(synced_positions),
                 total_balances=len(all_balances),
             )
 

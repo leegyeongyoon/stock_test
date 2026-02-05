@@ -1644,3 +1644,130 @@ async def get_ignition_status():
             "max_position_pct_l3": getattr(settings, "ignition_max_position_pct_l3", 0.60),
         },
     }
+
+
+# ===== Dip Scalper (급락 스캘퍼) API =====
+
+
+@router.get("/dip-scalper/status")
+async def get_dip_scalper_status():
+    """Dip Scalper 상태 조회
+
+    Returns:
+        enabled: 활성화 여부
+        active_positions: 활성 포지션 수
+        settings: 설정 정보
+        stats: 통계 정보
+        positions: 포지션 목록
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="Dip Scalper is only available for Upbit",
+        )
+
+    from src.strategies.dip_scalper import get_dip_scalper
+
+    dip_scalper = get_dip_scalper()
+    return dip_scalper.get_status()
+
+
+@router.post("/dip-scalper/enable")
+async def enable_dip_scalper(enabled: bool = True):
+    """Dip Scalper 활성화/비활성화"""
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="Dip Scalper is only available for Upbit",
+        )
+
+    from src.strategies.dip_scalper import get_dip_scalper
+
+    dip_scalper = get_dip_scalper()
+    dip_scalper.set_enabled(enabled)
+
+    return {"success": True, "enabled": enabled}
+
+
+@router.get("/dip-scalper/candidates")
+async def get_dip_scalper_candidates(limit: int = 5):
+    """Dip Scalper 후보 종목 조회 (급락 근접 종목)
+
+    Returns:
+        candidates: 급락 근접 종목 리스트 (1분 변화율 기준 정렬)
+    """
+    engine = get_engine()
+    settings = get_settings()
+
+    if not settings.is_upbit:
+        raise HTTPException(
+            status_code=400,
+            detail="Dip Scalper is only available for Upbit",
+        )
+
+    from src.strategies.dip_scalper import get_dip_scalper
+
+    dip_scalper = get_dip_scalper()
+    candidates = []
+
+    # 엔진의 market_data에서 1분 변화율 기준으로 급락 종목 찾기
+    market_data = getattr(engine, "_market_data", {})
+
+    for symbol, md in market_data.items():
+        if not md or md.get("price", 0) <= 0:
+            continue
+
+        price = md.get("price", 0)
+        change_1m = md.get("change_1m", 0)
+        atr = md.get("atr", 0)
+        atr_pct = atr / price if price > 0 and atr > 0 else 0.02
+        volume_24h = md.get("volume_24h", 0)
+
+        # 거래대금 필터
+        if volume_24h < dip_scalper.min_volume_krw:
+            continue
+
+        # 급락 기준 계산
+        threshold = dip_scalper.calc_drop_threshold(atr_pct)
+
+        # 급락 근접도 계산 (threshold 대비 현재 변화율)
+        # change_1m이 음수이고 threshold도 음수이므로, 둘 다 음수일 때 proximity 계산
+        if threshold < 0 and change_1m < 0:
+            proximity = change_1m / threshold  # 1.0이면 정확히 기준 도달
+        elif change_1m < 0:
+            proximity = abs(change_1m) / abs(threshold) if threshold != 0 else 0
+        else:
+            proximity = 0  # 상승 중이면 proximity = 0
+
+        candidates.append({
+            "symbol": symbol,
+            "price": price,
+            "change_1m": change_1m,
+            "change_1m_pct": f"{change_1m * 100:.2f}%",
+            "atr_pct": atr_pct,
+            "threshold": threshold,
+            "threshold_pct": f"{threshold * 100:.1f}%",
+            "proximity": proximity,
+            "proximity_pct": f"{proximity * 100:.0f}%",
+            "volume_24h_krw": volume_24h,
+            "triggered": change_1m <= threshold,
+        })
+
+    # 1분 변화율 기준 정렬 (가장 많이 떨어진 것 먼저)
+    candidates.sort(key=lambda x: x["change_1m"])
+
+    return {
+        "candidates": candidates[:limit],
+        "total_scanned": len(market_data),
+        "settings": {
+            "min_drop_pct": f"{dip_scalper.min_drop_pct * 100:.1f}%",
+            "max_drop_pct": f"{dip_scalper.max_drop_pct * 100:.1f}%",
+            "atr_multiplier": dip_scalper.atr_multiplier,
+        }
+    }

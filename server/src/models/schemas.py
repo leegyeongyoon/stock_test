@@ -76,6 +76,10 @@ class EventType(str, Enum):
     SATELLITE_EXIT = "SATELLITE_EXIT"
     PULLBACK = "PULLBACK"
     FILTER = "FILTER"  # 필터링/차단 이벤트
+    SURGE = "SURGE"  # Surge 감지 이벤트
+    IGNITION = "IGNITION"  # Ignition 전략 이벤트
+    REBOUND = "REBOUND"  # Rebound 전략 이벤트
+    DIP_SCALPER = "DIP_SCALPER"  # 급락 스캘퍼 이벤트
 
 
 # === API 응답 스키마 ===

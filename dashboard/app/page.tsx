@@ -11,6 +11,7 @@ import EventsTimeline from '@/components/EventsTimeline'
 import SurgeCandidates from '@/components/SurgeCandidates'
 import AlgorithmMonitor from '@/components/AlgorithmMonitor'
 import ReboundMonitor from '@/components/ReboundMonitor'
+import DipScalperMonitor from '@/components/DipScalperMonitor'
 import { formatKRW } from '@/lib/currency'
 
 interface SurgeStatus {
@@ -333,18 +334,21 @@ export default function Dashboard() {
       {/* Attack 후보 (가로 스크롤 카드) */}
       <SurgeCandidates refreshInterval={3000} />
 
-      {/* Rebound 후보 + 필터 통계 */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Rebound Monitor - 3/4 width */}
-        <div className="lg:col-span-3">
-          <ReboundMonitor refreshInterval={3000} />
+      {/* 급락 스캘퍼 + Rebound 후보 */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Dip Scalper - 1/3 width */}
+        <div>
+          <DipScalperMonitor />
         </div>
 
-        {/* Algorithm Monitor (필터 통계) - 1/4 width */}
-        <div>
-          <AlgorithmMonitor refreshInterval={3000} />
+        {/* Rebound Monitor - 2/3 width */}
+        <div className="lg:col-span-2">
+          <ReboundMonitor refreshInterval={3000} />
         </div>
       </div>
+
+      {/* Algorithm Monitor (필터 통계) */}
+      <AlgorithmMonitor refreshInterval={3000} />
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -61,6 +61,7 @@ class AttackScoreResult:
     level: int  # 0, 1, 2, 3
     target_allocation: float  # 0.0, 0.10, 0.30, 0.50
     components: list[ScoreComponent]
+    overheat_score: float = 0.0  # v5.2: 과열 점수 (-15~0) - 청산 전략에 사용
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -69,6 +70,7 @@ class AttackScoreResult:
             "total_score": self.total_score,
             "level": self.level,
             "target_allocation": self.target_allocation,
+            "overheat_score": self.overheat_score,
             "components": [c.to_dict() for c in self.components],
             "timestamp": self.timestamp.isoformat(),
         }
@@ -205,12 +207,16 @@ class AttackScoreCalculator:
         level = self._determine_level(total_score)
         target_alloc = self._get_target_allocation(level)
 
+        # v5.2: raw_penalty를 청산 전략에서 사용 (진입 점수에는 0 반영)
+        raw_overheat = overheat_penalty.details.get("raw_penalty", 0)
+
         result = AttackScoreResult(
             symbol=symbol,
             total_score=total_score,
             level=level,
             target_allocation=target_alloc,
             components=components,
+            overheat_score=raw_overheat,  # v5.2: 청산 전략에서 사용 (진입 점수와 별개)
         )
 
         logger.debug(
@@ -458,37 +464,40 @@ class AttackScoreCalculator:
 
     def _calc_overheat_penalty(self, market_data: dict) -> ScoreComponent:
         """
-        Overheat Penalty (-15~0)
+        Overheat Penalty (v5.2: 진입 점수에서 제외, 청산에서만 사용)
 
-        과열 감점:
+        과열 정보 계산:
         - 전일 대비 급등 (+15% 이상)
         - 1시간 급등 (+10% 이상)
         - 과도한 RVOL (6배 이상)
+
+        v5.2 변경: 진입 점수에 0점 반환 (진입 안 막음)
+        단, raw_penalty 값은 청산 전략에서 동적 TP/SL에 사용
         """
         change_rate = market_data.get("change_rate", 0)
         change_1h = market_data.get("change_1h", 0)
         rvol = market_data.get("rvol", 1.0)
 
-        penalty = 0.0
+        raw_penalty = 0.0
         details = {
             "change_rate": change_rate,
             "change_1h": change_1h,
             "rvol": rvol,
         }
 
-        # v5.1: 전일 대비 과열 (강화: -0~15)
+        # 전일 대비 과열 (계산만, 점수 반영 안함)
         if change_rate >= 0.15:
-            penalty -= 15  # 기존 -8 → -15
+            raw_penalty -= 15
         elif change_rate >= 0.10:
-            penalty -= 12  # 기존 없음 → -12
+            raw_penalty -= 12
         elif change_rate >= 0.08:
-            penalty -= 8   # 기존 -5 → -8
+            raw_penalty -= 8
         elif change_rate >= 0.05:
-            penalty -= 5   # 기존 -3 → -5
+            raw_penalty -= 5
 
-        details["daily_penalty"] = penalty
+        details["daily_penalty"] = raw_penalty
 
-        # 1시간 급등 (-0~5)
+        # 1시간 급등
         hourly_penalty = 0
         if change_1h >= 0.10:
             hourly_penalty = -5
@@ -497,22 +506,25 @@ class AttackScoreCalculator:
         elif change_1h >= 0.05:
             hourly_penalty = -1
 
-        penalty += hourly_penalty
+        raw_penalty += hourly_penalty
         details["hourly_penalty"] = hourly_penalty
 
-        # 과도한 RVOL (-0~2)
+        # 과도한 RVOL
         rvol_penalty = 0
         if rvol >= 8.0:
             rvol_penalty = -2
         elif rvol >= 6.0:
             rvol_penalty = -1
 
-        penalty += rvol_penalty
+        raw_penalty += rvol_penalty
         details["rvol_penalty"] = rvol_penalty
+
+        # v5.2: raw_penalty는 저장하지만, 진입 점수는 0으로 반환
+        details["raw_penalty"] = max(-15, raw_penalty)  # 청산 전략에서 사용할 값
 
         return ScoreComponent(
             name="Overheat Penalty",
-            score=max(-15, penalty),
+            score=0,  # v5.2: 진입 점수에 반영 안함 (청산에서만 사용)
             max_score=0,
             details=details,
         )

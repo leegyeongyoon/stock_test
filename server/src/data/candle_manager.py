@@ -84,6 +84,7 @@ class CandleManager:
 
     # Kline intervals
     INTERVAL_1M = "1m"
+    INTERVAL_3M = "3m"
     INTERVAL_5M = "5m"
     INTERVAL_15M = "15m"
     INTERVAL_1H = "1h"

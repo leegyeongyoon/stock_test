@@ -453,6 +453,10 @@ class SatelliteStrategy(BaseStrategy):
         4. VOLATILE 감지 시 즉시 청산
         5. BTC 레짐 악화
         """
+        # Satellite 비활성화 시 청산도 안함
+        if not self._enabled:
+            return None
+
         # 레짐 업데이트
         self._check_regime_from_feature_engine()
 
@@ -642,7 +646,8 @@ class SatelliteStrategy(BaseStrategy):
         self,
         balances: list,
         market_data: dict,
-    ) -> int:
+        return_details: bool = False,
+    ) -> int | list[dict]:
         """
         Upbit 잔고에서 기존 포지션 동기화
 
@@ -651,11 +656,17 @@ class SatelliteStrategy(BaseStrategy):
         Args:
             balances: BalanceInfo 리스트 (Upbit 잔고)
             market_data: 현재 시세 정보
+            return_details: True면 동기화된 포지션 상세 정보 리스트 반환
 
         Returns:
-            동기화된 포지션 수
+            동기화된 포지션 수 또는 상세 정보 리스트
         """
-        synced_count = 0
+        # Satellite 비활성화 시 동기화 안함
+        if not self._enabled:
+            logger.info("Satellite disabled, skipping position sync")
+            return [] if return_details else 0
+
+        synced_positions = []
 
         for balance in balances:
             if balance.asset == "KRW" or balance.total <= 0:
@@ -693,6 +704,15 @@ class SatelliteStrategy(BaseStrategy):
                 trailing_active=trailing_active,
             )
 
+            # 동기화된 포지션 정보 저장
+            synced_positions.append({
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "quantity": balance.total,
+                "current_price": current_price,
+                "pnl_pct": pnl_pct,
+            })
+
             logger.info(
                 "Synced position from Upbit balance",
                 symbol=symbol,
@@ -703,16 +723,14 @@ class SatelliteStrategy(BaseStrategy):
                 trailing_active=trailing_active,
             )
 
-            synced_count += 1
-
-        if synced_count > 0:
+        if synced_positions:
             logger.info(
                 "Position sync completed",
-                synced_count=synced_count,
+                synced_count=len(synced_positions),
                 total_positions=len(self._active_positions),
             )
 
-        return synced_count
+        return synced_positions if return_details else len(synced_positions)
 
     def get_positions_for_liquidation(
         self,
