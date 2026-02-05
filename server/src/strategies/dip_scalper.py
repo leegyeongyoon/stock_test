@@ -1,5 +1,5 @@
 """
-Dip Scalper Strategy v2.3
+Dip Scalper Strategy v2.4
 
 핵심 철학:
 - "1분봉에서 급락한 종목 즉시 매수"
@@ -21,16 +21,20 @@ v2.3 급등주 필터 (펌프 앤 덤프 방지):
 - 급등 후 급락은 바닥 모름, 연속 폭락 가능
 - "급락 스캘핑"이 아닌 "펌프 앤 덤프 희생양" 방지
 
-청산:
-- TP: +0.8% (기본)
-- SL: -1.2% (기본)
-- 타임스톱: 10분
+v2.4 스마트 청산 (TP 도달 후 행동):
+- TP 0.8% 도달 시 즉시 매도 안함
+- 1~2분간 횡보(±0.2%) → 약한 반등 → 즉시 매도
+- 2분 내 +3% 이상 급등 → 강한 반등 → 트레일링 스톱 (최고가 대비 -0.5%)
+- TP 도달 후 2분 경과 → 무조건 매도
+- SL: -1.2% (고정)
+- 타임스톱: 10분 (고정)
 
 특징:
 - 복잡한 점수 시스템 없음
 - ATR 기반 동적 임계값
 - 금액 기준 지정가 매수
 - 펌프 앤 덤프 회피
+- 스마트 청산 (약한 반등 빠른 탈출 vs 강한 반등 큰 수익)
 """
 
 from dataclasses import dataclass, field
@@ -98,6 +102,9 @@ class DipPosition:
     take_profit: float
     highest_price: float
     bid_ratio: float = 0.5  # v2.1: 호가창 매수벽 비율 (동적 익절에 사용)
+    # v2.4: 스마트 청산용
+    tp_reached_time: Optional[datetime] = None  # TP 도달 시각
+    tp_reached_price: float = 0.0  # TP 도달 시 가격
 
     def to_dict(self) -> dict:
         pnl_pct = (self.highest_price - self.entry_price) / self.entry_price if self.entry_price > 0 else 0
@@ -209,6 +216,14 @@ class DipScalperStrategy:
         self.take_profit_pct = getattr(settings, "dip_take_profit_pct", 0.008)  # +0.8%
         self.stop_loss_pct = getattr(settings, "dip_stop_loss_pct", -0.012)  # -1.2%
         self.time_stop_minutes = getattr(settings, "dip_time_stop_minutes", 10)  # 10분
+
+        # v2.4: 스마트 청산 (TP 도달 후 행동)
+        self.tp_sideways_check_min = getattr(settings, "dip_tp_sideways_check_min", 1)  # 1분 후부터 횡보 체크
+        self.tp_sideways_check_max = getattr(settings, "dip_tp_sideways_check_max", 2)  # 2분까지 횡보 체크
+        self.sideways_threshold = getattr(settings, "dip_sideways_threshold", 0.002)  # ±0.2% 범위
+        self.surge_time_limit = getattr(settings, "dip_surge_time_limit", 2)  # 2분 이내
+        self.surge_threshold = getattr(settings, "dip_surge_threshold", 0.03)  # +3% 이상
+        self.trailing_stop_pct = getattr(settings, "dip_trailing_stop_pct", 0.005)  # 최고가 대비 -0.5%
 
         # 쿨다운
         self.cooldown_minutes = getattr(settings, "dip_cooldown_minutes", 5)
@@ -566,12 +581,11 @@ class DipScalperStrategy:
         symbol: str,
         entry_price: float,
         quantity: float,
-        bid_ratio: float = 0.5,  # v2.1: 동적 익절용
+        bid_ratio: float = 0.5,  # 유지 (호환성)
     ) -> None:
-        """포지션 추적 시작"""
-        # v2.1: bid_ratio에 따라 동적 TP 계산
-        dynamic_tp_pct = self._get_dynamic_tp(bid_ratio)
-        take_profit = entry_price * (1 + dynamic_tp_pct)
+        """포지션 추적 시작 (v2.4: 고정 TP + 스마트 청산)"""
+        # v2.4: 고정 TP 사용 (스마트 청산으로 전환)
+        take_profit = entry_price * (1 + self.take_profit_pct)
         stop_loss = entry_price * (1 + self.stop_loss_pct)
 
         self._active_positions[symbol] = DipPosition(
@@ -583,20 +597,22 @@ class DipScalperStrategy:
             take_profit=take_profit,
             highest_price=entry_price,
             bid_ratio=bid_ratio,
+            tp_reached_time=None,  # v2.4: 스마트 청산용
+            tp_reached_price=0.0,
         )
 
         self._pending_signals.pop(symbol, None)
         self._stats["total_trades"] += 1
 
         logger.info(
-            "Dip position tracked (v2.1 dynamic TP)",
+            "Dip position tracked (v2.4 smart exit)",
             symbol=symbol,
             entry_price=entry_price,
             quantity=quantity,
             tp=take_profit,
-            tp_pct=f"{dynamic_tp_pct:.2%}",
+            tp_pct=f"{self.take_profit_pct:.2%}",
             sl=stop_loss,
-            bid_ratio=f"{bid_ratio:.0%}",
+            sl_pct=f"{self.stop_loss_pct:.2%}",
         )
 
     def _get_dynamic_tp(self, bid_ratio: float) -> float:
@@ -616,7 +632,7 @@ class DipScalperStrategy:
 
     def should_exit(self, symbol: str, current_price: float) -> Optional[dict]:
         """
-        청산 조건 확인
+        청산 조건 확인 (v2.4 스마트 청산)
 
         Returns:
             dict: {"action": "FULL", "reason": str, "quantity": float, "exit_type": str}
@@ -635,7 +651,7 @@ class DipScalperStrategy:
 
         pnl_pct = (current_price - pos.entry_price) / pos.entry_price
 
-        # 1. 손절
+        # 1. 손절 (-1.2%)
         if current_price <= pos.stop_loss:
             return {
                 "action": "FULL",
@@ -644,21 +660,79 @@ class DipScalperStrategy:
                 "exit_type": "stop_loss",
             }
 
-        # 2. 익절
+        # 2. TP 도달 체크 (+0.8%)
         if current_price >= pos.take_profit:
-            return {
-                "action": "FULL",
-                "reason": f"Take profit: {pnl_pct:.2%}",
-                "quantity": pos.quantity,
-                "exit_type": "take_profit",
-            }
 
-        # 3. 타임스톱
-        elapsed = datetime.utcnow() - pos.entry_time
-        if elapsed > timedelta(minutes=self.time_stop_minutes):
+            # 첫 TP 도달 시 기록
+            if pos.tp_reached_time is None:
+                pos.tp_reached_time = datetime.utcnow()
+                pos.tp_reached_price = current_price
+                logger.info(
+                    "TP reached - monitoring for surge/sideways",
+                    symbol=symbol,
+                    price=current_price,
+                    pnl_pct=f"{pnl_pct:.2%}",
+                )
+                return None  # 아직 매도 안함
+
+            # TP 도달 후 경과 시간
+            elapsed_since_tp = datetime.utcnow() - pos.tp_reached_time
+
+            # 2-1. 빠른 급등 감지 (2분 내 +3% 이상)
+            if elapsed_since_tp < timedelta(minutes=self.surge_time_limit):
+
+                if pnl_pct >= self.surge_threshold:  # +3% 이상
+                    # 트레일링 스톱으로 전환
+                    trailing_stop_price = pos.highest_price * (1 - self.trailing_stop_pct)
+
+                    if current_price <= trailing_stop_price:
+                        return {
+                            "action": "FULL",
+                            "reason": f"Trailing stop after surge: {pnl_pct:.2%} (peak: {(pos.highest_price - pos.entry_price) / pos.entry_price:.2%})",
+                            "quantity": pos.quantity,
+                            "exit_type": "trailing_stop_surge",
+                        }
+
+                    logger.debug(
+                        "Surge detected - trailing stop active",
+                        symbol=symbol,
+                        current_pnl=f"{pnl_pct:.2%}",
+                        highest_pnl=f"{(pos.highest_price - pos.entry_price) / pos.entry_price:.2%}",
+                        trailing_stop=trailing_stop_price,
+                    )
+                    return None  # 계속 홀드
+
+            # 2-2. 횡보 감지 (TP 도달 후 1~2분간 ±0.2% 이내)
+            if timedelta(minutes=self.tp_sideways_check_min) <= elapsed_since_tp <= timedelta(minutes=self.tp_sideways_check_max):
+                # 횡보 판단: TP 도달 시 가격 ± 0.2%
+                sideways_range = pos.tp_reached_price * self.sideways_threshold
+                lower_bound = pos.tp_reached_price - sideways_range
+                upper_bound = pos.tp_reached_price + sideways_range
+
+                if lower_bound <= current_price <= upper_bound:
+                    # 횡보 확인 → 즉시 매도
+                    return {
+                        "action": "FULL",
+                        "reason": f"TP + sideways (weak momentum): {pnl_pct:.2%}",
+                        "quantity": pos.quantity,
+                        "exit_type": "take_profit_sideways",
+                    }
+
+            # 2-3. TP 도달 후 2분 경과 → 무조건 매도
+            if elapsed_since_tp >= timedelta(minutes=self.tp_sideways_check_max):
+                return {
+                    "action": "FULL",
+                    "reason": f"TP + timeout: {pnl_pct:.2%}",
+                    "quantity": pos.quantity,
+                    "exit_type": "take_profit_timeout",
+                }
+
+        # 3. 타임스톱 (10분)
+        total_elapsed = datetime.utcnow() - pos.entry_time
+        if total_elapsed > timedelta(minutes=self.time_stop_minutes):
             return {
                 "action": "FULL",
-                "reason": f"Time stop: {elapsed.total_seconds()/60:.1f}min, PnL: {pnl_pct:.2%}",
+                "reason": f"Time stop: {total_elapsed.total_seconds()/60:.1f}min, PnL: {pnl_pct:.2%}",
                 "quantity": pos.quantity,
                 "exit_type": "time_stop",
             }
