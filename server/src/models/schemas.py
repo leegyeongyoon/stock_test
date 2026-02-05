@@ -19,12 +19,14 @@ class OrderStatus(str, Enum):
     """주문 상태 머신"""
 
     NEW = "NEW"  # 생성됨
+    PENDING = "PENDING"  # 미체결 (지정가 주문 대기 중)
     SENT = "SENT"  # 거래소 전송됨
     ACK = "ACK"  # 거래소 응답 받음
     PARTIAL = "PARTIAL"  # 부분 체결
     FILLED = "FILLED"  # 완전 체결
     CANCELED = "CANCELED"  # 취소됨
     REJECTED = "REJECTED"  # 거부됨
+    SYNCED = "SYNCED"  # 동기화됨 (서버 재시작 시 복구)
 
 
 class OrderSide(str, Enum):
