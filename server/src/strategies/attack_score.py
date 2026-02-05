@@ -2,19 +2,24 @@
 
 급등주 공격 점수 계산기
 
-Attack Score 구성 (0~100점) - v5.1 업데이트:
+Attack Score 구성 (0~100점) - v5.4 업데이트:
 - Breakout Strength (0~25): 고점 돌파 강도
 - Volume Expansion (0~25): RVOL, 거래대금 증가
 - Trend Context (0~15): 1h 추세, SMA 위치
 - Orderbook Quality (0~10): 스프레드, 깊이
 - Overheat Penalty (-15~0): 과열 감점
 - Candle Surge Bonus (0~30): 분봉 급등 트리거
-  - 1분봉 +7% & RVOL 3x → +30점
-  - 5분봉 +4% & RVOL 2x → +20점
+  - 1분봉 +5% & RVOL 3x → +30점 (v5.4: 7%→5% 완화)
+  - 5분봉 +3% & RVOL 2x → +20점 (v5.4: 4%→3% 완화)
+
+v5.4 변경사항:
+- Candle Surge 임계값 완화: 조기 진입 기회 확대
+  → 1분봉 7%→5%, 5분봉 4%→3%
+- Anti-Chase Gate 상향: 20%→30% (급등주 진입 허용 범위 확대)
 
 v5.1 변경사항:
 - Candle Surge 감지 시 Anti-Chase Gate 우회
-  → 급등 시작 순간에는 일일 +20% 넘어도 진입 허용
+  → 급등 시작 순간에는 일일 +30% 넘어도 진입 허용
 - Candle Surge를 먼저 체크하여 급등 감지 후 Anti-Chase 판단
 
 v5.0 변경사항:
@@ -531,10 +536,10 @@ class AttackScoreCalculator:
 
     def _calc_candle_surge_bonus(self, market_data: dict) -> ScoreComponent:
         """
-        v5.0: 분봉 급등 보너스 (0~30)
+        v5.4: 분봉 급등 보너스 (0~30) - 임계값 완화
 
-        조건1: 1분봉 극단 급등 (+7%, RVOL 3x) → +30점
-        조건2: 5분봉 급등 (+4%, RVOL 2x) → +20점
+        조건1: 1분봉 극단 급등 (+5%, RVOL 3x) → +30점 (v5.4: 7%→5%)
+        조건2: 5분봉 급등 (+3%, RVOL 2x) → +20점 (v5.4: 4%→3%)
 
         급등 시작을 더 빨리 감지하기 위한 트리거
         """
@@ -555,9 +560,9 @@ class AttackScoreCalculator:
         details["rvol_5m"] = rvol_5m
 
         # 임계값 (config에서)
-        threshold_1m_change = settings.candle_surge_1m_change  # 0.07
+        threshold_1m_change = settings.candle_surge_1m_change  # 0.05 (v5.4: 7%→5%)
         threshold_1m_rvol = settings.candle_surge_1m_rvol  # 3.0
-        threshold_5m_change = settings.candle_surge_5m_change  # 0.04
+        threshold_5m_change = settings.candle_surge_5m_change  # 0.03 (v5.4: 4%→3%)
         threshold_5m_rvol = settings.candle_surge_5m_rvol  # 2.0
 
         bonus_1m = settings.candle_surge_bonus_1m  # 30

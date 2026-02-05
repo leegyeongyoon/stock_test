@@ -317,22 +317,22 @@ class Settings(BaseSettings):
 
     # === v5.0 Anti-Chase Gate 완화 ===
     anti_chase_gate_threshold: float = Field(
-        default=0.20,
-        description="Anti-Chase Gate 임계값 (일일 +20% 이상이면 차단) - v5.0: 10%→20% 완화",
+        default=0.30,
+        description="Anti-Chase Gate 임계값 (일일 +30% 이상이면 차단) - v5.4: 20%→30% 완화",
     )
 
     # === v5.0 분봉 급등 듀얼 트리거 ===
     candle_surge_1m_change: float = Field(
-        default=0.07,
-        description="1분봉 극단 급등 임계값 (7%)",
+        default=0.05,
+        description="1분봉 극단 급등 임계값 (5%) - v5.4: 7%→5% 완화",
     )
     candle_surge_1m_rvol: float = Field(
         default=3.0,
         description="1분봉 RVOL 임계값 (3배)",
     )
     candle_surge_5m_change: float = Field(
-        default=0.04,
-        description="5분봉 급등 임계값 (4%)",
+        default=0.03,
+        description="5분봉 급등 임계값 (3%) - v5.4: 4%→3% 완화",
     )
     candle_surge_5m_rvol: float = Field(
         default=2.0,
