@@ -7,20 +7,20 @@ interface Props {
   refreshInterval?: number  // ms
 }
 
-// 점수별 배지 색상
+// 점수별 배지 색상 (v5.4: L3=85, L2=70, L1=50)
 function getScoreBadgeClass(score: number): string {
-  if (score >= 80) return 'bg-green-600 text-white'
-  if (score >= 70) return 'bg-yellow-500 text-black'
-  if (score >= 50) return 'bg-orange-500 text-white'
-  return 'bg-slate-600 text-slate-300'
+  if (score >= 85) return 'bg-green-600 text-white'        // L3 진입 가능
+  if (score >= 70) return 'bg-yellow-500 text-black'       // L2 진입 가능
+  if (score >= 50) return 'bg-orange-500 text-white'       // L1 진입 가능
+  return 'bg-slate-600 text-slate-300'                     // 진입 불가
 }
 
-// 점수별 텍스트 색상
+// 점수별 텍스트 색상 (v5.4: L3=85, L2=70, L1=50)
 function getScoreTextClass(score: number): string {
-  if (score >= 80) return 'text-green-400'
-  if (score >= 70) return 'text-yellow-400'
-  if (score >= 50) return 'text-orange-400'
-  return 'text-slate-400'
+  if (score >= 85) return 'text-green-400'                 // L3
+  if (score >= 70) return 'text-yellow-400'                // L2
+  if (score >= 50) return 'text-orange-400'                // L1
+  return 'text-slate-400'                                  // 진입 불가
 }
 
 // 후보 카드 컴포넌트

@@ -70,12 +70,12 @@ function getScoreExplanation(name: string, score: number, maxScore: number, deta
   }
 }
 
-// 점수별 배경색
+// 점수별 배경색 (v5.4: L3=85, L2=70, L1=50)
 function getScoreBgClass(score: number): string {
-  if (score >= 80) return 'bg-green-600 text-white'
-  if (score >= 70) return 'bg-yellow-500 text-black'
-  if (score >= 50) return 'bg-orange-500 text-white'
-  return 'bg-slate-600 text-slate-300'
+  if (score >= 85) return 'bg-green-600 text-white'        // L3 진입 가능
+  if (score >= 70) return 'bg-yellow-500 text-black'       // L2 진입 가능
+  if (score >= 50) return 'bg-orange-500 text-white'       // L1 진입 가능
+  return 'bg-slate-600 text-slate-300'                     // 진입 불가
 }
 
 // 후보 카드 (항상 펼쳐진 상태)
