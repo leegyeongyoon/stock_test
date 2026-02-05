@@ -567,9 +567,14 @@ class TradingEngine:
 
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 can_open = self.risk_engine.can_open_position
+                print(f"[DEBUG] can_open={can_open}, type={type(can_open)}", flush=True)
+                logger.info(f"[CAN_OPEN CHECK] can_open_position={can_open}, mode={self.risk_engine.mode}, mode_manager={self.risk_engine.mode_manager.mode}")
                 if not can_open:
-                    logger.debug(f"Strategy execution skipped: can_open_position={can_open}, mode={self.risk_engine.mode}")
+                    print(f"[DEBUG] Strategy skipped, can_open is False", flush=True)
+                    logger.info(f"Strategy execution skipped: can_open_position={can_open}")
                 if can_open:
+                    print(f"[DEBUG] Calling _execute_strategies()", flush=True)
+                    logger.info("[CAN_OPEN CHECK] Calling _execute_strategies()")
                     await self._execute_strategies()
 
                 # 4. 포지션 관리 (SAFE 모드에서도 실행)
@@ -1088,6 +1093,8 @@ class TradingEngine:
 
     async def _execute_strategies(self) -> None:
         """전략 실행 (우선순위 체인 적용)"""
+        print("[DEBUG] Inside _execute_strategies() start", flush=True)
+        logger.info("[STRATEGY EXECUTION] _execute_strategies() called")
         try:
             # === 우선순위 1-3: Risk Overlay 평가 ===
             # 현재 자산 조회
@@ -1213,9 +1220,15 @@ class TradingEngine:
 
             # === v4.2 Rebound Scalper 전략 (반등 스캘핑) - Upbit 전용 ===
             # Note: Rebound는 Satellite/Pullback과 독립적으로 운영됨
+            print(f"[DEBUG] REBOUND CHECK: is_upbit={self._is_upbit}, strategy={self.rebound_strategy is not None}", flush=True)
+            logger.info(f"[REBOUND CHECK] is_upbit={self._is_upbit}, strategy={self.rebound_strategy is not None}, enabled={self.rebound_strategy.is_enabled() if self.rebound_strategy else False}, mode={settings.rebound_mode}")
             if self._is_upbit and self.rebound_strategy and self.rebound_strategy.is_enabled():
+                print(f"[DEBUG] REBOUND conditions met, checking risk_decision", flush=True)
                 rebound_allowed = risk_decision.mode not in [RiskMode.HALT]
+                logger.info(f"[REBOUND] rebound_allowed={rebound_allowed}, risk_mode={risk_decision.mode}")
                 if rebound_allowed:
+                    print(f"[DEBUG] REBOUND scan starting...", flush=True)
+                    logger.info("[REBOUND] Starting scan...")
                     # Pre-filtering: 후보 심볼 축소
                     candidates = self._prefilter_symbols_for_rebound(self._market_data)
                     logger.debug(f"Rebound candidates: {len(candidates)} symbols (pre-filtered)")
@@ -1245,9 +1258,11 @@ class TradingEngine:
                         symbols=candidates,
                         market_data_map=enhanced_market_data,
                     )
+                    logger.info(f"[REBOUND] Scan complete: {len(rebound_signals)} signals found")
 
                     # 시그널 실행
                     for signal in rebound_signals:
+                        logger.info(f"[REBOUND] Executing signal: {signal.symbol} (score={signal.score})")
                         await self._execute_rebound_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
 
             # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
@@ -1941,6 +1956,48 @@ class TradingEngine:
                     cancelled_count=cancelled_count,
                     total_pending=len(open_orders),
                 )
+
+            # v5.5: DB 유령 주문 정리 (exchange_order_id가 null인 오래된 PENDING 주문)
+            try:
+                from src.models.database import async_session, OrderModel
+                from sqlalchemy import select, and_
+
+                async with async_session() as session:
+                    # exchange_order_id가 null이고 PENDING 상태인 주문 조회
+                    stmt = select(OrderModel).where(
+                        and_(
+                            OrderModel.status == OrderStatus.PENDING,
+                            OrderModel.exchange_order_id == None,
+                        )
+                    )
+                    result = await session.execute(stmt)
+                    ghost_orders = result.scalars().all()
+
+                    ghost_cleaned = 0
+                    for order in ghost_orders:
+                        elapsed_sec = (now - order.created_at).total_seconds()
+
+                        # 3분 이상 경과한 유령 주문만 취소
+                        if elapsed_sec > max_pending_seconds:
+                            logger.warning(
+                                "Cancelling ghost order (no exchange_order_id)",
+                                symbol=order.symbol,
+                                strategy=order.strategy.value,
+                                elapsed_sec=int(elapsed_sec),
+                            )
+                            order.status = OrderStatus.CANCELED
+                            order.updated_at = now
+                            ghost_cleaned += 1
+
+                    if ghost_cleaned > 0:
+                        await session.commit()
+                        logger.info(
+                            "Ghost orders cleaned up",
+                            ghost_cleaned=ghost_cleaned,
+                        )
+
+            except Exception as e:
+                logger.warning("Ghost order cleanup failed", error=str(e))
 
         except Exception as e:
             logger.error("Cleanup stale pending orders error", error=str(e))
