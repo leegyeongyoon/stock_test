@@ -189,6 +189,7 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
   const [loading, setLoading] = useState(externalLoading ?? true)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [entryThreshold, setEntryThreshold] = useState<number>(50)
 
   useEffect(() => {
     if (externalCandidates !== undefined) {
@@ -201,6 +202,7 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
       try {
         const response = await api.getMonitoringCandidates(5, 0)
         setCandidates(response.attack_candidates)
+        setEntryThreshold(response.entry_threshold)
         setLastUpdated(new Date())
         setError(null)
       } catch (err) {
@@ -248,7 +250,7 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold text-white">🎯 Attack 후보 종목</h2>
           <span className="px-2 py-0.5 text-xs bg-slate-700 text-slate-300 rounded">
-            진입: 80점+
+            진입: {entryThreshold}점+
           </span>
           <span className="text-green-400 text-xs">✓ {entryReady.length}개</span>
           <span className="text-slate-400 text-xs">👀 {watching.length}개</span>
@@ -275,7 +277,7 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
       {/* 하단 안내 */}
       <div className="mt-4 pt-3 border-t border-slate-700">
         <div className="text-xs text-slate-500">
-          <span className="text-yellow-400">⚡ 급등 보너스 조건</span>: 1분봉 +7% & RVOL 3배 또는 5분봉 +4% & RVOL 2배 시 발동 (최대 30점)
+          <span className="text-yellow-400">⚡ 급등 보너스 조건</span>: 1분봉 +5% & RVOL 3배 또는 5분봉 +3% & RVOL 2배 시 발동 (최대 30점) - v5.4 완화
         </div>
       </div>
     </div>

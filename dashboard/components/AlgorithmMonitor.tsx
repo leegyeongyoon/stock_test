@@ -161,7 +161,7 @@ export default function AlgorithmMonitor({ refreshInterval = 3000 }: Props) {
           Attack 후보 Top 5
         </h2>
         <div className="text-xs text-slate-500">
-          진입: {data?.entry_threshold || 80}점
+          진입: {data?.entry_threshold || 50}점
         </div>
       </div>
 
