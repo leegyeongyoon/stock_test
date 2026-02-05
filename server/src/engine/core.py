@@ -1517,6 +1517,9 @@ class TradingEngine:
                 quantity=order_quantity,
             )
 
+            # 중복 매수 방지: 주문 전에 pending_signals에 추가
+            self.dip_scalper._pending_signals[symbol] = signal
+
             # v2.3: 지정가 또는 시장가 매수
             # 지정가 = 임계값 가격 (예: -2.4% 레벨)
             # 현재가가 임계값 아래이면 지정가로 주문해도 즉시 체결됨
@@ -1639,6 +1642,8 @@ class TradingEngine:
 
         except Exception as e:
             logger.error("Dip signal execution error", symbol=signal.symbol, error=str(e))
+            # 주문 실패 시 pending_signals에서 제거
+            self.dip_scalper._pending_signals.pop(symbol, None)
 
     async def _execute_dip_exit(self, symbol: str, pos, exit_result: dict, current_price: float) -> None:
         """Dip Scalper 청산 실행"""
@@ -5315,15 +5320,22 @@ class TradingEngine:
                 try:
                     if strategy == StrategyType.DIP_SCALPER and self.dip_scalper:
                         # DIP_SCALPER 포지션 복구
+                        logger.info(
+                            "🔄 Restoring DIP_SCALPER position",
+                            symbol=symbol,
+                            db_quantity=position.quantity,
+                            upbit_quantity=balance.total,
+                            entry_price=position.avg_price,
+                        )
                         self.dip_scalper.track_position(
                             symbol=symbol,
                             entry_price=position.avg_price,
-                            quantity=balance.total,
+                            quantity=balance.total,  # Upbit 실제 잔고 사용
                             bid_ratio=0.5,  # 기본값
                         )
                         logger.info(
-                            f"Restored DIP_SCALPER position: {symbol}",
-                            entry_price=position.avg_price,
+                            "✅ DIP_SCALPER position restored",
+                            symbol=symbol,
                             quantity=balance.total,
                         )
 
@@ -5338,18 +5350,70 @@ class TradingEngine:
                             logger.info(f"Restored SATELLITE position: {symbol}")
 
                     elif strategy == StrategyType.ATTACK and self.attack_strategy:
-                        # ATTACK 포지션은 현재 상태 추적 기능이 제한적이므로 로깅만
+                        # ATTACK 포지션 복구
                         logger.info(
-                            f"ATTACK position detected: {symbol} - manual monitoring required",
+                            "🔄 Restoring ATTACK position",
+                            symbol=symbol,
+                            db_quantity=position.quantity,
+                            upbit_quantity=balance.total,
                             entry_price=position.avg_price,
+                        )
+                        # DB에 stop_price 저장되어 있으면 사용, 없으면 기본 3% 손절
+                        stop_price = position.stop_price if position.stop_price else position.avg_price * 0.97
+                        stop_distance_pct = abs((stop_price - position.avg_price) / position.avg_price)
+
+                        self.attack_strategy.track_position(
+                            symbol=symbol,
+                            entry_price=position.avg_price,
+                            quantity=balance.total,  # Upbit 실제 잔고 사용
+                            stop_price=stop_price,
+                            stop_distance_pct=stop_distance_pct,
+                        )
+                        logger.info(
+                            "✅ ATTACK position restored",
+                            symbol=symbol,
+                            quantity=balance.total,
+                            stop_price=stop_price,
+                        )
+
+                    elif strategy == StrategyType.PULLBACK and self.pullback_strategy:
+                        # PULLBACK 포지션 복구
+                        logger.info(
+                            "🔄 Restoring PULLBACK position",
+                            symbol=symbol,
+                            db_quantity=position.quantity,
+                            upbit_quantity=balance.total,
+                            entry_price=position.avg_price,
+                        )
+                        self.pullback_strategy.track_position(
+                            symbol=symbol,
+                            entry_price=position.avg_price,
+                            quantity=balance.total,  # Upbit 실제 잔고 사용
+                        )
+                        logger.info(
+                            "✅ PULLBACK position restored",
+                            symbol=symbol,
                             quantity=balance.total,
                         )
 
                     elif strategy == StrategyType.REBOUND and self.rebound_strategy:
-                        # REBOUND 포지션도 로깅 (추후 track_position 구현 가능)
+                        # REBOUND 포지션 복구
                         logger.info(
-                            f"REBOUND position detected: {symbol} - manual monitoring required",
+                            "🔄 Restoring REBOUND position",
+                            symbol=symbol,
+                            db_quantity=position.quantity,
+                            upbit_quantity=balance.total,
                             entry_price=position.avg_price,
+                            current_price=current_price,
+                        )
+                        self.rebound_strategy.track_position(
+                            symbol=symbol,
+                            entry_price=position.avg_price,
+                            quantity=balance.total,  # Upbit 실제 잔고 사용
+                        )
+                        logger.info(
+                            "✅ REBOUND position restored",
+                            symbol=symbol,
                             quantity=balance.total,
                         )
 

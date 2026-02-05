@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
         await engine.start()
         logger.info("Trading engine started")
     except Exception as e:
-        logger.error("Failed to start engine", error=str(e))
+        logger.error("Failed to start engine", error=str(e), exc_info=True)
         # 엔진 시작 실패해도 API는 동작하도록
         engine.add_event(
             level="CRITICAL",

@@ -404,8 +404,10 @@ class DipScalperStrategy:
             if price <= 0:
                 continue
 
-            # 이미 포지션 있으면 스킵
+            # 이미 포지션 있거나 시그널 대기 중이면 스킵 (중복 방지)
             if symbol in self._active_positions:
+                continue
+            if symbol in self._pending_signals:
                 continue
 
             # 쿨다운 체크
@@ -456,6 +458,8 @@ class DipScalperStrategy:
                     bid_strength=bid_ratio,
                 )
                 if signal:
+                    # 중복 방지: 시그널 생성 즉시 pending에 추가 (race condition 방지)
+                    self._pending_signals[symbol] = signal
                     signals.append(signal)
                     self._stats["total_signals"] += 1
 
