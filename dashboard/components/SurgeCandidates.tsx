@@ -70,11 +70,11 @@ function getScoreExplanation(name: string, score: number, maxScore: number, deta
   }
 }
 
-// 점수별 배경색 (v5.4: L3=85, L2=70, L1=50)
+// 점수별 배경색 (v5.4: L3=85, L2=70, L1=60)
 function getScoreBgClass(score: number): string {
   if (score >= 85) return 'bg-green-600 text-white'        // L3 진입 가능
   if (score >= 70) return 'bg-yellow-500 text-black'       // L2 진입 가능
-  if (score >= 50) return 'bg-orange-500 text-white'       // L1 진입 가능
+  if (score >= 60) return 'bg-orange-500 text-white'       // L1 진입 가능
   return 'bg-slate-600 text-slate-300'                     // 진입 불가
 }
 

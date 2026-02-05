@@ -249,8 +249,8 @@ class Settings(BaseSettings):
 
     # Attack Score 임계값 (v5.4: 대폭 완화)
     attack_score_l1: float = Field(
-        default=50.0,  # v5.4: 70 → 50 (하루 10-20건 예상, Candle Surge 없이도 진입)
-        description="Level 1 임계값 (50점 이상)",
+        default=60.0,  # v5.4: 70 → 60 (하루 5-10건 예상)
+        description="Level 1 임계값 (60점 이상)",
     )
     attack_score_l2: float = Field(
         default=70.0,  # v5.4: 82 → 70 (기존 L1 수준)
