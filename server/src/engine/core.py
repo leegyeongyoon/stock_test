@@ -118,7 +118,7 @@ class TradingEngine:
         self.ignition_strategy = get_ignition_strategy()  # v4.0 Ignition 전략 (전조 패턴 + 점화)
         self.surge_detector = get_surge_detector()  # 급등 시작 실시간 감지
         self.pullback_strategy.set_mode(settings.pullback_mode)  # 설정에서 모드 로드
-        self.rebound_strategy.set_mode(getattr(settings, "rebound_mode", "OFF"))  # Rebound 모드 로드
+        self.rebound_strategy.set_mode(settings.rebound_mode)  # Rebound 모드 로드 (config.py 기본값: NORMAL)
 
         # User Mode Manager
         self.mode_manager = get_mode_manager()
