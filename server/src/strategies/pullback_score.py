@@ -10,10 +10,10 @@
 - 선행 지표 사용: 축적 신호, 지지선, 반등 조짐
 - 결과: 저점 근처 매수 → 상승 → 수익
 
-Pullback Score 구성 (0~100점):
+Pullback Score 구성 (0~105점, 100점 캡):
 1. Recent Surge (0~20): 최근 급등 이력 (매수 대상 자격)
 2. Pullback Depth (0~25): 눌림 깊이 (저점 근접도)
-3. Support Level (0~20): 지지선 근접도 (VWAP, MA)
+3. Support Level (0~25): 지지선 근접도 (VWAP, MA, RSI)
 4. Accumulation Signal (0~20): 축적 신호 (호가 불균형)
 5. Reversal Sign (0~15): 반등 조짐 (하락 둔화, 양봉 출현)
 """
@@ -85,7 +85,7 @@ class PullbackScoreCalculator:
     점수 구성:
     1. Recent Surge (0~20): 최근 급등 이력 확인
     2. Pullback Depth (0~25): 고점 대비 눌림 깊이
-    3. Support Level (0~20): 지지선 근접도
+    3. Support Level (0~25): 지지선 근접도 + RSI 과매도
     4. Accumulation Signal (0~20): 매수세 축적 신호
     5. Reversal Sign (0~15): 반등 조짐
 
@@ -149,8 +149,8 @@ class PullbackScoreCalculator:
         surge_score = self._calc_recent_surge(market_data)
         components.append(surge_score)
 
-        # 급등 이력이 없으면 눌림목 대상 아님
-        if surge_score.score < 10:
+        # 급등 이력이 없으면 눌림목 대상 아님 (최소한의 상승 이력만 확인)
+        if surge_score.score < 5:
             return PullbackScoreResult(
                 symbol=symbol,
                 total_score=0,
@@ -402,10 +402,20 @@ class PullbackScoreCalculator:
             elif low_dist <= 0.08:
                 score += 1
 
+        # RSI 과매도 보너스 (+0~5)
+        rsi = market_data.get("rsi", 50)
+        details["rsi"] = rsi
+        if rsi <= 30:
+            score += 5  # 과매도 → 지지 가능성 높음
+        elif rsi <= 40:
+            score += 3
+        elif rsi <= 45:
+            score += 1
+
         return PullbackScoreComponent(
             name="Support Level",
-            score=min(20, score),
-            max_score=20,
+            score=min(25, score),
+            max_score=25,
             details=details,
         )
 
@@ -521,7 +531,7 @@ class PullbackScoreCalculator:
         # 캔들 패턴 (+0~4)
         if recent_candles:
             bullish_count = sum(
-                1 for c in recent_candles[-3:] if c.get("close", 0) > c.get("open", 0)
+                1 for c in recent_candles[-3:] if c.close > c.open
             )
             details["bullish_candles"] = bullish_count
 
@@ -570,20 +580,20 @@ class PullbackScoreCalculator:
         return price
 
     def _calc_stop_loss(self, market_data: dict, entry_price: float) -> float:
-        """손절가 계산"""
+        """손절가 계산 (ATR 기반 동적 손절)"""
         lowest_24h = market_data.get("lowest_24h", 0)
-        atr = market_data.get("atr", 0)
+        atr_pct = market_data.get("atr_pct", 0.02)
 
         if entry_price <= 0:
             return 0
 
-        # 기본: 진입가 -3%
-        stop_loss = entry_price * 0.97
+        # ATR 1.5배, 최소 -1.5%, 최대 -3%
+        atr_stop = max(0.015, min(0.03, atr_pct * 1.5))
+        stop_loss = entry_price * (1 - atr_stop)
 
-        # 24h 저점 -1% (더 보수적)
+        # 24h 저점 아래로는 안 잡음 (저점 -0.5%)
         if lowest_24h > 0:
-            stop_below_low = lowest_24h * 0.99
-            stop_loss = max(stop_loss, stop_below_low)
+            stop_loss = max(stop_loss, lowest_24h * 0.995)
 
         return stop_loss
 
