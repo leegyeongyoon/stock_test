@@ -1,8 +1,13 @@
 """Trading Engine - 메인 엔진 루프"""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Union
+
+
+def _utc_iso() -> str:
+    """UTC ISO 문자열 (Z suffix 포함, 프론트엔드 timezone 변환용)"""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 import structlog
 from sqlalchemy import select
@@ -185,6 +190,10 @@ class TradingEngine:
         self._rebound_score_cache: dict[str, dict] = {}  # symbol -> score result
         self._rebound_score_cache_time: Optional[datetime] = None
 
+        # Pullback Score 캐시 (Top 후보)
+        self._pullback_score_cache: dict[str, dict] = {}  # symbol -> score result
+        self._pullback_score_cache_time: Optional[datetime] = None
+
         # v5.2: 필터링 통계 (오늘 기준)
         self._filter_stats: dict[str, int] = {
             "anti_chase": 0,
@@ -231,40 +240,82 @@ class TradingEngine:
             return None
 
     def _prefilter_symbols_for_pullback(self, market_data: dict) -> list[str]:
-        """Pullback 전략용 심볼 Pre-filtering (호가창 조회 대상 축소)"""
+        """Pullback 전략용 심볼 Pre-filtering (호가창 조회 대상 축소)
+
+        강화된 필터:
+        - 스테이블코인 제외
+        - 거래대금 > 10억 (저유동성 잡코인 배제)
+        - 가격 > 100원 (극저가 코인 제외)
+        - 변화율 -10% ~ +20% (눌림목 범위)
+        - 거래대금 순 정렬 (유동성 높은 것 우선)
+        """
         candidates = []
         for sym, md in market_data.items():
-            price_change = abs(md.get("price_change_pct", 0))
+            # 스테이블코인 제외
+            base = sym.split("-")[-1] if "-" in sym else sym
+            if base in self._STABLECOIN_BASES:
+                continue
+
+            price_change = md.get("price_change_pct", 0)
             volume_24h = md.get("volume_24h", 0)
+            price = md.get("price", 0)
 
-            # 조건: 거래대금 > 1억 AND 변화율 0.5~15%
-            if volume_24h > 100_000_000 and 0.5 < price_change < 15.0:
-                candidates.append(sym)
+            # 1. 거래대금 > 10억 (저유동성 잡코인 제외)
+            if volume_24h < 1_000_000_000:
+                continue
 
-        # 최대 20개로 제한 (Rate Limit 방지)
-        return candidates[:20]
+            # 2. 가격 > 100원 (극저가 코인 제외)
+            if price < 100:
+                continue
+
+            # 3. 눌림목 범위: -10% ~ +20%
+            if not (-10.0 < price_change < 20.0):
+                continue
+
+            candidates.append((sym, price_change, volume_24h))
+
+        # 거래대금 순 정렬 (유동성 높은 것 우선)
+        candidates.sort(key=lambda x: x[2], reverse=True)
+
+        # 최대 15개로 제한 (Rate Limit 방지)
+        return [c[0] for c in candidates[:15]]
+
+    # 스테이블코인 제외 목록 (반등 스캘핑 부적합)
+    _STABLECOIN_BASES = {"USDT", "USDC", "USD1", "USDE", "DAI", "BUSD", "TUSD", "PYUSD"}
 
     def _prefilter_symbols_for_rebound(self, market_data: dict) -> list[str]:
         """Rebound 전략용 심볼 Pre-filtering (반등 후보 축소)
 
         Rebound 조건:
-        - 거래대금 > 5천만
-        - 하락 중이거나 조정 중인 종목 (변화율 -15% ~ +3%)
-        - RSI가 낮을 가능성이 높은 종목 (하락 종목 우선)
+        - 스테이블코인 제외
+        - 거래대금 > 5억 (저유동성 제외)
+        - 가격 > 100원 (극저가 제외)
+        - 하락/조정 중인 종목 (변화율 -12% ~ +2%)
         """
         candidates = []
         for sym, md in market_data.items():
+            base = sym.split("-")[-1] if "-" in sym else sym
+            if base in self._STABLECOIN_BASES:
+                continue
+
             price_change = md.get("price_change_pct", 0)
             volume_24h = md.get("volume_24h", 0)
+            price = md.get("price", 0)
 
-            # 조건: 거래대금 > 5천만 AND 변화율 -15% ~ +3% (하락/조정 종목)
-            if volume_24h > 50_000_000 and -15.0 < price_change < 3.0:
-                candidates.append((sym, price_change))
+            if volume_24h < 500_000_000:
+                continue
+
+            if price < 100:
+                continue
+
+            if not (-12.0 < price_change < 2.0):
+                continue
+
+            candidates.append((sym, price_change, volume_24h))
 
         # 하락률이 큰 순으로 정렬 (과매도 종목 우선)
         candidates.sort(key=lambda x: x[1])
 
-        # 최대 15개로 제한
         return [c[0] for c in candidates[:15]]
 
     def _reset_filter_stats_if_new_day(self) -> None:
@@ -352,7 +403,10 @@ class TradingEngine:
         return filtered[:limit]
 
     async def update_rebound_score_cache(self) -> None:
-        """Rebound Score 캐시 업데이트 (상위 후보 추적용)"""
+        """Rebound Score 캐시 업데이트 (상위 후보 추적용)
+
+        실제 candle_manager 지표 계산 (시그널 경로와 동일한 패턴)
+        """
         if not self._is_upbit or not self.rebound_strategy:
             return
 
@@ -371,20 +425,86 @@ class TradingEngine:
                     if not md:
                         continue
 
-                    # Rebound 점수 계산을 위한 market_data 구성
+                    price = md.get("price", 0)
+                    if price <= 0:
+                        continue
+
+                    # RSI 14 (5분봉 기준) - 실제 계산
+                    rsi = 50.0
+                    if self.candle_manager:
+                        closes_for_rsi = self.candle_manager.get_closes(symbol, "5m", 15)
+                        if len(closes_for_rsi) >= 15:
+                            changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
+                            gains = [c if c > 0 else 0 for c in changes[-14:]]
+                            losses = [-c if c < 0 else 0 for c in changes[-14:]]
+                            avg_gain = sum(gains) / 14
+                            avg_loss = sum(losses) / 14
+                            if avg_loss == 0:
+                                rsi = 100.0 if avg_gain > 0 else 50.0
+                            else:
+                                rs = avg_gain / avg_loss
+                                rsi = 100 - (100 / (1 + rs))
+
+                    # SMA 20 (5분봉)
+                    sma_20 = self.candle_manager.calc_sma(symbol, "5m", 20) if self.candle_manager else 0
+                    sma_20 = sma_20 or 0
+
+                    # BB 하단 (5분봉, 20기간, 2 sigma)
+                    bb_lower = 0.0
+                    if self.candle_manager:
+                        bb_closes = self.candle_manager.get_closes(symbol, "5m", 20)
+                        if len(bb_closes) >= 20:
+                            bb_sma = sum(bb_closes) / len(bb_closes)
+                            variance = sum((c - bb_sma) ** 2 for c in bb_closes) / len(bb_closes)
+                            std = variance ** 0.5
+                            bb_lower = bb_sma - 2 * std
+
+                    # VWAP (5분봉)
+                    vwap = md.get("vwap", 0)
+                    if self.candle_manager:
+                        precise_vwap = self.candle_manager.calc_vwap(symbol, "5m", 20)
+                        if precise_vwap:
+                            vwap = precise_vwap
+
+                    # ATR% (5분봉)
+                    atr_pct = 0.01
+                    if self.candle_manager:
+                        calc_atr = self.candle_manager.calc_atr_percent(symbol, "5m", 14)
+                        if calc_atr is not None:
+                            atr_pct = calc_atr
+
+                    # 호가창 조회
+                    orderbook = await self._get_orderbook_cached(symbol)
+                    ob_units = (orderbook or {}).get("orderbook_units", [])
+                    bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
+                    ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
+
+                    # 5분봉 캔들 (연속 양봉 패턴용)
+                    candles_5m = self.candle_manager.get_candles(symbol, "5m", 10) if self.candle_manager else []
+
+                    # 24h 가격 범위
+                    highest_24h = md.get("high_20", price * 1.01)
+                    lowest_24h = md.get("low_20", price * 0.99)
+                    price_range_pct = (highest_24h - lowest_24h) / price if price > 0 else 0.02
+
                     market_data_for_score = {
                         "symbol": symbol,
-                        "price": md.get("price", 0),
-                        "vwap": md.get("vwap", md.get("price", 0)),
-                        "sma_20": md.get("sma_20", md.get("price", 0)),
-                        "bb_lower": md.get("bb_lower", md.get("price", 0) * 0.98),
-                        "rsi": md.get("rsi", 50),
-                        "atr": md.get("atr", md.get("price", 0) * 0.02),
-                        "bid_volume": md.get("bid_volume", 0),
-                        "ask_volume": md.get("ask_volume", 0),
-                        "recent_candles": md.get("recent_candles", []),
+                        "price": price,
+                        "rsi": rsi,
+                        "sma_20": sma_20,
+                        "bb_lower": bb_lower,
+                        "vwap": vwap,
+                        "atr_pct": atr_pct,
+                        "bid_volume": bid_volume,
+                        "ask_volume": ask_volume,
                         "change_1m": md.get("change_1m", 0),
                         "change_5m": md.get("change_5m", 0),
+                        "rvol": md.get("rvol", 1.0),
+                        "close_pos": md.get("close_pos", 0.5),
+                        "candles_5m": candles_5m,
+                        "highest_24h": highest_24h,
+                        "lowest_24h": lowest_24h,
+                        "price_range_pct": price_range_pct,
                     }
 
                     score_result = calculator.calculate(market_data_for_score)
@@ -394,7 +514,7 @@ class TradingEngine:
                         "korean_name": korean_name,
                         "score": score_result.total_score,
                         "level": score_result.level,
-                        "distance_to_entry": max(0, get_settings().rebound_score_l1 - score_result.total_score),  # 동적 임계값
+                        "distance_to_entry": max(0, get_settings().rebound_score_l1 - score_result.total_score),
                         "change_rate": md.get("price_change_pct", 0) / 100,
                         "volume_24h": md.get("volume_24h", 0),
                         "rsi": score_result.rsi,
@@ -425,6 +545,134 @@ class TradingEngine:
         )
 
         # min_score 이상만 필터링
+        filtered = [c for c in sorted_candidates if c["score"] >= min_score]
+
+        return filtered[:limit]
+
+    async def update_pullback_score_cache(self) -> None:
+        """Pullback Score 캐시 업데이트 (상위 후보 추적용)"""
+        if not self._is_upbit or not self.pullback_strategy:
+            return
+
+        try:
+            from src.strategies.pullback_score import get_pullback_score_calculator
+
+            calculator = get_pullback_score_calculator()
+
+            # Pullback 후보 pre-filtering
+            candidates = self._prefilter_symbols_for_pullback(self._market_data)
+
+            cache = {}
+            for symbol in candidates[:15]:
+                try:
+                    md = self._market_data.get(symbol, {})
+                    if not md:
+                        continue
+
+                    price = md.get("price", 0)
+
+                    # === 기술적 지표 계산 (candle_manager 사용, 시그널 경로와 동일) ===
+                    rsi = 50.0
+                    if self.candle_manager:
+                        closes_for_rsi = self.candle_manager.get_closes(symbol, "5m", 15)
+                        if len(closes_for_rsi) >= 15:
+                            changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
+                            gains = [c if c > 0 else 0 for c in changes[-14:]]
+                            losses = [-c if c < 0 else 0 for c in changes[-14:]]
+                            avg_gain = sum(gains) / 14
+                            avg_loss = sum(losses) / 14
+                            if avg_loss == 0:
+                                rsi = 100.0 if avg_gain > 0 else 50.0
+                            else:
+                                rs = avg_gain / avg_loss
+                                rsi = 100 - (100 / (1 + rs))
+
+                    sma_20 = self.candle_manager.calc_sma(symbol, "5m", 20) if self.candle_manager else 0
+                    sma_20 = sma_20 or 0
+
+                    vwap = md.get("vwap", 0)
+                    if self.candle_manager:
+                        precise_vwap = self.candle_manager.calc_vwap(symbol, "5m", 20)
+                        if precise_vwap:
+                            vwap = precise_vwap
+
+                    atr_pct = 0.01
+                    if self.candle_manager:
+                        calc_atr = self.candle_manager.calc_atr_percent(symbol, "5m", 14)
+                        if calc_atr is not None:
+                            atr_pct = calc_atr
+
+                    # 호가창 캐시 조회
+                    orderbook = await self._get_orderbook_cached(symbol)
+                    ob_units = (orderbook or {}).get("orderbook_units", [])
+                    bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
+                    ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
+
+                    highest_24h = md.get("high_20", price * 1.01 if price > 0 else 0)
+                    lowest_24h = md.get("low_20", price * 0.99 if price > 0 else 0)
+
+                    candles_5m = self.candle_manager.get_candles(symbol, "5m", 10) if self.candle_manager else []
+
+                    change_5m = 0.0
+                    change_1h = 0.0
+                    if self.candle_manager:
+                        closes_5m = self.candle_manager.get_closes(symbol, "5m", 13)
+                        if len(closes_5m) >= 2 and closes_5m[-2] > 0:
+                            change_5m = (closes_5m[-1] - closes_5m[-2]) / closes_5m[-2]
+                        if len(closes_5m) >= 13 and closes_5m[0] > 0:
+                            change_1h = (closes_5m[-1] - closes_5m[0]) / closes_5m[0]
+
+                    market_data_for_score = {
+                        **md,
+                        "symbol": symbol,
+                        "highest_24h": highest_24h,
+                        "lowest_24h": lowest_24h,
+                        "change_rate": md.get("price_change_pct", 0) / 100,
+                        "change_1h": change_1h,
+                        "change_5m": change_5m,
+                        "rsi": rsi,
+                        "sma_20": sma_20,
+                        "vwap": vwap,
+                        "atr_pct": atr_pct,
+                        "bid_volume": bid_volume,
+                        "ask_volume": ask_volume,
+                        "recent_candles": candles_5m,
+                        "rvol": md.get("rvol", 1.0),
+                    }
+
+                    score_result = calculator.calculate(market_data_for_score)
+                    korean_name = self.symbol_manager.get_korean_name(symbol) if self.symbol_manager else ""
+                    cache[symbol] = {
+                        "symbol": symbol,
+                        "korean_name": korean_name,
+                        "score": score_result.total_score,
+                        "level": score_result.level,
+                        "distance_to_entry": max(0, get_settings().pullback_score_l1 - score_result.total_score),
+                        "change_rate": md.get("price_change_pct", 0) / 100,
+                        "volume_24h": md.get("volume_24h", 0),
+                        "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
+                    }
+                except Exception as e:
+                    logger.debug(f"Failed to calculate pullback score for {symbol}: {e}")
+                    continue
+
+            self._pullback_score_cache = cache
+            self._pullback_score_cache_time = datetime.utcnow()
+
+        except Exception as e:
+            logger.warning("Failed to update pullback score cache", error=str(e))
+
+    def get_top_pullback_candidates(self, limit: int = 5, min_score: int = 0) -> list[dict]:
+        """상위 Pullback 후보 반환 (점수 높은 순)"""
+        if not self._pullback_score_cache:
+            return []
+
+        sorted_candidates = sorted(
+            self._pullback_score_cache.values(),
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
         filtered = [c for c in sorted_candidates if c["score"] >= min_score]
 
         return filtered[:limit]
@@ -473,6 +721,15 @@ class TradingEngine:
         # DB에서 오픈 포지션 복구 (서버 재시작 시 전략별 포지션 복구)
         await self._restore_positions_from_db()
 
+        # DIP_SCALPER 미체결 주문 복구
+        await self._restore_dip_pending_orders()
+
+        # DIP_SCALPER 쿨다운 복원
+        await self._restore_dip_cooldowns()
+
+        # DIP_SCALPER 통계 복원
+        await self._restore_dip_stats()
+
         # 메인 루프 시작
         self._running = True
         self._candle_update_counter = 0  # 캔들 업데이트 카운터 (v5.3: 10초마다)
@@ -513,6 +770,12 @@ class TradingEngine:
                 await self._near_trigger_task
             except asyncio.CancelledError:
                 pass
+
+        # DIP_SCALPER dirty 포지션 최종 flush
+        try:
+            await self._persist_dirty_dip_positions()
+        except Exception as e:
+            logger.warning("Failed to flush dip positions on stop", error=str(e))
 
         # Risk Engine 중지
         await self.risk_engine.stop()
@@ -559,6 +822,7 @@ class TradingEngine:
                     self._attack_cache_counter = 0
                     await self.update_attack_score_cache()
                     await self.update_rebound_score_cache()
+                    await self.update_pullback_score_cache()
 
                 # v2.3: 미체결 주문 자동 정리 (30초마다 체크, 3분 초과 시 취소)
                 self._pending_order_cleanup_counter = getattr(self, "_pending_order_cleanup_counter", 0) + 1
@@ -569,9 +833,12 @@ class TradingEngine:
                 # 3. 전략 실행 (NORMAL 모드에서만)
                 can_open = self.risk_engine.can_open_position
                 if not can_open:
-                    logger.debug(f"Strategy execution skipped: can_open_position={can_open}")
+                    logger.warning("Strategy execution skipped", can_open_position=can_open)
                 if can_open:
                     await self._execute_strategies()
+
+                # 3.5. Dip 포지션 청산 & 미체결 확인 (모드 무관, 항상 실행)
+                await self._manage_dip_exits()
 
                 # 4. 포지션 관리 (SAFE 모드에서도 실행)
                 await self._manage_positions()
@@ -936,6 +1203,22 @@ class TradingEngine:
             # 동적 심볼 목록
             watch_symbols = self.symbol_manager.get_qualified_symbols()
 
+            # 보유 포지션 심볼 강제 포함 (유동성 필터와 무관하게 가격 추적)
+            position_symbols = set()
+            if self.dip_scalper:
+                position_symbols.update(self.dip_scalper.get_all_positions().keys())
+                position_symbols.update(self.dip_scalper.get_pending_orders().keys())
+            if self.attack_strategy:
+                position_symbols.update(self.attack_strategy._active_positions.keys())
+            if self.rebound_strategy:
+                position_symbols.update(self.rebound_strategy.get_all_positions().keys())
+            if self.pullback_strategy:
+                position_symbols.update(self.pullback_strategy.get_all_positions().keys())
+
+            for sym in position_symbols:
+                if sym not in watch_symbols:
+                    watch_symbols.append(sym)
+
             if not watch_symbols:
                 logger.warning("No qualified symbols to monitor")
                 return
@@ -1196,29 +1479,88 @@ class TradingEngine:
                     candidates = self._prefilter_symbols_for_pullback(self._market_data)
                     logger.debug(f"Pullback candidates: {len(candidates)} symbols (pre-filtered)")
 
-                    # market_data에 호가 정보 추가 (캐시 사용)
+                    # market_data에 기술지표 + 호가 정보 추가 (Rebound 패턴)
                     enhanced_market_data = {}
                     for sym in candidates:
                         md = self._market_data.get(sym, {})
-                        # 캐시된 호가창 조회 (Rate Limit 방지)
+                        price = md.get("price", 0)
+
+                        # 캐시된 호가창 조회
                         orderbook = await self._get_orderbook_cached(sym)
-                        if orderbook:
-                            bid_volume = sum(b[1] for b in orderbook.get("bids", [])[:5])
-                            ask_volume = sum(a[1] for a in orderbook.get("asks", [])[:5])
-                        else:
-                            bid_volume = 0
-                            ask_volume = 0
+
+                        # === 기술적 지표 계산 (candle_manager 사용) ===
+                        # RSI 14 (5분봉)
+                        rsi = 50.0
+                        if self.candle_manager:
+                            closes_for_rsi = self.candle_manager.get_closes(sym, "5m", 15)
+                            if len(closes_for_rsi) >= 15:
+                                changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
+                                gains = [c if c > 0 else 0 for c in changes[-14:]]
+                                losses = [-c if c < 0 else 0 for c in changes[-14:]]
+                                avg_gain = sum(gains) / 14
+                                avg_loss = sum(losses) / 14
+                                if avg_loss == 0:
+                                    rsi = 100.0 if avg_gain > 0 else 50.0
+                                else:
+                                    rs = avg_gain / avg_loss
+                                    rsi = 100 - (100 / (1 + rs))
+
+                        # SMA 20 (5분봉)
+                        sma_20 = self.candle_manager.calc_sma(sym, "5m", 20) if self.candle_manager else 0
+                        sma_20 = sma_20 or 0
+
+                        # VWAP (5분봉)
+                        vwap = md.get("vwap", 0)
+                        if self.candle_manager:
+                            precise_vwap = self.candle_manager.calc_vwap(sym, "5m", 20)
+                            if precise_vwap:
+                                vwap = precise_vwap
+
+                        # ATR% (5분봉)
+                        atr_pct = 0.01
+                        if self.candle_manager:
+                            calc_atr = self.candle_manager.calc_atr_percent(sym, "5m", 14)
+                            if calc_atr is not None:
+                                atr_pct = calc_atr
+
+                        # 호가 잔량 (상위 5호가)
+                        ob_units = (orderbook or {}).get("orderbook_units", [])
+                        bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
+                        ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
+
+                        # 24h 고/저
+                        highest_24h = md.get("high_20", price * 1.01 if price > 0 else 0)
+                        lowest_24h = md.get("low_20", price * 0.99 if price > 0 else 0)
+
+                        # 캔들 데이터
+                        candles_5m = self.candle_manager.get_candles(sym, "5m", 10) if self.candle_manager else []
+
+                        # 단기 변화율 계산 (5분봉 close 비교)
+                        change_5m = 0.0
+                        change_1h = 0.0
+                        if self.candle_manager:
+                            closes_5m = self.candle_manager.get_closes(sym, "5m", 13)
+                            if len(closes_5m) >= 2 and closes_5m[-2] > 0:
+                                change_5m = (closes_5m[-1] - closes_5m[-2]) / closes_5m[-2]
+                            if len(closes_5m) >= 13 and closes_5m[0] > 0:
+                                change_1h = (closes_5m[-1] - closes_5m[0]) / closes_5m[0]
 
                         enhanced_market_data[sym] = {
                             **md,
+                            "symbol": sym,
+                            "highest_24h": highest_24h,
+                            "lowest_24h": lowest_24h,
+                            "change_rate": md.get("price_change_pct", 0) / 100,
+                            "change_1h": change_1h,
+                            "change_5m": change_5m,
+                            "rsi": rsi,
+                            "sma_20": sma_20,
+                            "vwap": vwap,
+                            "atr_pct": atr_pct,
                             "bid_volume": bid_volume,
                             "ask_volume": ask_volume,
-                            "highest_24h": md.get("high_20", md.get("price", 0) * 1.01),
-                            "lowest_24h": md.get("low_20", md.get("price", 0) * 0.99),
-                            "change_rate": md.get("price_change_pct", 0) / 100,
-                            "change_1h": md.get("price_change_pct", 0) / 100 / 24,  # 근사
-                            "change_5m": 0,  # TODO: 5분 변화율 추가
-                            "sma_20": md.get("vwap", 0),  # VWAP을 SMA 근사로 사용
+                            "recent_candles": candles_5m,
+                            "rvol": md.get("rvol", 1.0),
                         }
 
                     # 눌림목 시그널 스캔 (pre-filtered 심볼만)
@@ -1238,39 +1580,106 @@ class TradingEngine:
                 if rebound_allowed:
                     # Pre-filtering: 후보 심볼 축소
                     candidates = self._prefilter_symbols_for_rebound(self._market_data)
-                    logger.debug(f"Rebound candidates: {len(candidates)} symbols (pre-filtered)")
 
-                    # market_data에 캔들 및 호가 정보 추가
+                    # market_data에 캔들, 호가, 기술적 지표 추가
                     enhanced_market_data = {}
                     for sym in candidates:
                         md = self._market_data.get(sym, {})
+                        price = md.get("price", 0)
                         # 캐시된 호가창 조회
                         orderbook = await self._get_orderbook_cached(sym)
                         # 1분봉/5분봉 조회
                         candles_1m = self.candle_manager.get_candles(sym, "1m", 50) if self.candle_manager else []
                         candles_5m = self.candle_manager.get_candles(sym, "5m", 50) if self.candle_manager else []
 
+                        # === 기술적 지표 계산 (ReboundScoreCalculator 입력용) ===
+                        # RSI 14 (5분봉 기준)
+                        rsi = 50.0  # fallback
+                        if self.candle_manager:
+                            closes_for_rsi = self.candle_manager.get_closes(sym, "5m", 15)
+                            if len(closes_for_rsi) >= 15:
+                                changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
+                                gains = [c if c > 0 else 0 for c in changes[-14:]]
+                                losses = [-c if c < 0 else 0 for c in changes[-14:]]
+                                avg_gain = sum(gains) / 14
+                                avg_loss = sum(losses) / 14
+                                if avg_loss == 0:
+                                    rsi = 100.0
+                                else:
+                                    rs = avg_gain / avg_loss
+                                    rsi = 100 - (100 / (1 + rs))
+
+                        # SMA 20 (5분봉)
+                        sma_20 = self.candle_manager.calc_sma(sym, "5m", 20) if self.candle_manager else 0
+                        sma_20 = sma_20 or 0
+
+                        # BB 하단 (5분봉, 20기간, 2σ)
+                        bb_lower = 0.0
+                        if self.candle_manager:
+                            bb_closes = self.candle_manager.get_closes(sym, "5m", 20)
+                            if len(bb_closes) >= 20:
+                                bb_sma = sum(bb_closes) / len(bb_closes)
+                                variance = sum((c - bb_sma) ** 2 for c in bb_closes) / len(bb_closes)
+                                std = variance ** 0.5
+                                bb_lower = bb_sma - 2 * std
+
+                        # VWAP (5분봉, candle_manager의 정밀 계산)
+                        vwap = md.get("vwap", 0)
+                        if self.candle_manager:
+                            precise_vwap = self.candle_manager.calc_vwap(sym, "5m", 20)
+                            if precise_vwap:
+                                vwap = precise_vwap
+
+                        # ATR% (5분봉)
+                        atr_pct = 0.01  # fallback
+                        if self.candle_manager:
+                            calc_atr = self.candle_manager.calc_atr_percent(sym, "5m", 14)
+                            if calc_atr is not None:
+                                atr_pct = calc_atr
+
+                        # 호가 잔량 (상위 5호가) - Upbit format: orderbook_units
+                        ob = orderbook or {}
+                        ob_units = ob.get("orderbook_units", [])
+                        bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
+                        ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
+
+                        # 24h 가격 범위
+                        highest_24h = md.get("high_20", price * 1.01 if price > 0 else 0)
+                        lowest_24h = md.get("low_20", price * 0.99 if price > 0 else 0)
+                        price_range_pct = (highest_24h - lowest_24h) / price if price > 0 else 0.02
+
                         enhanced_market_data[sym] = {
                             **md,
                             "symbol": sym,
-                            "orderbook": orderbook or {},
+                            "orderbook": ob,
                             "candles_1m": candles_1m,
                             "candles_5m": candles_5m,
-                            "highest_24h": md.get("high_20", md.get("price", 0) * 1.01),
-                            "lowest_24h": md.get("low_20", md.get("price", 0) * 0.99),
+                            "highest_24h": highest_24h,
+                            "lowest_24h": lowest_24h,
+                            # 기술적 지표 (score calculator 입력)
+                            "rsi": rsi,
+                            "sma_20": sma_20,
+                            "bb_lower": bb_lower,
+                            "vwap": vwap,
+                            "atr_pct": atr_pct,
+                            "price_range_pct": price_range_pct,
+                            "bid_volume": bid_volume,
+                            "ask_volume": ask_volume,
                         }
 
-                    # Rebound 시그널 스캔
-                    rebound_signals = await self.rebound_strategy.scan_for_signals(
-                        symbols=candidates,
-                        market_data_map=enhanced_market_data,
-                    )
-                    logger.info(f"[REBOUND] Scan complete: {len(rebound_signals)} signals found")
+                    # Rebound 시그널 스캔 (모드 체크 추가)
+                    if self.rebound_strategy and self.rebound_strategy.is_enabled():
+                        rebound_signals = await self.rebound_strategy.scan_for_signals(
+                            symbols=candidates,
+                            market_data_map=enhanced_market_data,
+                        )
+                        if rebound_signals:
+                            logger.info("REBOUND scan complete", signal_count=len(rebound_signals), candidates=len(candidates))
 
-                    # 시그널 실행
-                    for signal in rebound_signals:
-                        logger.info(f"[REBOUND] Executing signal: {signal.symbol} (score={signal.score})")
-                        await self._execute_rebound_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
+                        # 시그널 실행
+                        for signal in rebound_signals:
+                            logger.info("REBOUND executing signal", symbol=signal.symbol, score=signal.score)
+                            await self._execute_rebound_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
 
             # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
             # Note: Ignition은 Satellite와 독립적으로 운영됨 (satellite_enabled와 무관)
@@ -1316,8 +1725,9 @@ class TradingEngine:
                             if ignition_signal:
                                 # 호가 정보 조회
                                 orderbook = await self._get_orderbook_cached(symbol)
-                                bid_price = orderbook.get("bids", [[0]])[0][0] if orderbook else md.get("price", 0)
-                                ask_price = orderbook.get("asks", [[0]])[0][0] if orderbook else md.get("price", 0)
+                                ob_units = orderbook.get("orderbook_units", []) if orderbook else []
+                                bid_price = ob_units[0].get("bid_price", 0) if ob_units else md.get("price", 0)
+                                ask_price = ob_units[0].get("ask_price", 0) if ob_units else md.get("price", 0)
                                 current_price = md.get("price", 0)
 
                                 # 진입 시도 (Anti-Chase Gate 포함)
@@ -1421,8 +1831,9 @@ class TradingEngine:
                             # v2.0: 호가창 조회 (캐시 사용)
                             orderbook = await self._get_orderbook_cached(symbol)
                             if orderbook:
-                                bid_volume = sum(b[1] for b in orderbook.get("bids", [])[:5])
-                                ask_volume = sum(a[1] for a in orderbook.get("asks", [])[:5])
+                                ob_units = orderbook.get("orderbook_units", [])
+                                bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
+                                ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
                             else:
                                 bid_volume = 0
                                 ask_volume = 0
@@ -1447,17 +1858,7 @@ class TradingEngine:
                         for signal in dip_signals:
                             await self._execute_dip_signal(signal, self._market_data.get(signal.symbol, {}), risk_decision, current_equity)
 
-                        # 기존 포지션 청산 체크
-                        for symbol, pos in self.dip_scalper.get_all_positions().items():
-                            md = self._market_data.get(symbol, {})
-                            current_price = md.get("price", 0)
-
-                            exit_result = self.dip_scalper.should_exit(symbol, current_price)
-                            if exit_result:
-                                await self._execute_dip_exit(symbol, pos, exit_result, current_price)
-
-                        # v2.3: 미체결 주문 체결 확인
-                        await self._check_dip_pending_orders()
+                        # NOTE: 청산 체크 & 미체결 확인은 _manage_dip_exits()에서 모드 무관 실행
 
                         # v2.3: 근접 종목 추적 (1초 모니터링 대상 업데이트)
                         near_symbols = self.dip_scalper.update_near_trigger_symbols(market_data_list)
@@ -1472,7 +1873,7 @@ class TradingEngine:
                         logger.error("Dip scalper error", error=str(e))
 
         except Exception as e:
-            logger.error("Strategy execution error", error=str(e))
+            logger.error("Strategy execution error", error=str(e), exc_info=True)
 
     async def _execute_dip_signal(self, signal, market_data: dict, risk_decision, current_equity: float) -> None:
         """Dip Scalper 시그널 실행 (급락 스캘핑)"""
@@ -1659,7 +2060,14 @@ class TradingEngine:
                 fee_asset="KRW",
                 timestamp=datetime.utcnow(),
             )
-            await self.position_ledger.on_buy_fill(fill_event)
+            ledger_entry = await self.position_ledger.on_buy_fill(fill_event)
+
+            # 즉시 DipPosition 상태를 metadata에 저장
+            dip_pos = self.dip_scalper.get_position(symbol)
+            if ledger_entry and dip_pos:
+                ledger_entry.metadata.update(dip_pos.to_metadata())
+                await self.position_ledger._persist_position_to_db(ledger_entry)
+                dip_pos._dirty = False
 
             # 주문 기록
             self.add_order(
@@ -1683,6 +2091,165 @@ class TradingEngine:
             logger.error("Dip signal execution error", symbol=signal.symbol, error=str(e))
             # 주문 실패 시 pending_signals에서 제거
             self.dip_scalper._pending_signals.pop(symbol, None)
+
+    async def _manage_dip_exits(self) -> None:
+        """Dip Scalper 포지션 청산 & 미체결 주문 확인 (모드 무관, 항상 실행)"""
+        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
+            return
+
+        try:
+            # 1. 기존 포지션 청산 체크
+            for symbol, pos in list(self.dip_scalper.get_all_positions().items()):
+                md = self._market_data.get(symbol, {})
+                current_price = md.get("price", 0)
+                if current_price <= 0:
+                    continue
+
+                exit_result = self.dip_scalper.should_exit(symbol, current_price)
+                if exit_result:
+                    await self._execute_dip_exit(symbol, pos, exit_result, current_price)
+
+            # 2. 미체결 주문 체결 확인
+            await self._check_dip_pending_orders()
+
+            # 3. DB ↔ 인메모리 동기화 (30초마다, 첫 실행은 즉시)
+            self._dip_sync_counter = getattr(self, "_dip_sync_counter", 29) + 1
+            if self._dip_sync_counter >= 30:
+                self._dip_sync_counter = 0
+                await self._sync_dip_positions_from_db()
+
+            # 4. dirty 포지션 DB persist (10초마다)
+            self._dip_persist_counter = getattr(self, "_dip_persist_counter", 9) + 1
+            if self._dip_persist_counter >= 10:
+                self._dip_persist_counter = 0
+                await self._persist_dirty_dip_positions()
+
+        except Exception as e:
+            logger.error("Dip exit management error", error=str(e))
+
+    async def _persist_dirty_dip_positions(self) -> None:
+        """dirty 플래그가 설정된 DIP_SCALPER 포지션의 상태를 metadata_json에 저장"""
+        try:
+            dirty_positions = self.dip_scalper.get_dirty_positions()
+            if not dirty_positions:
+                return
+
+            for dip_pos in dirty_positions:
+                try:
+                    ledger_entry = await self.position_ledger.get_position_by_symbol(
+                        dip_pos.symbol, "DIP_SCALPER"
+                    )
+                    if not ledger_entry:
+                        continue
+
+                    ledger_entry.metadata.update(dip_pos.to_metadata())
+                    await self.position_ledger._persist_position_to_db(ledger_entry)
+                    self.dip_scalper.mark_clean(dip_pos.symbol)
+
+                except Exception as e:
+                    logger.warning(
+                        "Failed to persist dip position",
+                        symbol=dip_pos.symbol,
+                        error=str(e),
+                    )
+
+            if dirty_positions:
+                logger.debug(
+                    "Dip positions persisted",
+                    count=len(dirty_positions),
+                    symbols=[p.symbol for p in dirty_positions],
+                )
+
+        except Exception as e:
+            logger.error("Persist dirty dip positions error", error=str(e))
+
+    async def _sync_dip_positions_from_db(self) -> None:
+        """DB의 DIP_SCALPER 포지션 중 인메모리에 없는 것을 자동 복구"""
+        try:
+            from src.models.database import async_session, PositionModel
+            from src.models.schemas import StrategyType
+            from sqlalchemy import select, and_
+
+            async with async_session() as session:
+                stmt = select(PositionModel).where(
+                    and_(
+                        PositionModel.strategy == StrategyType.DIP_SCALPER,
+                        PositionModel.is_open == True,
+                    )
+                )
+                result = await session.execute(stmt)
+                db_positions = result.scalars().all()
+
+            if not db_positions:
+                return
+
+            active_symbols = set(self.dip_scalper.get_all_positions().keys())
+            restored = 0
+
+            for pos in db_positions:
+                if pos.symbol in active_symbols:
+                    continue  # 이미 추적 중
+
+                # Upbit 잔고 확인
+                asset = pos.symbol.replace("KRW-", "")
+                try:
+                    balance = await self.exchange.get_balance(asset)
+                except Exception:
+                    continue
+
+                if not balance or balance.total <= 0:
+                    # 잔고 없으면 DB 포지션 닫기
+                    pos.is_open = False
+                    async with async_session() as s:
+                        merged = await s.merge(pos)
+                        merged.is_open = False
+                        await s.commit()
+                    logger.info(
+                        "Dip position closed (no balance)",
+                        symbol=pos.symbol,
+                    )
+                    continue
+
+                # 인메모리에 복구 (metadata 기반 완전 복원 우선)
+                from src.strategies.dip_scalper import DipPosition as _DipPos
+                ledger_entry = await self.position_ledger.get_position_by_symbol(
+                    pos.symbol, "DIP_SCALPER"
+                )
+                restored_from_meta = False
+                if ledger_entry and ledger_entry.metadata:
+                    dip_pos = _DipPos.from_metadata(pos.symbol, ledger_entry.metadata)
+                    if dip_pos:
+                        dip_pos.quantity = balance.total
+                        self.dip_scalper.restore_position(dip_pos)
+                        restored_from_meta = True
+
+                if not restored_from_meta:
+                    self.dip_scalper.track_position(
+                        symbol=pos.symbol,
+                        entry_price=pos.avg_price,
+                        quantity=balance.total,
+                        bid_ratio=0.5,
+                    )
+
+                restored += 1
+                logger.warning(
+                    "Dip position restored from DB (was missing in memory)",
+                    symbol=pos.symbol,
+                    entry_price=pos.avg_price,
+                    quantity=balance.total,
+                    from_metadata=restored_from_meta,
+                )
+
+            if restored > 0:
+                logger.info(
+                    "Dip position sync completed",
+                    restored=restored,
+                    total_db=len(db_positions),
+                    total_active=len(active_symbols) + restored,
+                )
+
+        except Exception as e:
+            logger.warning("Dip position sync failed", error=str(e))
 
     async def _execute_dip_exit(self, symbol: str, pos, exit_result: dict, current_price: float) -> None:
         """Dip Scalper 청산 실행"""
@@ -1728,6 +2295,16 @@ class TradingEngine:
                 pnl_pct=f"{pnl_pct:.2%}",
                 exit_type=exit_type,
             )
+
+            # 청산 전 exit 정보를 metadata에 저장
+            ledger_entry = await self.position_ledger.get_position_by_symbol(symbol, "DIP_SCALPER")
+            if ledger_entry:
+                ledger_entry.metadata.update({
+                    "exit_type": exit_type,
+                    "exit_price": exit_price,
+                    "final_pnl_pct": pnl_pct,
+                })
+                await self.position_ledger._persist_position_to_db(ledger_entry)
 
             # 전략에서 포지션 제거
             self.dip_scalper.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
@@ -1798,7 +2375,7 @@ class TradingEngine:
 
                     if balance and balance.total > 0:
                         # 체결됨! 포지션 추적 시작
-                        signal = order_info["signal"]
+                        signal = order_info.get("signal")
                         filled_qty = balance.total
                         avg_price = balance.avg_buy_price if balance.avg_buy_price > 0 else order_info["entry_price"]
 
@@ -1809,12 +2386,13 @@ class TradingEngine:
                             avg_price=avg_price,
                         )
 
-                        # 포지션 추적 시작
+                        # 포지션 추적 시작 (signal=None 시 bid_ratio 기본값 사용)
+                        bid_ratio = signal.bid_strength if signal else 0.5
                         self.dip_scalper.track_position(
                             symbol=symbol,
                             entry_price=avg_price,
                             quantity=filled_qty,
-                            bid_ratio=signal.bid_strength,
+                            bid_ratio=bid_ratio,
                         )
 
                         # 미체결에서 제거
@@ -1888,16 +2466,14 @@ class TradingEngine:
             return
 
         try:
-            # Upbit 미체결 주문 조회
-            open_orders = await self.exchange.get_open_orders()
-            if not open_orders:
-                return
-
             now = datetime.utcnow()
-            cancelled_count = 0
             max_pending_seconds = 180  # 3분
 
-            for order in open_orders:
+            # 1) Upbit 미체결 주문 조회 & 취소
+            open_orders = await self.exchange.get_open_orders()
+            cancelled_count = 0
+
+            for order in (open_orders or []):
                 try:
                     order_id = order.get("uuid", "")
                     symbol = order.get("market", "")
@@ -1967,6 +2543,7 @@ class TradingEngine:
             # v5.5: DB 유령 주문 정리 (exchange_order_id가 null인 오래된 PENDING 주문)
             try:
                 from src.models.database import async_session, OrderModel
+                from src.models.schemas import OrderStatus
                 from sqlalchemy import select, and_
 
                 async with async_session() as session:
@@ -2008,6 +2585,208 @@ class TradingEngine:
 
         except Exception as e:
             logger.error("Cleanup stale pending orders error", error=str(e))
+
+    async def _restore_dip_pending_orders(self) -> None:
+        """서버 시작 시 Upbit 미체결 주문을 DIP_SCALPER pending_orders에 복구"""
+        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
+            return
+
+        try:
+            open_orders = await self.exchange.get_open_orders()
+            if not open_orders:
+                return
+
+            now = datetime.utcnow()
+            restored = 0
+            cancelled = 0
+
+            for order in open_orders:
+                try:
+                    order_id = order.get("uuid", "")
+                    symbol = order.get("market", "")
+                    side = order.get("side", "")
+                    price = float(order.get("price", 0) or 0)
+                    volume = float(order.get("remaining_volume", 0) or 0)
+                    created_at_str = order.get("created_at", "")
+
+                    # 매수 주문만 대상
+                    if side != "bid" or not symbol or not order_id:
+                        continue
+
+                    # DIP_SCALPER 주문인지 확인 (DB OrderModel에서 매치)
+                    try:
+                        from src.models.database import async_session as _async_session, OrderModel
+                        from sqlalchemy import select, and_
+                        async with _async_session() as session:
+                            stmt = select(OrderModel).where(
+                                and_(
+                                    OrderModel.symbol == symbol,
+                                    OrderModel.strategy == StrategyType.DIP_SCALPER,
+                                    OrderModel.status == "PENDING",
+                                )
+                            ).order_by(OrderModel.created_at.desc()).limit(1)
+                            result = await session.execute(stmt)
+                            db_order = result.scalar_one_or_none()
+
+                        if not db_order:
+                            continue  # DIP_SCALPER 주문 아님
+                    except Exception:
+                        continue
+
+                    # 생성 시간 파싱
+                    try:
+                        created_at = datetime.fromisoformat(created_at_str.replace("+09:00", ""))
+                    except Exception:
+                        created_at = now
+
+                    elapsed_sec = (now - created_at).total_seconds()
+
+                    if elapsed_sec > 300:  # 5분 초과 → 취소
+                        try:
+                            await self.exchange.cancel_order(symbol, order_id)
+                            cancelled += 1
+                            logger.info(
+                                "Stale DIP pending order cancelled on restore",
+                                symbol=symbol,
+                                order_id=order_id,
+                                elapsed_sec=int(elapsed_sec),
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        # 5분 이내 → pending_orders에 재등록
+                        self.dip_scalper._pending_orders[symbol] = {
+                            "order_id": order_id,
+                            "entry_price": price,
+                            "quantity": volume,
+                            "signal": None,  # 복구 시 signal 없음
+                            "placed_at": created_at,
+                            "check_count": 0,
+                        }
+                        restored += 1
+                        logger.info(
+                            "DIP pending order restored",
+                            symbol=symbol,
+                            order_id=order_id,
+                            price=price,
+                            elapsed_sec=int(elapsed_sec),
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Failed to process pending order for restore: {e}")
+
+            if restored > 0 or cancelled > 0:
+                logger.info(
+                    "DIP pending orders restore complete",
+                    restored=restored,
+                    cancelled=cancelled,
+                )
+
+        except Exception as e:
+            logger.error("Restore dip pending orders error", error=str(e))
+
+    async def _restore_dip_cooldowns(self) -> None:
+        """서버 시작 시 최근 청산된 DIP_SCALPER 포지션에서 쿨다운 복원"""
+        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
+            return
+
+        try:
+            from src.models.database import async_session as _async_session, PositionLedgerModel
+            from sqlalchemy import select, and_
+            from datetime import timedelta
+
+            cooldown_window = datetime.utcnow() - timedelta(minutes=self.dip_scalper.cooldown_minutes)
+
+            async with _async_session() as session:
+                stmt = select(PositionLedgerModel).where(
+                    and_(
+                        PositionLedgerModel.strategy_id == "DIP_SCALPER",
+                        PositionLedgerModel.status == "CLOSED",
+                        PositionLedgerModel.last_fill_time >= cooldown_window,
+                    )
+                )
+                result = await session.execute(stmt)
+                recent_closed = result.scalars().all()
+
+            if not recent_closed:
+                return
+
+            restored = 0
+            for pos in recent_closed:
+                self.dip_scalper._last_exit[pos.symbol] = pos.last_fill_time
+                restored += 1
+
+            logger.info(
+                "DIP cooldowns restored",
+                restored=restored,
+                symbols=[p.symbol for p in recent_closed],
+            )
+
+        except Exception as e:
+            logger.error("Restore dip cooldowns error", error=str(e))
+
+    async def _restore_dip_stats(self) -> None:
+        """서버 시작 시 오늘자 DIP_SCALPER 통계 복원"""
+        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
+            return
+
+        try:
+            from src.models.database import async_session as _async_session, PositionLedgerModel
+            from sqlalchemy import select, and_
+            import json as _json
+
+            # 오늘 00:00 UTC
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+            async with _async_session() as session:
+                stmt = select(PositionLedgerModel).where(
+                    and_(
+                        PositionLedgerModel.strategy_id == "DIP_SCALPER",
+                        PositionLedgerModel.status == "CLOSED",
+                        PositionLedgerModel.last_fill_time >= today_start,
+                    )
+                )
+                result = await session.execute(stmt)
+                today_closed = result.scalars().all()
+
+            if not today_closed:
+                return
+
+            total_trades = len(today_closed)
+            winning = 0
+            losing = 0
+            total_pnl_pct = 0.0
+
+            for pos in today_closed:
+                metadata = {}
+                if pos.metadata_json:
+                    try:
+                        metadata = _json.loads(pos.metadata_json)
+                    except Exception:
+                        pass
+
+                pnl_pct = metadata.get("final_pnl_pct", 0.0)
+                total_pnl_pct += pnl_pct
+                if pnl_pct >= 0:
+                    winning += 1
+                else:
+                    losing += 1
+
+            self.dip_scalper._stats["total_trades"] += total_trades
+            self.dip_scalper._stats["winning_trades"] += winning
+            self.dip_scalper._stats["losing_trades"] += losing
+            self.dip_scalper._stats["total_pnl_pct"] += total_pnl_pct
+
+            logger.info(
+                "DIP stats restored",
+                total_trades=total_trades,
+                winning=winning,
+                losing=losing,
+                total_pnl_pct=f"{total_pnl_pct:.2%}",
+            )
+
+        except Exception as e:
+            logger.error("Restore dip stats error", error=str(e))
 
     async def _near_trigger_monitor_loop(self) -> None:
         """
@@ -2069,8 +2848,9 @@ class TradingEngine:
                             # 호가창 데이터 조회
                             orderbook = await self.exchange.get_orderbook(symbol)
                             if orderbook:
-                                bid_volume = sum(b[1] for b in orderbook.get("bids", [])[:5])
-                                ask_volume = sum(a[1] for a in orderbook.get("asks", [])[:5])
+                                ob_units = orderbook.get("orderbook_units", [])
+                                bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
+                                ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
                             else:
                                 bid_volume = 0
                                 ask_volume = 0
@@ -4493,6 +5273,9 @@ class TradingEngine:
 
                 # Pullback 포지션 청산 체크
                 if self.pullback_strategy and self.pullback_strategy.is_enabled():
+                    # 업비트 실제 평균매수가 동기화 (물타기 감지)
+                    if balance.avg_buy_price > 0:
+                        self.pullback_strategy.update_avg_price(symbol, balance.avg_buy_price)
                     pullback_exit = self.pullback_strategy.should_exit(symbol, current_price)
                     if pullback_exit:
                         action = pullback_exit.get("action", "FULL")
@@ -4529,11 +5312,18 @@ class TradingEngine:
                             pullback_pos = self.pullback_strategy.get_position(symbol)
                             entry_price = pullback_pos.entry_price if pullback_pos else current_price
                             realized_pnl = (result.avg_price - entry_price) * result.filled_qty
+                            exit_pnl_pct = (result.avg_price - entry_price) / entry_price if entry_price > 0 else 0
+                            exit_type = pullback_exit.get("exit_type", "")
 
                             if action == "PARTIAL":
-                                self.pullback_strategy.close_position(symbol, partial=True, sold_qty=result.filled_qty)
+                                self.pullback_strategy.close_position(
+                                    symbol, partial=True, sold_qty=result.filled_qty,
+                                    exit_type=exit_type, pnl_pct=exit_pnl_pct,
+                                )
                             else:
-                                self.pullback_strategy.close_position(symbol)
+                                self.pullback_strategy.close_position(
+                                    symbol, exit_type=exit_type, pnl_pct=exit_pnl_pct,
+                                )
 
                             self.add_event(
                                 level="INFO",
@@ -5095,16 +5885,23 @@ class TradingEngine:
             logger.error("Failed to update cached state", error=str(e))
 
     async def _get_symbol_strategy_map(self) -> dict[str, str]:
-        """PositionLedger에서 심볼별 전략 매핑 조회"""
+        """PositionLedger + DipScalper에서 심볼별 전략 매핑 조회"""
         strategy_map: dict[str, str] = {}
         strategy_priority = {
+            "DIP_SCALPER": 0,
             "ATTACK": 1,
             "IGNITION": 2,
             "SURGE": 3,
             "PULLBACK": 4,
+            "REBOUND": 4,
             "SATELLITE": 5,
             "CORE": 6,
         }
+
+        # DipScalper active positions 먼저 반영
+        if self.dip_scalper:
+            for symbol in self.dip_scalper.get_all_positions():
+                strategy_map[symbol] = "DIP_SCALPER"
 
         try:
             open_positions = await self.position_ledger.get_open_positions()
@@ -5171,8 +5968,17 @@ class TradingEngine:
                 positions_value += position_value
                 current_equity += position_value
 
-                # Upbit API에서 직접 가져온 평균 매수가 사용
-                entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
+                # DipScalper 포지션이면 dip_scalper의 entry_price 사용
+                dip_pos = None
+                if self.dip_scalper:
+                    dip_pos = self.dip_scalper.get_all_positions().get(symbol)
+
+                if dip_pos:
+                    entry_price = dip_pos.get("entry_price", balance.avg_buy_price or current_price)
+                else:
+                    # Upbit API에서 직접 가져온 평균 매수가 사용
+                    entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
+
                 position_pnl = (current_price - entry_price) * balance.total
                 unrealized_pnl += position_pnl
 
@@ -5217,7 +6023,7 @@ class TradingEngine:
             "margin_used": 0,  # 현물은 마진 없음
             "mode": self.mode.value,
             "is_paper": settings.is_paper_mode,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": _utc_iso(),
         }
 
         # 60초마다 자산 스냅샷 DB 기록
@@ -5265,7 +6071,7 @@ class TradingEngine:
             "margin_used": perp_total - (perp_balance.free if perp_balance else 0),
             "mode": self.mode.value,
             "is_paper": settings.is_paper_mode,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": _utc_iso(),
         }
 
         # 포지션 캐시
@@ -5442,7 +6248,7 @@ class TradingEngine:
                     skipped_count += 1
                     continue
 
-                current_price = market_data.get("close", 0)
+                current_price = market_data.get("price", 0)
                 if current_price <= 0:
                     logger.warning(f"Invalid price for {symbol} - skipping")
                     skipped_count += 1
@@ -5451,25 +6257,41 @@ class TradingEngine:
                 # 전략별 포지션 복구
                 try:
                     if strategy == StrategyType.DIP_SCALPER and self.dip_scalper:
-                        # DIP_SCALPER 포지션 복구
-                        logger.info(
-                            "🔄 Restoring DIP_SCALPER position",
-                            symbol=symbol,
-                            db_quantity=position.quantity,
-                            upbit_quantity=balance.total,
-                            entry_price=position.avg_price,
+                        # DIP_SCALPER 포지션 복구 (metadata 기반 완전 복원)
+                        from src.strategies.dip_scalper import DipPosition as _DipPos
+                        ledger_entry = await self.position_ledger.get_position_by_symbol(
+                            symbol, "DIP_SCALPER"
                         )
-                        self.dip_scalper.track_position(
-                            symbol=symbol,
-                            entry_price=position.avg_price,
-                            quantity=balance.total,  # Upbit 실제 잔고 사용
-                            bid_ratio=0.5,  # 기본값
-                        )
-                        logger.info(
-                            "✅ DIP_SCALPER position restored",
-                            symbol=symbol,
-                            quantity=balance.total,
-                        )
+                        restored_from_meta = False
+                        if ledger_entry and ledger_entry.metadata:
+                            dip_pos = _DipPos.from_metadata(symbol, ledger_entry.metadata)
+                            if dip_pos:
+                                # Upbit 실제 잔고로 수량 보정
+                                dip_pos.quantity = balance.total
+                                self.dip_scalper.restore_position(dip_pos)
+                                restored_from_meta = True
+                                logger.info(
+                                    "DIP_SCALPER position restored (full state from metadata)",
+                                    symbol=symbol,
+                                    quantity=balance.total,
+                                    highest_price=dip_pos.highest_price,
+                                    tp_reached=dip_pos.tp_reached_time is not None,
+                                    hold_seconds=(datetime.utcnow() - dip_pos.entry_time).total_seconds(),
+                                )
+
+                        if not restored_from_meta:
+                            # fallback: 기존 방식 (SL/TP 재계산)
+                            logger.info(
+                                "Restoring DIP_SCALPER position (fallback, no metadata)",
+                                symbol=symbol,
+                                entry_price=position.avg_price,
+                            )
+                            self.dip_scalper.track_position(
+                                symbol=symbol,
+                                entry_price=position.avg_price,
+                                quantity=balance.total,
+                                bid_ratio=0.5,
+                            )
 
                     elif strategy == StrategyType.SATELLITE and self.satellite_strategy:
                         # SATELLITE 포지션 복구
@@ -5644,7 +6466,7 @@ class TradingEngine:
                         "status": order.status.value,
                         "filled_quantity": order.filled_quantity,
                         "avg_fill_price": order.avg_fill_price,
-                        "created_at": order.created_at.isoformat(),
+                        "created_at": order.created_at.isoformat() + "Z",
                     })
                     loaded_count += 1
 
@@ -5689,7 +6511,7 @@ class TradingEngine:
             "status": status,
             "filled_quantity": filled_qty,
             "avg_fill_price": avg_fill_price,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": _utc_iso(),
         }
         self._cached_orders.append(order)
 
@@ -5931,7 +6753,7 @@ class TradingEngine:
         """이벤트 추가"""
         event = {
             "id": str(len(self._cached_events) + 1),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": _utc_iso(),
             "level": level,
             "event_type": event_type,
             "message": message,
