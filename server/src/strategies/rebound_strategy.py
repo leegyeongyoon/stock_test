@@ -1,26 +1,24 @@
 """
-Rebound Scalper Strategy v4.2
+Rebound Scalper Strategy v5.0
 
 핵심 철학:
 - "추격 매수 ❌ → 지지선/과매도에서 반등 매수 ✅"
 - 급등 이력 불필요 (Pullback과의 핵심 차이)
-- 짧은 타겟 (0.8~2%) + 빠른 손절 (1.2%)
+- R:R = 0.7% : 1.0% = 1:1.43 (손익분기 승률 41%)
 
 진입 조건:
 - Rebound Score >= 임계값 (55/70/85)
-- 필터 통과 (변동성, 추세, 연속손실)
+- Reversal Pattern >= 8점 (반등 확인 게이팅)
+- 필터 통과 (변동성, 연속손실)
 
-청산 조건:
-- 손절: -1.2% (고정)
-- TP1: +0.8% → 50% 청산 + BE Stop
-- TP2: +1.5% → 30% 청산
-- 트레일링: 나머지 20%
-- 타임스톱: 2시간
+청산 조건 (3단계 단순화):
+- 손절: -0.7% (고정)
+- 익절: +1.0% → 전량 매도 (분할매도 없음)
+- 타임스톱: 15분
 
 특징:
-- 급등 이력 필수 ❌ (기존 Pullback의 문제점 해결)
-- 3중 안전 메커니즘 (휩쏘/하락추세/연속손실)
-- BE Stop (TP1 후 손절을 진입가로 이동)
+- 전량 매도로 분할매도 복잡성 제거
+- 반등 확인(Reversal Pattern 게이팅)으로 떨어지는 칼날 방지
 """
 
 from dataclasses import dataclass, field
@@ -129,24 +127,16 @@ class ReboundPosition:
 
 class ReboundScalperStrategy:
     """
-    Rebound Scalper 전략
+    Rebound Scalper 전략 v5.0
 
     핵심 철학:
     - "급등을 쫓지 말고, 지지선에서 반등을 잡아라"
-    - 짧고 빠른 수익 실현 (스캘핑)
-    - 철저한 리스크 관리
+    - R:R = 0.7% : 1.0% = 1:1.43 (손익분기 승률 41%)
 
-    진입 조건:
-    - Rebound Score >= 임계값
-    - 3가지 필터 통과
-    - 쿨다운 기간 충족
-
-    청산 조건:
-    - 손절: -1.2% (TP1 후 BE Stop)
-    - TP1: +0.8% → 50% 청산
-    - TP2: +1.5% → 30% 청산
-    - 트레일링: 나머지 (고점 -0.5%)
-    - 타임스톱: 2시간
+    청산 조건 (3단계):
+    - 손절: -0.7% (고정)
+    - 익절: +1.0% → 전량 매도
+    - 타임스톱: 15분
     """
 
     def __init__(self):
@@ -206,21 +196,21 @@ class ReboundScalperStrategy:
         self.alloc_l3 = getattr(settings, "rebound_alloc_l3", 0.08)
 
         # 청산 설정
-        self.stop_loss_pct = getattr(settings, "rebound_stop_loss_pct", -0.012)
-        self.tp1_pct = getattr(settings, "rebound_tp1_pct", 0.008)
-        self.tp1_ratio = getattr(settings, "rebound_tp1_ratio", 0.50)
+        self.stop_loss_pct = getattr(settings, "rebound_stop_loss_pct", -0.007)
+        self.tp1_pct = getattr(settings, "rebound_tp1_pct", 0.010)
+        self.tp1_ratio = getattr(settings, "rebound_tp1_ratio", 1.0)
         self.tp2_pct = getattr(settings, "rebound_tp2_pct", 0.015)
         self.tp2_ratio = getattr(settings, "rebound_tp2_ratio", 0.30)
         self.trailing_trigger_pct = getattr(settings, "rebound_trailing_trigger_pct", 0.02)
         self.trailing_stop_pct = getattr(settings, "rebound_trailing_stop_pct", 0.005)
-        self.time_stop_hours = getattr(settings, "rebound_time_stop_hours", 2)
+        self.time_stop_minutes = getattr(settings, "rebound_time_stop_minutes", 15)
 
         # 필터 설정
         self.consecutive_loss_limit = getattr(settings, "rebound_consecutive_loss_limit", 3)
         self.consecutive_loss_cooldown_min = getattr(settings, "rebound_consecutive_loss_cooldown_min", 120)
         self.volatility_atr_mult = getattr(settings, "rebound_volatility_atr_mult", 2.0)
         self.disable_on_volatile = getattr(settings, "rebound_disable_on_volatile", True)
-        self.disable_in_downtrend = getattr(settings, "rebound_disable_in_downtrend", True)
+        self.disable_in_downtrend = getattr(settings, "rebound_disable_in_downtrend", False)
 
         # 기타 설정
         self.max_positions = getattr(settings, "rebound_max_positions", 5)
@@ -287,6 +277,9 @@ class ReboundScalperStrategy:
 
         min_level = self.get_min_level()
         candidates = []
+        _filter_count = 0
+        _score_count = 0
+        _cooldown_count = 0
 
         for symbol in symbols:
             # 이미 포지션 있으면 스킵
@@ -295,6 +288,7 @@ class ReboundScalperStrategy:
 
             # 쿨다운 체크
             if not self._check_cooldown(symbol):
+                _cooldown_count += 1
                 continue
 
             # 시장 데이터 가져오기
@@ -305,6 +299,7 @@ class ReboundScalperStrategy:
             # 필터 체크 (먼저)
             filter_result = self.filter_manager.check_all(symbol, market_data)
             if not filter_result.can_enter:
+                _filter_count += 1
                 logger.debug(
                     "Rebound filtered",
                     symbol=symbol,
@@ -318,6 +313,14 @@ class ReboundScalperStrategy:
 
             # 레벨 체크
             if score_result.level < min_level:
+                _score_count += 1
+                logger.debug(
+                    "Rebound score too low",
+                    symbol=symbol,
+                    score=score_result.total_score,
+                    level=score_result.level,
+                    min_level=min_level,
+                )
                 continue
 
             candidates.append((score_result, market_data, filter_result))
@@ -331,6 +334,17 @@ class ReboundScalperStrategy:
             if signal:
                 signals.append(signal)
                 self._pending_signals[score_result.symbol] = signal
+
+        if _filter_count > 0 or _score_count > 0 or _cooldown_count > 0:
+            logger.debug(
+                "Rebound scan stats",
+                total_symbols=len(symbols),
+                filtered=_filter_count,
+                low_score=_score_count,
+                cooldown=_cooldown_count,
+                candidates=len(candidates),
+                min_level=min_level,
+            )
 
         if signals:
             logger.info(
@@ -439,10 +453,14 @@ class ReboundScalperStrategy:
 
     def should_exit(self, symbol: str, current_price: float) -> Optional[dict]:
         """
-        청산 조건 확인
+        청산 조건 확인 (v5.0 - 3단계 단순화)
+
+        1. 손절 -0.7% (고정)
+        2. 타임스톱 15분
+        3. 익절 +1.0% → 전량 매도
 
         Returns:
-            dict: {"action": "FULL"|"PARTIAL", "reason": str, "quantity": float, "exit_type": str}
+            dict: {"action": "FULL", "reason": str, "quantity": float, "exit_type": str}
             None: 청산 조건 미충족
         """
         pos = self._active_positions.get(symbol)
@@ -452,80 +470,38 @@ class ReboundScalperStrategy:
         if current_price <= 0 or pos.entry_price <= 0:
             return None
 
-        # 최고가 업데이트
+        # 최고가 업데이트 (호환용)
         if current_price > pos.highest_price:
             pos.highest_price = current_price
 
-        # PnL 계산
         pnl_pct = (current_price - pos.entry_price) / pos.entry_price
-        from_high_pct = (current_price - pos.highest_price) / pos.highest_price if pos.highest_price > 0 else 0
 
-        # 1. 손절 체크 (BE Stop 적용 여부에 따라)
-        effective_stop_loss = pos.entry_price if pos.be_stop_active else pos.stop_loss
-        if current_price <= effective_stop_loss:
-            exit_type = "be_stop" if pos.be_stop_active else "stop_loss"
+        # 1. 손절 (-0.7%)
+        if current_price <= pos.stop_loss:
             return {
                 "action": "FULL",
-                "reason": f"{'BE Stop' if pos.be_stop_active else 'Stop loss'}: {pnl_pct:.2%}",
+                "reason": f"Stop loss: {pnl_pct:.2%}",
                 "quantity": pos.quantity,
-                "exit_type": exit_type,
+                "exit_type": "stop_loss",
             }
 
-        # 2. 타임스톱 (2시간)
+        # 2. 타임스톱 (15분)
         elapsed = datetime.utcnow() - pos.entry_time
-        if elapsed > timedelta(hours=self.time_stop_hours):
+        if elapsed > timedelta(minutes=self.time_stop_minutes):
             return {
                 "action": "FULL",
-                "reason": f"Time stop: {elapsed.total_seconds()/3600:.1f}h",
+                "reason": f"Time stop: {elapsed.total_seconds()/60:.0f}m",
                 "quantity": pos.quantity,
                 "exit_type": "time_stop",
             }
 
-        # 3. TP1 (+0.8%) - 50% 청산
-        if not pos.tp1_hit and current_price >= pos.tp1_price:
-            pos.tp1_hit = True
-            pos.be_stop_active = True  # BE Stop 활성화
-            partial_qty = pos.initial_quantity * self.tp1_ratio
-
-            logger.info(
-                "Rebound TP1 hit + BE Stop activated",
-                symbol=symbol,
-                pnl_pct=f"{pnl_pct:.2%}",
-            )
-
-            return {
-                "action": "PARTIAL",
-                "reason": f"TP1: {pnl_pct:.2%} + BE Stop",
-                "quantity": partial_qty,
-                "exit_type": "tp1",
-            }
-
-        # 4. TP2 (+1.5%) - 30% 청산
-        if pos.tp1_hit and not pos.tp2_hit and current_price >= pos.tp2_price:
-            pos.tp2_hit = True
-            pos.trailing_active = True  # 트레일링 활성화
-            partial_qty = pos.initial_quantity * self.tp2_ratio
-
-            logger.info(
-                "Rebound TP2 hit + Trailing activated",
-                symbol=symbol,
-                pnl_pct=f"{pnl_pct:.2%}",
-            )
-
-            return {
-                "action": "PARTIAL",
-                "reason": f"TP2: {pnl_pct:.2%} + Trailing",
-                "quantity": partial_qty,
-                "exit_type": "tp2",
-            }
-
-        # 5. 트레일링 스탑 (고점 -0.5%)
-        if pos.trailing_active and from_high_pct <= -self.trailing_stop_pct:
+        # 3. 익절 (+1.0%) - 전량 매도
+        if current_price >= pos.tp1_price:
             return {
                 "action": "FULL",
-                "reason": f"Trailing stop: from high {from_high_pct:.2%}",
+                "reason": f"Take profit: {pnl_pct:.2%}",
                 "quantity": pos.quantity,
-                "exit_type": "trailing",
+                "exit_type": "tp1",
             }
 
         return None
@@ -617,10 +593,7 @@ class ReboundScalperStrategy:
                 "stop_loss_pct": self.stop_loss_pct,
                 "tp1_pct": self.tp1_pct,
                 "tp1_ratio": self.tp1_ratio,
-                "tp2_pct": self.tp2_pct,
-                "tp2_ratio": self.tp2_ratio,
-                "trailing_stop_pct": self.trailing_stop_pct,
-                "time_stop_hours": self.time_stop_hours,
+                "time_stop_minutes": self.time_stop_minutes,
             },
             "stats": {
                 **self._stats,

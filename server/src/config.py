@@ -515,24 +515,24 @@ class Settings(BaseSettings):
 
     # Pullback 청산 설정
     pullback_stop_loss_pct: float = Field(
-        default=-0.03,
-        description="손절 (-3%)",
+        default=-0.015,
+        description="손절 (-1.5%)",
     )
     pullback_take_profit_pct: float = Field(
-        default=0.05,
-        description="1차 익절 (+5%)",
+        default=0.01,
+        description="1차 익절 (+1%)",
     )
     pullback_trailing_trigger_pct: float = Field(
-        default=0.03,
-        description="트레일링 활성화 트리거 (+3%)",
+        default=0.015,
+        description="트레일링 활성화 트리거 (+1.5%)",
     )
     pullback_trailing_stop_pct: float = Field(
-        default=0.02,
-        description="트레일링 스탑 (고점 -2%)",
+        default=0.005,
+        description="트레일링 스탑 (고점 -0.5%)",
     )
     pullback_time_stop_hours: int = Field(
-        default=4,
-        description="타임스톱 (4시간)",
+        default=2,
+        description="타임스톱 (2시간)",
     )
 
     # Pullback 쿨다운
@@ -581,38 +581,38 @@ class Settings(BaseSettings):
         description="최대 동시 포지션 수",
     )
 
-    # Rebound 청산 설정 (스캘핑용 타이트 설정)
+    # Rebound 청산 설정 (공격적 R:R 1:1.43)
     rebound_stop_loss_pct: float = Field(
-        default=-0.012,
-        description="손절 (-1.2%)",
+        default=-0.007,
+        description="손절 (-0.7%)",
     )
     rebound_tp1_pct: float = Field(
-        default=0.008,
-        description="1차 익절 (+0.8%)",
+        default=0.010,
+        description="익절 (+1.0%) - 전량 매도",
     )
     rebound_tp1_ratio: float = Field(
-        default=0.50,
-        description="1차 익절 비율 (50%)",
+        default=1.0,
+        description="익절 비율 (100% 전량 매도)",
     )
     rebound_tp2_pct: float = Field(
         default=0.015,
-        description="2차 익절 (+1.5%)",
+        description="2차 익절 (미사용, 호환용)",
     )
     rebound_tp2_ratio: float = Field(
         default=0.30,
-        description="2차 익절 비율 (30%)",
+        description="2차 익절 비율 (미사용, 호환용)",
     )
     rebound_trailing_trigger_pct: float = Field(
         default=0.015,
-        description="트레일링 활성화 트리거 (+1.5%)",
+        description="트레일링 활성화 트리거 (미사용, 호환용)",
     )
     rebound_trailing_stop_pct: float = Field(
         default=0.005,
-        description="트레일링 스탑 (고점 -0.5%)",
+        description="트레일링 스탑 (미사용, 호환용)",
     )
     rebound_time_stop_minutes: int = Field(
-        default=30,
-        description="타임스톱 (30분)",
+        default=15,
+        description="타임스톱 (15분)",
     )
     rebound_cooldown_min: int = Field(
         default=30,
@@ -645,8 +645,8 @@ class Settings(BaseSettings):
         description="추세 판단 MA 기간 (5분봉 기준)",
     )
     rebound_disable_in_downtrend: bool = Field(
-        default=True,
-        description="하락 추세에서 자동 비활성화",
+        default=False,
+        description="하락 추세에서 자동 비활성화 (반등은 하락 중에 사야 함, Reversal 게이팅으로 대체)",
     )
 
     # Rebound RSI 설정

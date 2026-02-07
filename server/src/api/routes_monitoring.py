@@ -319,3 +319,175 @@ async def get_rebound_filters():
         raise HTTPException(status_code=404, detail="Rebound strategy not available")
 
     return engine.rebound_strategy.filter_manager.get_dashboard_data()
+
+
+# ============================================================
+# Pullback 전략 모니터링 (눌림목 매수)
+# ============================================================
+
+class PullbackPositionInfo(BaseModel):
+    """Pullback 포지션 정보"""
+    symbol: str
+    entry_price: float
+    quantity: float
+    stop_loss: float
+    take_profit: float
+    highest_price: float
+    trailing_active: bool
+    hold_time_min: float
+    pnl_pct: float
+
+
+class PullbackSignalInfo(BaseModel):
+    """Pullback 대기 시그널 정보"""
+    symbol: str
+    score: float
+    level: int
+    reason: str
+
+
+class PullbackStats(BaseModel):
+    """Pullback 통계"""
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    total_pnl_pct: float
+    win_rate: float
+    stop_loss_hits: int
+    trailing_hits: int
+    time_stop_hits: int
+    take_profit_hits: int
+
+
+class PullbackSettings(BaseModel):
+    """Pullback 설정"""
+    stop_loss_pct: float
+    take_profit_1_pct: float
+    trailing_trigger_pct: float
+    trailing_stop_pct: float
+    time_stop_hours: int
+
+
+class PullbackMonitoringResponse(BaseModel):
+    """Pullback 전략 모니터링 응답"""
+    strategy: str
+    enabled: bool
+    mode: str
+    positions: dict
+    pending_signals: dict
+    stats: PullbackStats
+    settings: PullbackSettings
+
+
+class PullbackCandidate(BaseModel):
+    """Pullback 후보 종목"""
+    symbol: str
+    korean_name: str = ""
+    score: float
+    level: int
+    distance_to_entry: float
+    change_rate: float
+    volume_24h: float
+    components: list[dict]
+
+
+class PullbackCandidatesResponse(BaseModel):
+    """Pullback 후보 응답"""
+    candidates: list[PullbackCandidate]
+    cache_updated_at: Optional[datetime]
+    entry_threshold: float
+
+
+@router.get("/monitoring/pullback")
+async def get_pullback_status():
+    """
+    Pullback 전략 상태 조회
+
+    현재 Pullback 전략의 전체 상태를 반환합니다.
+
+    - **enabled**: 활성화 여부
+    - **mode**: 현재 모드 (OFF/SAFE/NORMAL/AGGRESSIVE)
+    - **positions**: 활성 포지션 목록
+    - **pending_signals**: 대기 중인 시그널
+    - **stats**: 거래 통계
+    - **settings**: 청산 설정
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "pullback_strategy") or engine.pullback_strategy is None:
+        raise HTTPException(status_code=404, detail="Pullback strategy not available")
+
+    return engine.pullback_strategy.get_monitoring_data()
+
+
+@router.get("/monitoring/pullback/candidates", response_model=PullbackCandidatesResponse)
+async def get_pullback_candidates(
+    limit: int = Query(5, ge=1, le=20, description="반환할 후보 수"),
+    min_score: int = Query(0, ge=0, le=100, description="최소 점수"),
+):
+    """
+    Pullback 후보 목록
+
+    눌림목 매수 전략의 상위 후보 종목과 점수를 반환합니다.
+    """
+    engine = get_engine()
+
+    pullback_candidates = engine.get_top_pullback_candidates(limit=limit, min_score=min_score)
+
+    return PullbackCandidatesResponse(
+        candidates=[PullbackCandidate(**c) for c in pullback_candidates],
+        cache_updated_at=engine._pullback_score_cache_time,
+        entry_threshold=get_settings().pullback_score_l1,
+    )
+
+
+@router.post("/monitoring/pullback/mode")
+async def set_pullback_mode(mode: str = Query(..., description="모드 (OFF/SAFE/NORMAL/AGGRESSIVE)")):
+    """
+    Pullback 전략 모드 변경
+
+    - **OFF**: 비활성화
+    - **SAFE**: 안전 모드 (레벨 3만 진입)
+    - **NORMAL**: 일반 모드 (레벨 2+ 진입)
+    - **AGGRESSIVE**: 공격 모드 (레벨 1+ 진입)
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "pullback_strategy") or engine.pullback_strategy is None:
+        raise HTTPException(status_code=404, detail="Pullback strategy not available")
+
+    valid_modes = ["OFF", "SAFE", "NORMAL", "AGGRESSIVE"]
+    if mode.upper() not in valid_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode: {mode}. Valid modes: {valid_modes}"
+        )
+
+    engine.pullback_strategy.set_mode(mode.upper())
+
+    return {
+        "success": True,
+        "message": f"Pullback mode set to {mode.upper()}",
+        "enabled": engine.pullback_strategy.is_enabled(),
+        "mode": mode.upper(),
+    }
+
+
+@router.get("/monitoring/pullback/positions")
+async def get_pullback_positions():
+    """
+    Pullback 전략 활성 포지션 목록
+
+    현재 보유 중인 Pullback 포지션과 상태를 반환합니다.
+    """
+    engine = get_engine()
+
+    if not hasattr(engine, "pullback_strategy") or engine.pullback_strategy is None:
+        raise HTTPException(status_code=404, detail="Pullback strategy not available")
+
+    positions = engine.pullback_strategy.get_all_positions()
+
+    return {
+        "count": len(positions),
+        "positions": {sym: pos.to_dict() for sym, pos in positions.items()},
+    }

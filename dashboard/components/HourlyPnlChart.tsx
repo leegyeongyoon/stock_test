@@ -39,7 +39,7 @@ export default function HourlyPnlChart({ data, loading }: Props) {
 
   return (
     <div className="bg-slate-800 rounded-lg border border-slate-700 p-6">
-      <h3 className="text-lg font-semibold mb-4">시간대별 수익 (UTC)</h3>
+      <h3 className="text-lg font-semibold mb-4">시간대별 수익 (KST)</h3>
 
       <div className="flex items-end gap-1 h-48">
         {hourlyData.map((hourData) => {
@@ -76,13 +76,13 @@ export default function HourlyPnlChart({ data, loading }: Props) {
         <div>
           <span className="text-slate-400">최고 시간대: </span>
           <span className="text-green-400 font-medium">
-            {bestHour}:00 UTC
+            {bestHour}:00 KST
           </span>
         </div>
         <div>
           <span className="text-slate-400">최저 시간대: </span>
           <span className="text-red-400 font-medium">
-            {worstHour}:00 UTC
+            {worstHour}:00 KST
           </span>
         </div>
       </div>

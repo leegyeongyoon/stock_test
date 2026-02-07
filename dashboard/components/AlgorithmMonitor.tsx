@@ -186,7 +186,7 @@ export default function AlgorithmMonitor({ refreshInterval = 3000 }: Props) {
       {/* 마지막 업데이트 */}
       <div className="mt-2 text-xs text-slate-600 text-right">
         {data?.cache_updated_at ? (
-          `갱신: ${new Date(data.cache_updated_at).toLocaleTimeString('ko-KR')}`
+          `갱신: ${new Date(data.cache_updated_at).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' })}`
         ) : (
           '갱신 대기 중...'
         )}

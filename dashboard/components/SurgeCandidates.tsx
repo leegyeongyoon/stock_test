@@ -256,7 +256,7 @@ export default function SurgeCandidates({ candidates: externalCandidates, loadin
           <span className="text-slate-400 text-xs">👀 {watching.length}개</span>
         </div>
         <div className="text-xs text-slate-500">
-          {lastUpdated && `${lastUpdated.toLocaleTimeString('ko-KR')}`}
+          {lastUpdated && `${lastUpdated.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' })}`}
         </div>
       </div>
 

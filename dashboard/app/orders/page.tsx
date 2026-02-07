@@ -106,6 +106,7 @@ export default function OrdersPage() {
                   >
                     <td className="p-3 text-sm text-slate-400">
                       {new Date(order.created_at).toLocaleString('ko-KR', {
+                        timeZone: 'Asia/Seoul',
                         month: '2-digit',
                         day: '2-digit',
                         hour: '2-digit',

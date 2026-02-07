@@ -405,6 +405,91 @@ export interface ReboundSetModeResponse {
 }
 
 // ============================================
+// Pullback Strategy Types (눌림목 매수)
+// ============================================
+
+export type PullbackMode = 'OFF' | 'SAFE' | 'NORMAL' | 'AGGRESSIVE'
+
+export interface PullbackPositionInfo {
+  entry_price: number
+  avg_down_price: number
+  is_averaged_down: boolean
+  quantity: number
+  stop_loss: number
+  take_profit: number
+  highest_price: number
+  trailing_active: boolean
+  hold_time_min: number
+  pnl_pct: number
+}
+
+export interface PullbackSignalInfo {
+  score: number
+  level: number
+  reason: string
+}
+
+export interface PullbackStats {
+  total_trades: number
+  winning_trades: number
+  losing_trades: number
+  total_pnl_pct: number
+  win_rate: number
+  stop_loss_hits: number
+  trailing_hits: number
+  time_stop_hits: number
+  take_profit_hits: number
+  breakeven_hits: number
+}
+
+export interface PullbackSettings {
+  stop_loss_pct: number
+  take_profit_1_pct: number
+  trailing_trigger_pct: number
+  trailing_stop_pct: number
+  time_stop_hours: number
+}
+
+export interface PullbackMonitoringResponse {
+  strategy: string
+  enabled: boolean
+  mode: string
+  positions: Record<string, PullbackPositionInfo>
+  pending_signals: Record<string, PullbackSignalInfo>
+  stats: PullbackStats
+  settings: PullbackSettings
+}
+
+export interface PullbackCandidate {
+  symbol: string
+  korean_name: string
+  score: number
+  level: number
+  distance_to_entry: number
+  change_rate: number
+  volume_24h: number
+  components: {
+    name: string
+    score: number
+    max_score: number
+    details?: Record<string, unknown>
+  }[]
+}
+
+export interface PullbackCandidatesResponse {
+  candidates: PullbackCandidate[]
+  cache_updated_at: string | null
+  entry_threshold: number
+}
+
+export interface PullbackSetModeResponse {
+  success: boolean
+  message: string
+  enabled: boolean
+  mode: PullbackMode
+}
+
+// ============================================
 // API Client
 // ============================================
 
@@ -579,6 +664,29 @@ class ApiClient {
     params.set('limit', limit.toString())
     params.set('min_score', minScore.toString())
     return this.fetch<ReboundCandidatesResponse>(`/monitoring/rebound/candidates?${params}`)
+  }
+
+  // ---- Pullback Strategy API ----
+
+  async getPullbackStatus(): Promise<PullbackMonitoringResponse> {
+    return this.fetch<PullbackMonitoringResponse>('/monitoring/pullback')
+  }
+
+  async setPullbackMode(mode: PullbackMode): Promise<PullbackSetModeResponse> {
+    return this.fetch<PullbackSetModeResponse>(`/monitoring/pullback/mode?mode=${mode}`, {
+      method: 'POST',
+    })
+  }
+
+  async getPullbackPositions(): Promise<{ count: number; positions: Record<string, unknown> }> {
+    return this.fetch('/monitoring/pullback/positions')
+  }
+
+  async getPullbackCandidates(limit: number = 5, minScore: number = 0): Promise<PullbackCandidatesResponse> {
+    const params = new URLSearchParams()
+    params.set('limit', limit.toString())
+    params.set('min_score', minScore.toString())
+    return this.fetch<PullbackCandidatesResponse>(`/monitoring/pullback/candidates?${params}`)
   }
 }
 

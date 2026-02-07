@@ -242,10 +242,11 @@ class AnalyticsService:
         """시간대별 수익 조회"""
         start_date, end_date = self._get_date_range(period)
 
-        # TradeModel에서 시간대별 집계 (PostgreSQL 호환)
+        # TradeModel에서 시간대별 집계 (KST 기준, PostgreSQL AT TIME ZONE)
+        kst_executed_at = func.timezone('Asia/Seoul', TradeModel.executed_at)
         stmt = (
             select(
-                func.extract('hour', TradeModel.executed_at).label("hour"),
+                func.extract('hour', kst_executed_at).label("hour"),
                 func.sum(TradeModel.realized_pnl).label("pnl"),
                 func.count().label("trades_count"),
             )
@@ -253,7 +254,7 @@ class AnalyticsService:
                 TradeModel.executed_at >= start_date,
                 TradeModel.executed_at <= end_date,
             )
-            .group_by(func.extract('hour', TradeModel.executed_at))
+            .group_by(func.extract('hour', kst_executed_at))
         )
 
         result = await self._session.execute(stmt)

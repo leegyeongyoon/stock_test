@@ -193,6 +193,35 @@ class UpbitExchange(BaseExchange):
             print(f"[Upbit] get_balance error: {e}")
             return None
 
+    @staticmethod
+    def _align_price_to_tick(price: float) -> int | float:
+        """Upbit KRW 마켓 호가 단위에 맞춰 가격 올림 처리"""
+        if price < 10:
+            tick = 0.01
+        elif price < 100:
+            tick = 0.1
+        elif price < 1000:
+            tick = 1
+        elif price < 5000:
+            tick = 5
+        elif price < 10000:
+            tick = 10
+        elif price < 50000:
+            tick = 50
+        elif price < 100000:
+            tick = 100
+        elif price < 500000:
+            tick = 500
+        else:
+            tick = 1000
+
+        import math
+        aligned = math.ceil(price / tick) * tick
+        # 정수 호가 단위면 int로, 소수면 float로
+        if tick >= 1:
+            return int(aligned)
+        return round(aligned, 2)
+
     async def place_order(
         self,
         symbol: str,
@@ -232,10 +261,11 @@ class UpbitExchange(BaseExchange):
                     params["ord_type"] = "market"
                     params["volume"] = str(quantity)
             else:
-                # 지정가 주문
+                # 지정가 주문 — Upbit 호가 단위에 맞춰 가격 정렬
+                adjusted_price = self._align_price_to_tick(price)
                 params["ord_type"] = "limit"
                 params["volume"] = str(quantity)
-                params["price"] = str(int(price))
+                params["price"] = str(adjusted_price)
 
             result = await self._request("POST", "/orders", params=params)
 

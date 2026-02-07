@@ -1,22 +1,18 @@
 """Rebound Score Calculator - 반등 스캘핑 점수 계산기
 
-v4.2: Pullback 전략을 대체하는 새로운 반등 스캘핑 전략
-
-기존 Pullback의 문제점:
-- "24시간 내 급등 이력 필수" 조건 → 대부분 코인 탈락
-- 한 번도 실행된 적 없음
-
-새로운 Rebound Score 접근법:
-- 급등 이력 조건 제거
-- 지지선/RSI 과매도/호가 불균형 기반 반등 매수
-- 목표: 0.8~2% 스캘핑
+v5.0: 반등 확인 강화 + 게이팅 조건 추가
 
 Rebound Score 구성 (0~100점):
-1. Support Proximity (0~25): VWAP/SMA20/BB하단 근접도
+1. Support Proximity (0~20): VWAP/SMA20/BB하단 근접도
 2. RSI Oversold (0~20): RSI 30 이하 과매도 영역
 3. Orderbook Imbalance (0~20): 매수호가 우세 구조
-4. Reversal Pattern (0~20): 반등 패턴 (양봉, 아래꼬리)
-5. Volatility Score (0~15): 적정 변동성 (너무 높거나 낮으면 감점)
+4. Reversal Pattern (0~30): 반등 패턴 (양봉, 연속 양봉, 모멘텀) - 핵심
+5. Volatility Score (0~10): 적정 변동성
+
+핵심 변경:
+- Reversal Pattern 가중치 20→30 (반등 확인이 핵심)
+- 연속 양봉 패턴 추가 (0~8점)
+- Reversal Pattern < 8점이면 진입 금지 (게이팅)
 """
 
 from dataclasses import dataclass, field
@@ -83,18 +79,14 @@ class ReboundScoreResult:
 
 class ReboundScoreCalculator:
     """
-    Rebound Score 계산기 - 반등 매수 적합성 평가
-
-    핵심 철학:
-    - "추격 매수 ❌ → 지지선/과매도에서 반등 매수 ✅"
-    - 급등 이력 조건 제거 (기존 Pullback과 다른 점)
+    Rebound Score 계산기 v5.0 - 반등 매수 적합성 평가
 
     점수 구성:
-    1. Support Proximity (0~25): 지지선 근접도
+    1. Support Proximity (0~20): 지지선 근접도
     2. RSI Oversold (0~20): 과매도 영역
     3. Orderbook Imbalance (0~20): 매수호가 우세
-    4. Reversal Pattern (0~20): 반등 패턴
-    5. Volatility Score (0~15): 적정 변동성
+    4. Reversal Pattern (0~30): 반등 패턴 (핵심, 게이팅 적용)
+    5. Volatility Score (0~10): 적정 변동성
     """
 
     def __init__(self):
@@ -146,7 +138,7 @@ class ReboundScoreCalculator:
         if price <= 0:
             return self._empty_result(symbol)
 
-        # 1. Support Proximity (0~25) - 지지선 근접도
+        # 1. Support Proximity (0~20) - 지지선 근접도
         support_comp = self._calc_support_proximity(market_data)
         components.append(support_comp)
 
@@ -158,13 +150,28 @@ class ReboundScoreCalculator:
         orderbook_comp = self._calc_orderbook_imbalance(market_data)
         components.append(orderbook_comp)
 
-        # 4. Reversal Pattern (0~20) - 반등 패턴
+        # 4. Reversal Pattern (0~30) - 반등 패턴 (핵심)
         reversal_comp = self._calc_reversal_pattern(market_data)
         components.append(reversal_comp)
 
-        # 5. Volatility Score (0~15) - 적정 변동성
+        # 5. Volatility Score (0~10) - 적정 변동성
         volatility_comp = self._calc_volatility_score(market_data)
         components.append(volatility_comp)
+
+        # 반등 확인 게이팅: Reversal < 8점이면 진입 금지
+        if reversal_comp.score < 8:
+            return ReboundScoreResult(
+                symbol=symbol,
+                total_score=0,
+                level=0,
+                target_allocation=0,
+                components=components,
+                entry_price_target=price,
+                stop_loss_price=self._calc_stop_loss(market_data, price),
+                support_distance_pct=support_comp.details.get("min_distance_pct", 0),
+                rsi=market_data.get("rsi", 50),
+                orderbook_ratio=orderbook_comp.details.get("bid_ask_ratio", 1.0),
+            )
 
         # 총점 계산
         total_score = sum(c.score for c in components)
@@ -210,12 +217,13 @@ class ReboundScoreCalculator:
 
     def _calc_support_proximity(self, market_data: dict) -> ReboundScoreComponent:
         """
-        Support Proximity (0~25) - 지지선 근접도
+        Support Proximity (0~20) - 지지선 근접도
 
         지지선:
         - VWAP (거래량 가중 평균)
         - 20 SMA (5분봉)
         - 볼린저밴드 하단
+        - 24h 저점
         """
         price = market_data.get("price", 0)
         vwap = market_data.get("vwap", 0)
@@ -230,63 +238,63 @@ class ReboundScoreCalculator:
             return ReboundScoreComponent(
                 name="Support Proximity",
                 score=0,
-                max_score=25,
+                max_score=20,
                 details={"error": "Invalid price"},
             )
 
         distances = []
 
-        # VWAP 대비 거리 (0~8점)
+        # VWAP 대비 거리 (0~6점)
         if vwap > 0:
             vwap_dist = (price - vwap) / vwap
             details["vwap_distance"] = vwap_dist
             distances.append(abs(vwap_dist))
 
-            if vwap_dist <= -0.02:  # VWAP 2% 아래 (강한 지지 영역)
-                score += 8
-            elif vwap_dist <= 0:  # VWAP 이하
+            if vwap_dist <= -0.02:
                 score += 6
-            elif vwap_dist <= 0.01:  # VWAP 근처
+            elif vwap_dist <= 0:
                 score += 4
-            elif vwap_dist <= 0.02:  # VWAP 약간 위
-                score += 2
+            elif vwap_dist <= 0.01:
+                score += 3
+            elif vwap_dist <= 0.02:
+                score += 1
 
-        # SMA20 대비 거리 (0~7점)
+        # SMA20 대비 거리 (0~5점)
         if sma_20 > 0:
             sma_dist = (price - sma_20) / sma_20
             details["sma20_distance"] = sma_dist
             distances.append(abs(sma_dist))
 
-            if sma_dist <= -0.02:  # SMA 2% 아래
-                score += 7
-            elif sma_dist <= 0:  # SMA 이하
+            if sma_dist <= -0.02:
                 score += 5
-            elif sma_dist <= 0.01:  # SMA 근처
-                score += 3
+            elif sma_dist <= 0:
+                score += 4
+            elif sma_dist <= 0.01:
+                score += 2
             elif sma_dist <= 0.02:
                 score += 1
 
-        # 볼린저밴드 하단 대비 거리 (0~6점)
+        # 볼린저밴드 하단 대비 거리 (0~5점)
         if bb_lower > 0:
             bb_dist = (price - bb_lower) / bb_lower
             details["bb_lower_distance"] = bb_dist
             distances.append(abs(bb_dist))
 
-            if bb_dist <= 0:  # BB 하단 이하 (터치)
-                score += 6
-            elif bb_dist <= 0.01:  # BB 하단 근처
-                score += 4
+            if bb_dist <= 0:
+                score += 5
+            elif bb_dist <= 0.01:
+                score += 3
             elif bb_dist <= 0.02:
-                score += 2
+                score += 1
 
         # 24h 저점 대비 (0~4점)
         if lowest_24h > 0:
             low_dist = (price - lowest_24h) / lowest_24h
             details["lowest_24h_distance"] = low_dist
 
-            if low_dist <= 0.01:  # 저점 1% 이내
+            if low_dist <= 0.01:
                 score += 4
-            elif low_dist <= 0.03:  # 저점 3% 이내
+            elif low_dist <= 0.03:
                 score += 2
 
         # 최소 거리 기록
@@ -294,8 +302,8 @@ class ReboundScoreCalculator:
 
         return ReboundScoreComponent(
             name="Support Proximity",
-            score=min(25, score),
-            max_score=25,
+            score=min(20, score),
+            max_score=20,
             details=details,
         )
 
@@ -413,18 +421,22 @@ class ReboundScoreCalculator:
 
     def _calc_reversal_pattern(self, market_data: dict) -> ReboundScoreComponent:
         """
-        Reversal Pattern (0~20) - 반등 패턴
+        Reversal Pattern (0~30) - 반등 패턴 (핵심 컴포넌트)
 
         확인 지표:
-        - 양봉 출현 (하락 후 양봉)
-        - 긴 아래꼬리 (매수세 유입)
-        - 거래량 증가 (반등 확인)
-        - 가격 안정화 (변동성 감소)
+        - 1분봉 양봉 (0~8점)
+        - 5분봉 반등 모멘텀 (0~8점)
+        - 연속 양봉 패턴 (0~8점) - 신규
+        - RVOL 확인 (0~3점)
+        - Close Position (0~3점)
+
+        게이팅: 이 점수가 8점 미만이면 calculate()에서 진입 차단
         """
         change_1m = market_data.get("change_1m", 0)
         change_5m = market_data.get("change_5m", 0)
         rvol = market_data.get("rvol", 1.0)
         close_pos = market_data.get("close_pos", 0.5)
+        recent_candles = market_data.get("candles_5m", [])
 
         score = 0.0
         details = {
@@ -434,84 +446,108 @@ class ReboundScoreCalculator:
             "close_pos": close_pos,
         }
 
-        # 1분봉 양봉 (0~6점)
-        if change_1m > 0.005:  # +0.5% 이상 양봉
-            score += 6
+        # 1분봉 양봉 (0~8점)
+        if change_1m > 0.005:
+            score += 8
             details["candle_1m"] = "STRONG_GREEN"
-        elif change_1m > 0.002:  # +0.2% 양봉
-            score += 4
+        elif change_1m > 0.002:
+            score += 6
             details["candle_1m"] = "GREEN"
-        elif change_1m > 0:  # 양봉
-            score += 2
+        elif change_1m > 0:
+            score += 3
             details["candle_1m"] = "SLIGHT_GREEN"
-        elif change_1m > -0.002:  # 보합
+        elif change_1m > -0.002:
             score += 1
             details["candle_1m"] = "FLAT"
         else:
             details["candle_1m"] = "RED"
 
-        # 5분봉 반등 조짐 (0~6점)
-        # 5분 전 대비 현재가 상승 = 반등 시작
-        if change_5m > 0.01:  # +1% 반등
-            score += 6
+        # 5분봉 반등 모멘텀 (0~8점)
+        if change_5m > 0.01:
+            score += 8
             details["momentum_5m"] = "STRONG_REVERSAL"
-        elif change_5m > 0.005:  # +0.5% 반등
-            score += 4
+        elif change_5m > 0.005:
+            score += 6
             details["momentum_5m"] = "REVERSAL"
-        elif change_5m > 0:  # 상승 전환
-            score += 2
+        elif change_5m > 0:
+            score += 3
             details["momentum_5m"] = "TURNING"
-        elif change_5m > -0.005:  # 하락 둔화
+        elif change_5m > -0.005:
             score += 1
             details["momentum_5m"] = "SLOWING"
         else:
             details["momentum_5m"] = "FALLING"
 
-        # 거래량 확인 (0~4점)
+        # 연속 양봉 패턴 (0~8점) - 최근 5분봉 3개 중 양봉 카운트
+        bullish_count = 0
+        if recent_candles and len(recent_candles) >= 3:
+            for c in recent_candles[-3:]:
+                if isinstance(c, dict):
+                    c_close = c.get("close", 0)
+                    c_open = c.get("open", 0)
+                else:
+                    c_close = getattr(c, "close", 0)
+                    c_open = getattr(c, "open", 0)
+                if c_close > c_open:
+                    bullish_count += 1
+
+            if bullish_count >= 3:
+                score += 8
+                details["consecutive_bullish"] = "3_BULLISH"
+            elif bullish_count >= 2:
+                score += 5
+                details["consecutive_bullish"] = "2_BULLISH"
+            elif bullish_count >= 1:
+                score += 2
+                details["consecutive_bullish"] = "1_BULLISH"
+            else:
+                details["consecutive_bullish"] = "NONE"
+        else:
+            details["consecutive_bullish"] = "NO_DATA"
+
+        # RVOL 확인 (0~3점)
         if rvol >= 2.0:
-            score += 4
+            score += 3
             details["volume_confirm"] = "HIGH"
         elif rvol >= 1.5:
-            score += 3
+            score += 2
             details["volume_confirm"] = "ELEVATED"
         elif rvol >= 1.0:
-            score += 2
+            score += 1
             details["volume_confirm"] = "NORMAL"
         else:
-            score += 1
             details["volume_confirm"] = "LOW"
 
-        # Close Position (캔들 상단 마감, 0~4점)
+        # Close Position (0~3점)
         if close_pos >= 0.8:
-            score += 4
+            score += 3
             details["close_strength"] = "STRONG"
         elif close_pos >= 0.6:
-            score += 3
+            score += 2
             details["close_strength"] = "GOOD"
         elif close_pos >= 0.4:
-            score += 2
+            score += 1
             details["close_strength"] = "NEUTRAL"
         else:
-            score += 0
             details["close_strength"] = "WEAK"
 
         return ReboundScoreComponent(
             name="Reversal Pattern",
-            score=min(20, score),
-            max_score=20,
+            score=min(30, score),
+            max_score=30,
             details=details,
         )
 
     def _calc_volatility_score(self, market_data: dict) -> ReboundScoreComponent:
         """
-        Volatility Score (0~15) - 적정 변동성
+        Volatility Score (0~10) - 적정 변동성
 
         너무 높음: 휩쏘 위험 → 감점
         너무 낮음: 반등 기대 어려움 → 감점
         적정: 스캘핑 적합 → 가점
         """
-        atr_pct = market_data.get("atr_pct", 0.01)  # ATR / price
-        price_range_pct = market_data.get("price_range_pct", 0.02)  # 24h 변동폭
+        atr_pct = market_data.get("atr_pct", 0.01)
+        price_range_pct = market_data.get("price_range_pct", 0.02)
 
         score = 0.0
         details = {
@@ -519,46 +555,38 @@ class ReboundScoreCalculator:
             "price_range_pct": price_range_pct,
         }
 
-        # ATR 기반 (0~8점)
+        # ATR 기반 (0~6점)
         if 0.005 <= atr_pct <= 0.02:
-            # 적정 변동성 (0.5~2%)
-            score += 8
+            score += 6
             details["atr_zone"] = "OPTIMAL"
         elif 0.003 <= atr_pct <= 0.03:
-            # 허용 범위
-            score += 5
+            score += 4
             details["atr_zone"] = "ACCEPTABLE"
         elif atr_pct < 0.003:
-            # 너무 낮음
-            score += 2
+            score += 1
             details["atr_zone"] = "TOO_LOW"
         else:
-            # 너무 높음 (휩쏘 위험)
             score += 0
             details["atr_zone"] = "TOO_HIGH"
 
-        # 24h 변동폭 (0~7점)
+        # 24h 변동폭 (0~4점)
         if 0.02 <= price_range_pct <= 0.08:
-            # 적정 변동폭 (2~8%)
-            score += 7
+            score += 4
             details["range_zone"] = "OPTIMAL"
         elif 0.01 <= price_range_pct <= 0.12:
-            # 허용 범위
-            score += 4
+            score += 2
             details["range_zone"] = "ACCEPTABLE"
         elif price_range_pct < 0.01:
-            # 너무 낮음
-            score += 2
+            score += 1
             details["range_zone"] = "TOO_LOW"
         else:
-            # 너무 높음 (급변장)
             score += 0
             details["range_zone"] = "TOO_HIGH"
 
         return ReboundScoreComponent(
             name="Volatility Score",
-            score=min(15, score),
-            max_score=15,
+            score=min(10, score),
+            max_score=10,
             details=details,
         )
 

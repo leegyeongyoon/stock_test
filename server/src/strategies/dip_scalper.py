@@ -105,6 +105,8 @@ class DipPosition:
     # v2.4: 스마트 청산용
     tp_reached_time: Optional[datetime] = None  # TP 도달 시각
     tp_reached_price: float = 0.0  # TP 도달 시 가격
+    # v2.5: DB 기반 상태 관리용
+    _dirty: bool = field(default=True, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         pnl_pct = (self.highest_price - self.entry_price) / self.entry_price if self.entry_price > 0 else 0
@@ -120,6 +122,51 @@ class DipPosition:
             "pnl_pct": f"{pnl_pct:.2%}",
             "hold_minutes": f"{hold_minutes:.1f}",
         }
+
+    def to_metadata(self) -> dict:
+        """DipPosition → metadata dict (DB 저장용)"""
+        return {
+            "dip_state": {
+                "entry_price": self.entry_price,
+                "quantity": self.quantity,
+                "entry_time": self.entry_time.isoformat(),
+                "stop_loss": self.stop_loss,
+                "take_profit": self.take_profit,
+                "highest_price": self.highest_price,
+                "bid_ratio": self.bid_ratio,
+                "tp_reached_time": self.tp_reached_time.isoformat() if self.tp_reached_time else None,
+                "tp_reached_price": self.tp_reached_price,
+            }
+        }
+
+    @staticmethod
+    def from_metadata(symbol: str, metadata: dict) -> Optional["DipPosition"]:
+        """metadata dict → DipPosition (DB 복원용)"""
+        dip_state = metadata.get("dip_state")
+        if not dip_state:
+            return None
+
+        try:
+            entry_time = datetime.fromisoformat(dip_state["entry_time"])
+            tp_reached_time_raw = dip_state.get("tp_reached_time")
+            tp_reached_time = datetime.fromisoformat(tp_reached_time_raw) if tp_reached_time_raw else None
+
+            return DipPosition(
+                symbol=symbol,
+                entry_price=dip_state["entry_price"],
+                quantity=dip_state["quantity"],
+                entry_time=entry_time,
+                stop_loss=dip_state["stop_loss"],
+                take_profit=dip_state["take_profit"],
+                highest_price=dip_state["highest_price"],
+                bid_ratio=dip_state.get("bid_ratio", 0.5),
+                tp_reached_time=tp_reached_time,
+                tp_reached_price=dip_state.get("tp_reached_price", 0.0),
+                _dirty=False,  # DB에서 복원 → clean 상태
+            )
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning("Failed to restore DipPosition from metadata", symbol=symbol, error=str(e))
+            return None
 
 
 class DipScalperStrategy:
@@ -146,6 +193,28 @@ class DipScalperStrategy:
     v2.1: 장 초반 워밍업 (9:00~9:30 비활성화)
     v2.2: 1분봉/3분봉 선택 (candle_interval 설정)
     """
+
+    @staticmethod
+    def _upbit_tick_size(price: float) -> float:
+        """Upbit KRW 마켓 호가 단위 (가격대별)"""
+        if price < 10:
+            return 0.01
+        elif price < 100:
+            return 0.1
+        elif price < 1000:
+            return 1
+        elif price < 5000:
+            return 5
+        elif price < 10000:
+            return 10
+        elif price < 50000:
+            return 50
+        elif price < 100000:
+            return 100
+        elif price < 500000:
+            return 500
+        else:
+            return 1000
 
     def __init__(self):
         self._enabled = False
@@ -419,10 +488,12 @@ class DipScalperStrategy:
             if price <= 0:
                 continue
 
-            # 이미 포지션 있거나 시그널 대기 중이면 스킵 (중복 방지)
+            # 이미 포지션/시그널/미체결 있으면 스킵 (중복 방지)
             if symbol in self._active_positions:
                 continue
             if symbol in self._pending_signals:
+                continue
+            if symbol in self._pending_orders:
                 continue
 
             # 쿨다운 체크
@@ -529,28 +600,20 @@ class DipScalperStrategy:
         - 현재가: 9,700원 (-3%)
         - 결과: 9,760원으로 주문 → 즉시 체결 (현재가보다 높음)
         """
-        # v2.3: 임계값 가격 기준 지정가 계산
-        # 이전 봉 종가 역산: prev_close = price / (1 + candle_change)
-        # 임계값 가격: threshold_price = prev_close * (1 + threshold)
-        # 지정가: 임계값 가격 + 한 호가(0.1%) → 확실히 체결
+        # v2.6: 현재가 + 1틱 지정가 (Upbit 호가단위 기반, 즉시 체결 보장)
+        # 기존 v2.5: price * 1.001 → int() 변환 시 소수점 버려져서 현재가와 동일 → 미체결
+        # 변경: Upbit 실제 호가단위(tick_size) 기준 1틱 위 → 확실한 즉시 체결
         if self.use_limit_order and candle_change < 0:
-            # 이전 봉 종가 역산
-            prev_close = price / (1 + candle_change)
-            # 임계값 가격 = 이전 봉 종가 * (1 + threshold)
-            # threshold는 음수 (예: -0.024)
-            threshold_price = prev_close * (1 + threshold)
-            # 한 호가 위로 설정 (0.1%) → 임계값 가격 매물 확실히 체결
-            entry_price = threshold_price * (1 + self.limit_offset_pct)
+            tick = self._upbit_tick_size(price)
+            entry_price = price + tick
 
-            logger.debug(
-                "Dip entry price calculated",
+            logger.info(
+                "Dip entry price calculated (v2.6: tick-based)",
                 symbol=symbol,
                 current_price=price,
-                candle_change=f"{candle_change:.2%}",
-                prev_close=prev_close,
-                threshold=f"{threshold:.2%}",
-                threshold_price=threshold_price,
+                tick_size=tick,
                 entry_price=entry_price,
+                candle_change=f"{candle_change:.2%}",
             )
         else:
             entry_price = price
@@ -615,6 +678,30 @@ class DipScalperStrategy:
             sl_pct=f"{self.stop_loss_pct:.2%}",
         )
 
+    def restore_position(self, pos: DipPosition) -> None:
+        """DB에서 복원된 DipPosition을 SL/TP/entry_time 재계산 없이 그대로 등록"""
+        self._active_positions[pos.symbol] = pos
+        self._pending_signals.pop(pos.symbol, None)
+        logger.info(
+            "Dip position restored (full state)",
+            symbol=pos.symbol,
+            entry_price=pos.entry_price,
+            quantity=pos.quantity,
+            highest_price=pos.highest_price,
+            tp_reached=pos.tp_reached_time is not None,
+            hold_seconds=(datetime.utcnow() - pos.entry_time).total_seconds(),
+        )
+
+    def get_dirty_positions(self) -> list[DipPosition]:
+        """dirty 플래그가 설정된 포지션 목록 반환"""
+        return [pos for pos in self._active_positions.values() if pos._dirty]
+
+    def mark_clean(self, symbol: str) -> None:
+        """포지션의 dirty 플래그를 해제"""
+        pos = self._active_positions.get(symbol)
+        if pos:
+            pos._dirty = False
+
     def _get_dynamic_tp(self, bid_ratio: float) -> float:
         """
         v2.1: 호가창 상태에 따른 동적 익절 계산
@@ -648,6 +735,7 @@ class DipScalperStrategy:
         # 최고가 업데이트
         if current_price > pos.highest_price:
             pos.highest_price = current_price
+            pos._dirty = True
 
         pnl_pct = (current_price - pos.entry_price) / pos.entry_price
 
@@ -667,6 +755,7 @@ class DipScalperStrategy:
             if pos.tp_reached_time is None:
                 pos.tp_reached_time = datetime.utcnow()
                 pos.tp_reached_price = current_price
+                pos._dirty = True
                 logger.info(
                     "TP reached - monitoring for surge/sideways",
                     symbol=symbol,

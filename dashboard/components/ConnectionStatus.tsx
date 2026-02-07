@@ -40,7 +40,7 @@ export default function ConnectionStatus({ pollingInterval = 5000 }: Props) {
       </span>
       {lastUpdate && connected && (
         <span className="text-xs text-slate-500">
-          {lastUpdate.toLocaleTimeString()}
+          {lastUpdate.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' })}
         </span>
       )}
     </div>

@@ -11,6 +11,7 @@ import EventsTimeline from '@/components/EventsTimeline'
 import SurgeCandidates from '@/components/SurgeCandidates'
 import AlgorithmMonitor from '@/components/AlgorithmMonitor'
 import ReboundMonitor from '@/components/ReboundMonitor'
+import PullbackMonitor from '@/components/PullbackMonitor'
 import DipScalperMonitor from '@/components/DipScalperMonitor'
 import { formatKRW } from '@/lib/currency'
 
@@ -347,8 +348,15 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Algorithm Monitor (필터 통계) */}
-      <AlgorithmMonitor refreshInterval={3000} />
+      {/* 눌림목 매수 + Algorithm Monitor */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2">
+          <PullbackMonitor refreshInterval={3000} />
+        </div>
+        <div>
+          <AlgorithmMonitor refreshInterval={3000} />
+        </div>
+      </div>
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

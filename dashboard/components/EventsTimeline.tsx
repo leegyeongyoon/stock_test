@@ -81,7 +81,7 @@ export default function EventsTimeline({ events, loading, maxItems = 20 }: Props
                       {event.event_type}
                     </span>
                     <span className="text-xs text-slate-600">
-                      {new Date(event.timestamp).toLocaleTimeString()}
+                      {new Date(event.timestamp).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' })}
                     </span>
                   </div>
                   <p className="text-sm text-slate-300 mt-1 break-words">
