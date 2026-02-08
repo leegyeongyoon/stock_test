@@ -171,7 +171,7 @@ class DipPosition:
 
 class DipScalperStrategy:
     """
-    급락 스캘퍼 전략 v2.2
+    급락 스캘퍼 전략 v2.5
 
     핵심: 캔들 급락 감지 → 조건 확인 → 지정가 매수
 
@@ -192,7 +192,23 @@ class DipScalperStrategy:
 
     v2.1: 장 초반 워밍업 (9:00~9:30 비활성화)
     v2.2: 1분봉/3분봉 선택 (candle_interval 설정)
+
+    v2.5 개선:
+    - 저유동성 코인 블랙리스트 추가
+    - 거래대금 30억 이상 필터
     """
+
+    # 저유동성/손실 코인 블랙리스트 (과거 손실 분석 기반)
+    _BLACKLIST: frozenset[str] = frozenset({
+        # Pullback 손실 종목
+        "SENT", "POKT", "STORJ", "STMX", "HUNT", "BORA",
+        # REBOUND/DIP 손실 종목
+        "ELSA", "BREV", "WET", "HOLO", "LA", "WLD", "ZK",
+        "CPOOL", "SXP", "XEC", "ZKP", "SNT", "MMT",
+    })
+
+    # 최소 거래대금 (30억)
+    _MIN_VOLUME_24H: float = 3_000_000_000
 
     @staticmethod
     def _upbit_tick_size(price: float) -> float:
@@ -418,6 +434,35 @@ class DipScalperStrategy:
 
         return True, bid_ratio, f"매수벽 확인: {bid_ratio:.0%}"
 
+    def _check_volume_trend(self, rvol_1m: float, rvol_5m: float, rvol_30m: float) -> tuple[bool, str]:
+        """
+        v6.0: 거래량 트렌드 확인 (급락에 진입해야 하는지)
+
+        좋은 패턴: RVOL_1m > RVOL_5m (방금 거래량 급증 = 패닉 셀링)
+        나쁜 패턴: RVOL_1m < RVOL_5m < RVOL_30m (거래량 감소 중 = 관심 없음)
+
+        Args:
+            rvol_1m: 1분봉 상대거래량
+            rvol_5m: 5분봉 상대거래량
+            rvol_30m: 30분봉 상대거래량
+
+        Returns:
+            (통과 여부, 사유)
+        """
+        # 좋은 패턴: 최근 거래량 급증 (1분봉이 5분봉보다 높음)
+        if rvol_1m >= rvol_5m:
+            return True, "Volume spike just happened"
+
+        # 나쁜 패턴: 거래량이 지속적으로 감소 중
+        if rvol_1m < rvol_5m * 0.8:
+            return False, "Volume declining - avoid"
+
+        # 30분봉 대비 체크 (장기 트렌드)
+        if rvol_30m > 1.5 and rvol_1m < rvol_30m * 0.5:
+            return False, "Volume fading from 30m spike"
+
+        return True, "Volume acceptable"
+
     def scan_for_dips(self, market_data_list: list[dict]) -> list[DipSignal]:
         """
         급락 종목 스캔 (v2.2: 1분봉/3분봉 선택 지원)
@@ -500,8 +545,20 @@ class DipScalperStrategy:
             if not self._check_cooldown(symbol):
                 continue
 
-            # 거래대금 필터
-            if volume_24h_krw < self.min_volume_krw:
+            # v2.5: 블랙리스트 체크
+            base = symbol.split("-")[-1] if "-" in symbol else symbol
+            if base in self._BLACKLIST:
+                logger.debug("DipScalper blocked: blacklist", symbol=symbol)
+                continue
+
+            # v2.5: 거래대금 필터 강화 (30억 이상)
+            min_volume = max(self.min_volume_krw, self._MIN_VOLUME_24H)
+            if volume_24h_krw < min_volume:
+                logger.debug(
+                    "DipScalper blocked: low volume",
+                    symbol=symbol,
+                    volume=f"{volume_24h_krw/1e9:.1f}B",
+                )
                 continue
 
             # 급락 기준 계산
@@ -511,7 +568,7 @@ class DipScalperStrategy:
             if candle_change <= threshold:
                 # v2.0: 추가 조건 확인
 
-                # 2. 거래량 급증 확인
+                # 2. 거래량 급증 확인 (1분봉)
                 vol_ok, vol_reason = self._check_volume_spike(rvol)
                 if not vol_ok:
                     logger.debug(
@@ -520,6 +577,30 @@ class DipScalperStrategy:
                         reason=vol_reason,
                     )
                     self._stats["filtered_by_volume"] += 1
+                    continue
+
+                # v6.0: 5분봉 RVOL 체크 (펌프 후 덤프 방지)
+                rvol_5m = market_data.get("rvol_5m", 1.0)
+                if rvol_5m < 1.5:
+                    logger.debug(
+                        "DipScalper blocked: 5m RVOL too low",
+                        symbol=symbol,
+                        rvol_5m=f"{rvol_5m:.2f}",
+                    )
+                    continue
+
+                # v6.0: 거래량 방향성 체크 (거래량 감소 중이면 회피)
+                rvol_30m = market_data.get("rvol_30m", 1.0)
+                volume_trend_ok, volume_trend_reason = self._check_volume_trend(rvol, rvol_5m, rvol_30m)
+                if not volume_trend_ok:
+                    logger.debug(
+                        "DipScalper blocked: volume trend declining",
+                        symbol=symbol,
+                        rvol_1m=f"{rvol:.2f}",
+                        rvol_5m=f"{rvol_5m:.2f}",
+                        rvol_30m=f"{rvol_30m:.2f}",
+                        reason=volume_trend_reason,
+                    )
                     continue
 
                 # 3. 호가창 매수벽 확인 (v2.1: 차단 안함, 동적 익절에만 사용)

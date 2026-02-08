@@ -323,12 +323,12 @@ class Settings(BaseSettings):
 
     # === v5.0 분봉 급등 듀얼 트리거 ===
     candle_surge_1m_change: float = Field(
-        default=0.05,
-        description="1분봉 극단 급등 임계값 (5%) - v5.4: 7%→5% 완화",
+        default=0.04,
+        description="1분봉 극단 급등 임계값 (4%) - v6.0: 5%→4% 완화",
     )
     candle_surge_1m_rvol: float = Field(
-        default=3.0,
-        description="1분봉 RVOL 임계값 (3배)",
+        default=2.5,
+        description="1분봉 RVOL 임계값 (2.5배) - v6.0: 3.0→2.5 완화",
     )
     candle_surge_5m_change: float = Field(
         default=0.03,
@@ -539,6 +539,24 @@ class Settings(BaseSettings):
     pullback_cooldown_min: int = Field(
         default=60,
         description="동일 종목 재진입 쿨다운 (60분)",
+    )
+
+    # Pullback 주문 방식 (v5.6 개선)
+    pullback_use_limit_order: bool = Field(
+        default=True,
+        description="지정가 주문 사용 (시장가 대신)",
+    )
+    pullback_limit_offset_ticks: int = Field(
+        default=1,
+        ge=0,
+        le=10,
+        description="지정가 주문 시 현재가 대비 오프셋 틱 수 (0-10)",
+    )
+
+    # Pullback 스프레드 필터 (v5.6 개선)
+    pullback_max_spread_bps: float = Field(
+        default=15.0,
+        description="최대 허용 스프레드 (bps, 0.15%)",
     )
 
     # === v4.2 Rebound Scalper 전략 설정 (반등 스캘핑) ===
@@ -911,10 +929,10 @@ class Settings(BaseSettings):
         description="ATTACK_LEVEL 3 최대 포지션 비중 (60%) - 급등주 대응",
     )
 
-    # === v4.0 Anti-Chase (조정 - 강화) ===
+    # === v4.0 Anti-Chase (조정 - 완화) ===
     structure_chase_dist_atr_max: float = Field(
-        default=10.0,
-        description="dist_atr 차단 임계값 - 10.0: 20%까지 허용",
+        default=12.0,
+        description="dist_atr 차단 임계값 - 12.0: 24%까지 허용 (v6.0: 10.0→12.0 완화)",
     )
     structure_chase_dist_breakout_max: float = Field(
         default=10.0,
@@ -1151,12 +1169,12 @@ class Settings(BaseSettings):
 
     # === Surge Detector (급등 감지) ===
     surge_min_change_1m: float = Field(
-        default=0.040,
-        description="최소 1분 변화율 (4.0% 이상만 급등으로 인정)",
+        default=0.035,
+        description="최소 1분 변화율 (3.5% 이상만 급등으로 인정) - v6.0: 4.0%→3.5% 완화",
     )
     surge_min_volume_mult: float = Field(
-        default=3.0,
-        description="최소 거래량 배수 (평균 대비 3배 이상)",
+        default=2.5,
+        description="최소 거래량 배수 (평균 대비 2.5배 이상) - v6.0: 3.0→2.5 완화",
     )
     surge_stop_loss_pct: float = Field(
         default=-0.04,

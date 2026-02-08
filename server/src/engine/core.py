@@ -52,6 +52,7 @@ from src.risk.exposure_manager import (
     init_exposure_manager,
     get_exposure_manager,
 )
+from src.risk.upbit_liquidity_filter import get_upbit_liquidity_filter
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -239,12 +240,16 @@ class TradingEngine:
             logger.warning(f"Orderbook fetch failed for {symbol}: {e}")
             return None
 
+    # 저유동성 코인 블랙리스트 (과거 손실 분석 기반)
+    _PULLBACK_BLACKLIST: frozenset[str] = frozenset({"SENT", "POKT", "STORJ", "STMX", "HUNT", "BORA"})
+
     def _prefilter_symbols_for_pullback(self, market_data: dict) -> list[str]:
         """Pullback 전략용 심볼 Pre-filtering (호가창 조회 대상 축소)
 
         강화된 필터:
         - 스테이블코인 제외
-        - 거래대금 > 10억 (저유동성 잡코인 배제)
+        - 블랙리스트 코인 제외 (저유동성 손실 종목)
+        - 거래대금 > 30억 (저유동성 잡코인 배제 - 기존 10억에서 상향)
         - 가격 > 100원 (극저가 코인 제외)
         - 변화율 -10% ~ +20% (눌림목 범위)
         - 거래대금 순 정렬 (유동성 높은 것 우선)
@@ -256,12 +261,16 @@ class TradingEngine:
             if base in self._STABLECOIN_BASES:
                 continue
 
+            # 블랙리스트 코인 제외 (저유동성으로 인한 과거 손실 종목)
+            if base in self._PULLBACK_BLACKLIST:
+                continue
+
             price_change = md.get("price_change_pct", 0)
             volume_24h = md.get("volume_24h", 0)
             price = md.get("price", 0)
 
-            # 1. 거래대금 > 10억 (저유동성 잡코인 제외)
-            if volume_24h < 1_000_000_000:
+            # 1. 거래대금 > 30억 (저유동성 잡코인 제외 - 기존 10억에서 상향)
+            if volume_24h < 3_000_000_000:
                 continue
 
             # 2. 가격 > 100원 (극저가 코인 제외)
@@ -282,6 +291,30 @@ class TradingEngine:
 
     # 스테이블코인 제외 목록 (반등 스캘핑 부적합)
     _STABLECOIN_BASES = {"USDT", "USDC", "USD1", "USDE", "DAI", "BUSD", "TUSD", "PYUSD"}
+
+    @staticmethod
+    def _upbit_tick_size(price: float) -> float:
+        """Upbit KRW 마켓 호가 단위 (가격대별)"""
+        if price < 10:
+            return 0.01
+        elif price < 100:
+            return 0.1
+        elif price < 1000:
+            return 1
+        elif price < 5000:
+            return 5
+        elif price < 10000:
+            return 10
+        elif price < 50000:
+            return 50
+        elif price < 100000:
+            return 100
+        elif price < 500000:
+            return 500
+        elif price < 1000000:
+            return 1000
+        else:
+            return 5000
 
     def _prefilter_symbols_for_rebound(self, market_data: dict) -> list[str]:
         """Rebound 전략용 심볼 Pre-filtering (반등 후보 축소)
@@ -1131,9 +1164,10 @@ class TradingEngine:
     def _calc_candle_surge_data(self, symbol: str, current_price: float) -> dict:
         """
         v5.0: 분봉 급등 데이터 계산
+        v6.0: 30분봉 RVOL 추가 (DIP_SCALPER 개선)
 
         Returns:
-            dict with change_1m, rvol_1m, change_3m, rvol_3m, change_5m, rvol_5m
+            dict with change_1m, rvol_1m, change_3m, rvol_3m, change_5m, rvol_5m, change_30m, rvol_30m
         """
         result = {
             "change_1m": 0.0,
@@ -1142,6 +1176,8 @@ class TradingEngine:
             "rvol_3m": 1.0,
             "change_5m": 0.0,
             "rvol_5m": 1.0,
+            "change_30m": 0.0,
+            "rvol_30m": 1.0,
         }
 
         try:
@@ -1183,6 +1219,19 @@ class TradingEngine:
                 rvol_5m = self.candle_manager.calc_rvol(symbol, "5m", 12)
                 if rvol_5m is not None:
                     result["rvol_5m"] = rvol_5m
+
+            # 30분봉 데이터 계산 (v6.0: DIP_SCALPER 개선)
+            candles_30m = self.candle_manager.get_candles(symbol, "30m", 21)
+            if len(candles_30m) >= 2:
+                # change_30m: 현재가 vs 30분 전 종가
+                prev_close_30m = candles_30m[-2].close if len(candles_30m) >= 2 else current_price
+                if prev_close_30m > 0:
+                    result["change_30m"] = (current_price - prev_close_30m) / prev_close_30m
+
+                # rvol_30m: 최근 30분봉 거래량 / 최근 20개 평균
+                rvol_30m = self.candle_manager.calc_rvol(symbol, "30m", 20)
+                if rvol_30m is not None:
+                    result["rvol_30m"] = rvol_30m
 
         except Exception as e:
             logger.debug(f"Failed to calc candle surge data for {symbol}: {e}")
@@ -1287,6 +1336,9 @@ class TradingEngine:
                     "rvol_1m": candle_surge["rvol_1m"],
                     "change_5m": candle_surge["change_5m"],
                     "rvol_5m": candle_surge["rvol_5m"],
+                    # v6.0: 30분봉 데이터 추가 (DIP_SCALPER 개선)
+                    "change_30m": candle_surge["change_30m"],
+                    "rvol_30m": candle_surge["rvol_30m"],
                 }
 
             # BTC 레짐 계산 (Upbit: 가격 변화율 기반)
@@ -1918,6 +1970,50 @@ class TradingEngine:
 
             if available < order_amount:
                 logger.warning("Insufficient balance for dip", available=available, required=order_amount)
+                return
+
+            # v2.5: 가격 유효성 체크
+            if current_price <= 0:
+                logger.warning("Dip blocked: invalid current price", symbol=symbol, price=current_price)
+                return
+
+            # v2.5: 스프레드 체크 (슬리피지 방지)
+            orderbook = await self._get_orderbook_cached(symbol)
+            if not orderbook or not orderbook.get("orderbook_units"):
+                logger.warning("Dip blocked: no orderbook data", symbol=symbol)
+                return
+
+            ob_units = orderbook.get("orderbook_units", [])
+            best_ask = ob_units[0].get("ask_price", 0)
+            best_bid = ob_units[0].get("bid_price", 0)
+
+            if best_bid > 0:
+                spread_bps = (best_ask - best_bid) / best_bid * 10000
+                max_spread = 15.0  # 15bps
+
+                if spread_bps > max_spread:
+                    logger.info(
+                        "Dip blocked: spread too wide",
+                        symbol=symbol,
+                        spread_bps=round(spread_bps, 1),
+                        max_spread_bps=max_spread,
+                    )
+                    return
+
+            # v2.5: 유동성 필터 체크
+            liquidity_filter = get_upbit_liquidity_filter()
+            volume_24h = market_data.get("volume_24h", 0)
+            liq_check = await liquidity_filter.check(
+                symbol=symbol,
+                strategy_id="DIP_SCALPER",
+                order_size_krw=order_amount,
+                current_price=current_price,
+                orderbook=orderbook,
+                volume_24h=volume_24h,
+            )
+
+            if not liq_check.passed:
+                logger.info("Dip blocked by liquidity filter", symbol=symbol, reason=liq_check.reason)
                 return
 
             # PAPER 모드 체크
@@ -3917,6 +4013,75 @@ class TradingEngine:
                 order_amount=order_amount,
             )
 
+            # v5.6: 가격 유효성 체크
+            if current_price <= 0:
+                logger.warning("Pullback blocked: invalid current price", symbol=symbol, price=current_price)
+                return
+
+            # v5.6: 스프레드 체크 (슬리피지 방지)
+            orderbook = await self._get_orderbook_cached(symbol)
+            if not orderbook or not orderbook.get("orderbook_units"):
+                logger.warning(
+                    "Pullback blocked: no orderbook data available",
+                    symbol=symbol,
+                )
+                self.add_event(
+                    level="WARNING",
+                    event_type="PULLBACK",
+                    message=f"Pullback blocked: no orderbook data for {symbol}",
+                    details={"symbol": symbol},
+                )
+                return
+
+            ob_units = orderbook.get("orderbook_units", [])
+            best_ask = ob_units[0].get("ask_price", 0)
+            best_bid = ob_units[0].get("bid_price", 0)
+
+            if best_bid > 0:
+                spread_bps = (best_ask - best_bid) / best_bid * 10000
+                max_spread = settings.pullback_max_spread_bps
+
+                if spread_bps > max_spread:
+                    logger.info(
+                        "Pullback blocked: spread too wide",
+                        symbol=symbol,
+                        spread_bps=round(spread_bps, 1),
+                        max_spread_bps=max_spread,
+                    )
+                    self.add_event(
+                        level="INFO",
+                        event_type="PULLBACK",
+                        message=f"Pullback blocked: spread {spread_bps:.1f}bps > {max_spread}bps",
+                        details={"symbol": symbol, "spread_bps": spread_bps},
+                    )
+                    return
+
+            # v5.6: 유동성 필터 체크
+            liquidity_filter = get_upbit_liquidity_filter()
+            volume_24h = market_data.get("volume_24h", 0)
+            liq_check = await liquidity_filter.check(
+                symbol=symbol,
+                strategy_id="PULLBACK",
+                order_size_krw=order_amount,
+                current_price=current_price,
+                orderbook=orderbook,
+                volume_24h=volume_24h,
+            )
+
+            if not liq_check.passed:
+                logger.info(
+                    "Pullback blocked by liquidity filter",
+                    symbol=symbol,
+                    reason=liq_check.reason,
+                )
+                self.add_event(
+                    level="INFO",
+                    event_type="PULLBACK",
+                    message=f"Pullback blocked by liquidity: {liq_check.reason}",
+                    details={"symbol": symbol, "reason": liq_check.reason},
+                )
+                return
+
             # PAPER 모드 체크
             if not self.mode_manager.should_execute_trades():
                 logger.info(
@@ -3936,13 +4101,41 @@ class TradingEngine:
                 )
                 return
 
-            # 시장가 매수
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=OrderType.MARKET,
-                quantity=order_amount,  # KRW 금액
-            )
+            # v5.6: 지정가 주문 지원 (체결가 개선)
+            use_limit = settings.pullback_use_limit_order
+            order_type_str = "LIMIT" if use_limit else "MARKET"
+
+            if use_limit:
+                # 지정가: 현재가 + 오프셋 틱 (즉시 체결 보장)
+                tick = self._upbit_tick_size(current_price)
+                offset_ticks = settings.pullback_limit_offset_ticks
+                limit_price = current_price + (tick * offset_ticks)
+                quantity = order_amount / limit_price
+
+                logger.info(
+                    "Pullback limit order",
+                    symbol=symbol,
+                    current_price=current_price,
+                    limit_price=limit_price,
+                    tick_size=tick,
+                    quantity=quantity,
+                )
+
+                result = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    quantity=quantity,
+                    price=limit_price,
+                )
+            else:
+                # 시장가 매수
+                result = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.MARKET,
+                    quantity=order_amount,  # KRW 금액
+                )
 
             if not result.success:
                 logger.error("Pullback order failed", symbol=symbol, error=result.error)
@@ -3992,7 +4185,7 @@ class TradingEngine:
                 symbol=symbol,
                 strategy="PULLBACK",
                 side="BUY",
-                order_type="MARKET",
+                order_type=order_type_str,
                 quantity=filled_qty,
                 price=avg_price,
                 status="FILLED",
@@ -4100,6 +4293,50 @@ class TradingEngine:
                 allocation=signal.target_allocation,
                 order_amount=order_amount,
             )
+
+            # v5.1: 가격 유효성 체크
+            if current_price <= 0:
+                logger.warning("Rebound blocked: invalid current price", symbol=symbol, price=current_price)
+                return
+
+            # v5.1: 스프레드 체크 (슬리피지 방지)
+            orderbook = await self._get_orderbook_cached(symbol)
+            if not orderbook or not orderbook.get("orderbook_units"):
+                logger.warning("Rebound blocked: no orderbook data", symbol=symbol)
+                return
+
+            ob_units = orderbook.get("orderbook_units", [])
+            best_ask = ob_units[0].get("ask_price", 0)
+            best_bid = ob_units[0].get("bid_price", 0)
+
+            if best_bid > 0:
+                spread_bps = (best_ask - best_bid) / best_bid * 10000
+                max_spread = 15.0  # 15bps
+
+                if spread_bps > max_spread:
+                    logger.info(
+                        "Rebound blocked: spread too wide",
+                        symbol=symbol,
+                        spread_bps=round(spread_bps, 1),
+                        max_spread_bps=max_spread,
+                    )
+                    return
+
+            # v5.1: 유동성 필터 체크
+            liquidity_filter = get_upbit_liquidity_filter()
+            volume_24h = market_data.get("volume_24h", 0)
+            liq_check = await liquidity_filter.check(
+                symbol=symbol,
+                strategy_id="REBOUND",
+                order_size_krw=order_amount,
+                current_price=current_price,
+                orderbook=orderbook,
+                volume_24h=volume_24h,
+            )
+
+            if not liq_check.passed:
+                logger.info("Rebound blocked by liquidity filter", symbol=symbol, reason=liq_check.reason)
+                return
 
             # PAPER 모드 체크
             if not self.mode_manager.should_execute_trades():

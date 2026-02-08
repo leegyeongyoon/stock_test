@@ -127,7 +127,7 @@ class ReboundPosition:
 
 class ReboundScalperStrategy:
     """
-    Rebound Scalper 전략 v5.0
+    Rebound Scalper 전략 v5.1
 
     핵심 철학:
     - "급등을 쫓지 말고, 지지선에서 반등을 잡아라"
@@ -137,7 +137,23 @@ class ReboundScalperStrategy:
     - 손절: -0.7% (고정)
     - 익절: +1.0% → 전량 매도
     - 타임스톱: 15분
+
+    v5.1 개선:
+    - 저유동성 코인 블랙리스트 추가
+    - 거래대금 30억 이상 필터
     """
+
+    # 저유동성/손실 코인 블랙리스트 (과거 손실 분석 기반)
+    _BLACKLIST: frozenset[str] = frozenset({
+        # Pullback 손실 종목
+        "SENT", "POKT", "STORJ", "STMX", "HUNT", "BORA",
+        # REBOUND/DIP 손실 종목
+        "ELSA", "BREV", "WET", "HOLO", "LA", "WLD", "ZK",
+        "CPOOL", "SXP", "XEC", "ZKP", "SNT", "MMT",
+    })
+
+    # 최소 거래대금 (30억)
+    _MIN_VOLUME_24H: float = 3_000_000_000
 
     def __init__(self):
         # 모드
@@ -291,9 +307,25 @@ class ReboundScalperStrategy:
                 _cooldown_count += 1
                 continue
 
+            # v5.1: 블랙리스트 체크
+            base = symbol.split("-")[-1] if "-" in symbol else symbol
+            if base in self._BLACKLIST:
+                logger.debug("Rebound blocked: blacklist", symbol=symbol)
+                continue
+
             # 시장 데이터 가져오기
             market_data = market_data_map.get(symbol)
             if not market_data:
+                continue
+
+            # v5.1: 거래대금 체크 (30억 이상)
+            volume_24h = market_data.get("volume_24h", 0)
+            if volume_24h < self._MIN_VOLUME_24H:
+                logger.debug(
+                    "Rebound blocked: low volume",
+                    symbol=symbol,
+                    volume=f"{volume_24h/1e9:.1f}B",
+                )
                 continue
 
             # 필터 체크 (먼저)

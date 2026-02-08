@@ -490,6 +490,89 @@ export interface PullbackSetModeResponse {
 }
 
 // ============================================
+// Trading History Types (v6.0)
+// ============================================
+
+export interface TradeDetail {
+  trade_id: string
+  symbol: string
+  strategy: string
+  entry_time: string
+  exit_time: string | null
+  entry_price: number
+  exit_price: number | null
+  quantity: number
+  pnl: number
+  pnl_pct: number
+  exit_reason: string | null
+  hold_duration_sec: number | null
+  max_profit_pct: number
+  max_drawdown_pct: number
+  strategy_score: number | null
+  strategy_level: number | null
+  indicators_at_entry: Record<string, unknown> | null
+}
+
+export interface StrategyStats {
+  strategy: string
+  total_pnl: number
+  total_pnl_pct: number
+  trade_count: number
+  win_count: number
+  loss_count: number
+  win_rate: number
+  avg_win_pct: number
+  avg_loss_pct: number
+  trades: TradeDetail[]
+}
+
+export interface DailyTradingHistory {
+  date: string
+  strategies: Record<string, StrategyStats>
+  total_pnl: number
+  total_trades: number
+}
+
+export interface StrategyPnlHistory {
+  date: string
+  pnl: number
+  pnl_pct: number
+  trades: number
+  win_rate: number
+}
+
+export interface LossAnalysis {
+  total_loss_trades: number
+  total_loss: number
+  avg_loss_pct: number
+  by_strategy: Record<string, { count: number; total_loss: number }>
+  by_exit_reason: Record<string, { count: number; total_loss: number }>
+  indicator_patterns: {
+    low_rvol: { count: number; avg_rvol: number; total_loss: number }
+    high_spread: { count: number; avg_spread: number; total_loss: number }
+    weak_orderbook: { count: number; avg_bid_ratio: number; total_loss: number }
+  }
+  time_patterns: Record<string, { count: number; total_loss: number }>
+}
+
+export interface TradingSummary {
+  period_days: number
+  total_trades: number
+  total_pnl: number
+  total_pnl_pct: number
+  win_count: number
+  loss_count: number
+  win_rate: number
+  by_strategy: Record<string, {
+    trades: number
+    pnl: number
+    wins: number
+    losses: number
+    win_rate: number
+  }>
+}
+
+// ============================================
 // API Client
 // ============================================
 
@@ -687,6 +770,47 @@ class ApiClient {
     params.set('limit', limit.toString())
     params.set('min_score', minScore.toString())
     return this.fetch<PullbackCandidatesResponse>(`/monitoring/pullback/candidates?${params}`)
+  }
+
+  // ---- Trading History API (v6.0) ----
+
+  async getDailyTradingHistory(date?: string): Promise<DailyTradingHistory> {
+    const params = new URLSearchParams()
+    if (date) params.set('date', date)
+    return this.fetch<DailyTradingHistory>(`/trading-history/daily?${params}`)
+  }
+
+  async getTradesByStrategy(
+    strategy?: string,
+    date?: string,
+    days: number = 7,
+    limit: number = 100
+  ): Promise<TradeDetail[]> {
+    const params = new URLSearchParams()
+    if (strategy) params.set('strategy', strategy)
+    if (date) params.set('date', date)
+    params.set('days', days.toString())
+    params.set('limit', limit.toString())
+    return this.fetch<TradeDetail[]>(`/trading-history/trades?${params}`)
+  }
+
+  async getStrategyPnlHistory(days: number = 30): Promise<Record<string, StrategyPnlHistory[]>> {
+    const params = new URLSearchParams()
+    params.set('days', days.toString())
+    return this.fetch<Record<string, StrategyPnlHistory[]>>(`/trading-history/strategy-pnl?${params}`)
+  }
+
+  async getLossAnalysis(strategy?: string, days: number = 30): Promise<LossAnalysis> {
+    const params = new URLSearchParams()
+    if (strategy) params.set('strategy', strategy)
+    params.set('days', days.toString())
+    return this.fetch<LossAnalysis>(`/trading-history/loss-analysis?${params}`)
+  }
+
+  async getTradingSummary(days: number = 7): Promise<TradingSummary> {
+    const params = new URLSearchParams()
+    params.set('days', days.toString())
+    return this.fetch<TradingSummary>(`/trading-history/summary?${params}`)
   }
 }
 

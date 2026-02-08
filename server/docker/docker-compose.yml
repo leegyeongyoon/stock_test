@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: trading-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: trading123
+      POSTGRES_DB: trading
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  trading-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: trading-server
+    ports:
+      - "8086:8086"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:trading123@postgres:5432/trading
+      - EXCHANGE_TYPE=upbit
+      - UPBIT_ACCESS_KEY=${UPBIT_ACCESS_KEY}
+      - UPBIT_SECRET_KEY=${UPBIT_SECRET_KEY}
+      - ENABLE_LIVE_TRADING=true
+      - LOG_LEVEL=INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

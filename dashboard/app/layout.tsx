@@ -28,11 +28,17 @@ export default function RootLayout({
                 <a href="/analytics" className="hover:text-blue-400 transition-colors">
                   수익 분석
                 </a>
+                <a href="/trading-history" className="hover:text-blue-400 transition-colors">
+                  거래 내역
+                </a>
                 <a href="/orders" className="hover:text-blue-400 transition-colors">
                   주문 내역
                 </a>
                 <a href="/market" className="hover:text-blue-400 transition-colors">
                   시장 현황
+                </a>
+                <a href="/backtest" className="hover:text-blue-400 transition-colors">
+                  백테스트
                 </a>
               </nav>
             </div>
