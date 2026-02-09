@@ -5,7 +5,102 @@
 
 ---
 
-## 1. 요약
+## 0. v14 전면 개편 (2026-02-09)
+
+### 0.1 최종 결과 (v14)
+
+| 전략 | 승률 | 수익률 | PF | 상태 |
+|------|------|--------|-----|------|
+| **REBOUND** | 53.6% | +2.34% | 1.80 | ✅ 최고 성능 |
+| **SHORT_BREAKDOWN** | 50.0% | +2.16% | 1.42 | ✅ 우수 |
+| **SHORT_RALLY_FADE** | 46.7% | +1.55% | 1.10 | ✅ 안정적 |
+| **ATTACK** | 40.0% | +0.34% | 1.11 | ✅ 수익 |
+| PULLBACK | 48.7% | -0.20% | 0.90 | 소폭 손실 |
+| ~~DIP_SCALPER~~ | - | - | - | 비활성화 |
+
+**총 수익률: +6.19% (4일)**
+**월간 추정: +46.4%**
+**수익 전략: 4/5 (80%)**
+
+### 0.2 주요 개선 사항
+
+#### 1. 기술적 지표 모듈 추가
+**파일**: `server/src/indicators/technical.py`
+
+```python
+# 새로 추가된 지표
+- calculate_rsi()          # RSI (상대강도지수)
+- calculate_macd()         # MACD
+- calculate_bollinger_bands()  # 볼린저밴드
+- calculate_ema()          # 지수이동평균
+- calculate_atr()          # ATR (변동성)
+- calculate_stochastic()   # 스토캐스틱
+- is_oversold()            # 과매도 확인
+- is_overbought()          # 과매수 확인
+```
+
+#### 2. 멀티타임프레임 분석
+```python
+def get_hourly_trend(btc_1h_candles):
+    """1시간봉 BTC 추세 판단"""
+    # EMA20 대비 +1% 이상 → BULLISH
+    # EMA20 대비 -1% 이상 → BEARISH
+    # 그 외 → SIDEWAYS
+```
+
+#### 3. 시장 추세 연동 전략 활성화
+```python
+def get_active_strategies(regime):
+    if regime == "BULLISH":
+        return ["PULLBACK", "REBOUND", "ATTACK"]
+    elif regime == "BEARISH":
+        return ["SHORT_BREAKDOWN", "SHORT_RALLY_FADE"]
+    else:  # SIDEWAYS
+        return ["SHORT_BREAKDOWN", "REBOUND"]
+```
+
+#### 4. 전략별 v2 알고리즘
+
+| 전략 | 핵심 개선 |
+|------|----------|
+| PULLBACK | BB 하단 + RSI 38↓ + MACD 상승전환 |
+| REBOUND | 급락 -3% + RVOL 2x + RSI 30↓ + 아래꼬리 |
+| ATTACK | 돌파 1.5~4% + RVOL 2.5x + RSI 75↓ |
+| SHORT_BREAKDOWN | 저점 이탈 + MACD 음수 + RSI 70↓ |
+| SHORT_RALLY_FADE | 7% 급등후 3% 하락 + RSI 52↑ + MACD↓ |
+
+#### 5. 청산 파라미터 최적화
+
+```python
+exit_params = {
+    "PULLBACK": {"SL": -0.8%, "TP": 1.2%, "trailing": True},
+    "REBOUND": {"SL": -0.6%, "TP": 1.0%, "time_stop": 12min},
+    "ATTACK": {"SL": -1.0%, "TP": 2.0%, "trailing": True},
+    "SHORT_BREAKDOWN": {"SL": -0.8%, "TP": 1.0%},
+    "SHORT_RALLY_FADE": {"SL": -1.0%, "TP": 1.5%},
+}
+```
+
+### 0.3 비활성화된 전략
+
+- **DIP_SCALPER**: 승률 38.5%, 손실 -3.46% → 비활성화
+
+### 0.4 사용 방법
+
+```bash
+# 전체 백테스트
+python run_backtest.py
+
+# 시장 추세 확인
+python run_backtest.py --regime
+
+# 적응형 백테스트 (추세 기반)
+python run_backtest.py --adaptive
+```
+
+---
+
+## 1. 요약 (v13 이전)
 
 ### 1.1 최종 결과
 
@@ -110,7 +205,9 @@ class AdaptiveStrategyManager:
 
 | 파일 | 설명 |
 |------|------|
-| `server/run_backtest.py` | 백테스트 실행 스크립트 |
+| `server/run_backtest.py` | 백테스트 실행 스크립트 (v14) |
+| `server/src/indicators/__init__.py` | 기술적 지표 모듈 패키지 |
+| `server/src/indicators/technical.py` | RSI, MACD, BB 등 지표 계산 |
 | `server/src/strategies/market_regime.py` | 시장 추세 감지 모듈 |
 | `server/docs/STRATEGY_OPTIMIZATION_REPORT.md` | 이 문서 |
 
@@ -118,6 +215,7 @@ class AdaptiveStrategyManager:
 
 | 파일 | 변경 내용 |
 |------|----------|
+| `server/run_backtest.py` | v14 전략 전면 개편, 기술적 지표 연동 |
 | `server/src/backtesting/strategies/strategy_adapters.py` | 반등 확인 게이팅, 숏 전략 추가 |
 | `server/src/backtesting/engine/backtest_engine.py` | 캔들 내 가격 변동 체크 추가 |
 
@@ -242,4 +340,4 @@ server/
 
 ---
 
-*마지막 업데이트: 2026-02-09*
+*마지막 업데이트: 2026-02-09 (v14 전면 개편)*
