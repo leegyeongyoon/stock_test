@@ -5,6 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from src.models.database import AsyncSession, get_db
 from src.backtesting.models.schemas import (
@@ -372,3 +373,169 @@ async def fetch_all_candles(
         failed_symbols=failed_symbols,
         total_candles=total_candles,
     )
+
+
+# === 백테스트 결과 조회 API ===
+
+
+class SavedBacktestResult(BaseModel):
+    """저장된 백테스트 결과 (요약)"""
+    id: int
+    run_id: str
+    strategy: str
+    symbols: str  # JSON string
+    interval: str
+    start_date: datetime
+    end_date: datetime
+    initial_capital: float
+    final_equity: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    sharpe_ratio: float
+    win_rate: float
+    total_trades: int
+    profit_factor: float
+    created_at: datetime
+
+
+@router.get("/results", response_model=list[SavedBacktestResult])
+async def get_backtest_results(
+    limit: int = Query(default=20, description="최대 결과 수"),
+    strategy: Optional[str] = Query(default=None, description="전략 필터"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    저장된 백테스트 결과 목록 조회
+    """
+    from src.backtesting.models.database import BacktestResultModel
+
+    stmt = select(BacktestResultModel).order_by(BacktestResultModel.created_at.desc())
+
+    if strategy:
+        stmt = stmt.where(BacktestResultModel.strategy == strategy)
+
+    stmt = stmt.limit(limit)
+
+    result = await db.execute(stmt)
+    results = result.scalars().all()
+
+    return [
+        SavedBacktestResult(
+            id=r.id,
+            run_id=r.run_id,
+            strategy=r.strategy,
+            symbols=r.symbols,
+            interval=r.interval,
+            start_date=r.start_date,
+            end_date=r.end_date,
+            initial_capital=r.initial_capital,
+            final_equity=r.final_equity,
+            total_return_pct=r.total_return_pct,
+            max_drawdown_pct=r.max_drawdown_pct,
+            sharpe_ratio=r.sharpe_ratio,
+            win_rate=r.win_rate,
+            total_trades=r.total_trades,
+            profit_factor=r.profit_factor,
+            created_at=r.created_at,
+        )
+        for r in results
+    ]
+
+
+@router.get("/results/{run_id}", response_model=BacktestResult)
+async def get_backtest_result_detail(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    백테스트 결과 상세 조회 (거래 내역, 에쿼티 커브 포함)
+    """
+    from src.backtesting.models.database import BacktestResultModel, BacktestTradeModel
+
+    # 결과 조회
+    stmt = select(BacktestResultModel).where(BacktestResultModel.run_id == run_id)
+    result = await db.execute(stmt)
+    result_model = result.scalar_one_or_none()
+
+    if not result_model:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+
+    # 거래 내역 조회
+    stmt = select(BacktestTradeModel).where(BacktestTradeModel.run_id == run_id)
+    trades_result = await db.execute(stmt)
+    trades = trades_result.scalars().all()
+
+    # BacktestResult 스키마로 변환
+    from src.backtesting.models.schemas import (
+        BacktestMetricsSchema,
+        BacktestTrade,
+        EquityPoint,
+    )
+    import json
+
+    return BacktestResult(
+        run_id=result_model.run_id,
+        strategy=result_model.strategy,
+        symbols=json.loads(result_model.symbols),
+        interval=result_model.interval,
+        start_date=result_model.start_date,
+        end_date=result_model.end_date,
+        initial_capital=result_model.initial_capital,
+        final_equity=result_model.final_equity,
+        metrics=BacktestMetricsSchema(**result_model.metrics_json),
+        parameters=result_model.parameters_json or {},
+        trades=[
+            BacktestTrade(
+                trade_id=t.trade_id,
+                symbol=t.symbol,
+                strategy=t.strategy,
+                entry_time=t.entry_time,
+                entry_price=t.entry_price,
+                entry_quantity=t.entry_quantity,
+                exit_time=t.exit_time,
+                exit_price=t.exit_price,
+                exit_reason=t.exit_reason,
+                pnl=t.pnl,
+                pnl_pct=t.pnl_pct,
+                commission=t.commission,
+                holding_minutes=t.holding_minutes,
+                max_profit_pct=t.max_profit_pct,
+                max_drawdown_pct=t.max_drawdown_pct,
+            )
+            for t in trades
+        ],
+        equity_curve=[EquityPoint(**p) for p in (result_model.equity_curve_json or [])],
+        created_at=result_model.created_at,
+    )
+
+
+@router.delete("/results/{run_id}")
+async def delete_backtest_result(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    백테스트 결과 삭제
+    """
+    from src.backtesting.models.database import BacktestResultModel, BacktestTradeModel
+
+    # 결과 삭제
+    stmt = select(BacktestResultModel).where(BacktestResultModel.run_id == run_id)
+    result = await db.execute(stmt)
+    result_model = result.scalar_one_or_none()
+
+    if not result_model:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+
+    # 거래 내역 삭제
+    stmt = select(BacktestTradeModel).where(BacktestTradeModel.run_id == run_id)
+    trades_result = await db.execute(stmt)
+    trades = trades_result.scalars().all()
+
+    for trade in trades:
+        await db.delete(trade)
+
+    await db.delete(result_model)
+    await db.commit()
+
+    return {"success": True, "run_id": run_id}
