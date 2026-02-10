@@ -368,6 +368,7 @@ class BacktestEngine:
             holding_minutes=holding_minutes,
             max_profit_pct=position.max_profit_pct,
             max_drawdown_pct=position.max_drawdown_pct,
+            entry_indicators=position.entry_indicators,  # v28: 진입 시점 지표
         )
 
         self._account.closed_trades.append(trade)

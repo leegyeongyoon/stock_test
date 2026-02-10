@@ -21,6 +21,7 @@ def get_signal_generator(strategy: str, params: dict = None) -> Callable:
         MicroPullbackLongSignalGenerator,
         TripleConfirmationEntrySignalGenerator,
         FastScalpReboundSignalGenerator,
+        DataDrivenStrategyV28SignalGenerator,
     )
 
     generators = {
@@ -34,6 +35,7 @@ def get_signal_generator(strategy: str, params: dict = None) -> Callable:
         "MICRO_PULLBACK_LONG": MicroPullbackLongSignalGenerator,
         "TRIPLE_CONFIRMATION_ENTRY": TripleConfirmationEntrySignalGenerator,
         "FAST_SCALP_REBOUND": FastScalpReboundSignalGenerator,
+        "DATA_DRIVEN_V28": DataDrivenStrategyV28SignalGenerator,
     }
 
     if strategy not in generators:
@@ -119,6 +121,13 @@ def get_exit_checker(strategy: str, params: dict = None) -> Callable:
             "take_profit_pct": 0.015,      # +1.5%
             "trailing_trigger_pct": 0.010,
             "trailing_stop_pct": 0.003,
+        },
+        # Strategy V28: DATA_DRIVEN (OpenAI 최적화) - 타이트 트레일링
+        "DATA_DRIVEN_V28": {
+            "stop_loss_pct": -0.015,       # -1.5% (더 타이트)
+            "take_profit_pct": 0.030,      # +3.0%
+            "trailing_trigger_pct": 0.003, # 0.3% (OpenAI 권장)
+            "trailing_stop_pct": 0.003,    # 0.3% (OpenAI 권장)
         },
     }
 

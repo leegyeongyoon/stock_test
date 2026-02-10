@@ -39,6 +39,8 @@ class BacktestTrade(BaseModel):
     holding_minutes: Optional[int] = None
     max_profit_pct: float = 0.0
     max_drawdown_pct: float = 0.0
+    # v28: 진입 시점 지표 (분석용)
+    entry_indicators: Optional[dict] = None
 
 
 class BacktestMetricsSchema(BaseModel):

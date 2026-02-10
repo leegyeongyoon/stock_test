@@ -1,0 +1,1488 @@
+{
+  "generated_at": "2026-02-10T00:45:42.444669",
+  "analysis_params": {
+    "run_ids": null,
+    "strategies": null
+  },
+  "trade_pattern_analysis": {
+    "summary": {
+      "total_trades": 45058,
+      "winning_trades": 21898,
+      "losing_trades": 23160,
+      "overall_win_rate": "48.6%",
+      "avg_win_pnl_pct": "1.26%",
+      "avg_loss_pnl_pct": "-1.89%"
+    },
+    "significant_indicators": [
+      {
+        "name": "distance_from_low",
+        "p_value": "0.0000",
+        "win_mean": "0.0446",
+        "loss_mean": "0.0329",
+        "favorable_direction": "higher"
+      },
+      {
+        "name": "dip_pct",
+        "p_value": "0.0000",
+        "win_mean": "-0.0042",
+        "loss_mean": "-0.0034",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "price",
+        "p_value": "0.0000",
+        "win_mean": "244473.3070",
+        "loss_mean": "546340.8151",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "recovery",
+        "p_value": "0.0000",
+        "win_mean": "0.8479",
+        "loss_mean": "0.8925",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "ema50",
+        "p_value": "0.0000",
+        "win_mean": "145290.5041",
+        "loss_mean": "542388.9281",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "ema20",
+        "p_value": "0.0000",
+        "win_mean": "228912.7294",
+        "loss_mean": "574903.9496",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "low_24h",
+        "p_value": "0.0001",
+        "win_mean": "236815.5801",
+        "loss_mean": "597163.2711",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "ema_distance",
+        "p_value": "0.0008",
+        "win_mean": "0.0063",
+        "loss_mean": "0.0059",
+        "favorable_direction": "higher"
+      },
+      {
+        "name": "wick_ratio",
+        "p_value": "0.0013",
+        "win_mean": "0.6968",
+        "loss_mean": "0.7201",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "pullback_pct",
+        "p_value": "0.0019",
+        "win_mean": "0.0146",
+        "loss_mean": "0.0152",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "sma200",
+        "p_value": "0.0029",
+        "win_mean": "64965.6603",
+        "loss_mean": "401943.9575",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "rvol",
+        "p_value": "0.0081",
+        "win_mean": "5.8022",
+        "loss_mean": "7.7784",
+        "favorable_direction": "lower"
+      },
+      {
+        "name": "squeeze_ratio",
+        "p_value": "0.0496",
+        "win_mean": "0.7209",
+        "loss_mean": "0.7080",
+        "favorable_direction": "higher"
+      }
+    ],
+    "profitable_conditions": [
+      {
+        "name": "sma200_high_25",
+        "win_rate": "66.7%",
+        "avg_pnl_pct": "-0.36%",
+        "trade_count": 4446,
+        "description": "sma200 >= 260.4825 (상위 75%)"
+      },
+      {
+        "name": "sma200_high_50",
+        "win_rate": "65.0%",
+        "avg_pnl_pct": "-0.40%",
+        "trade_count": 2964,
+        "description": "sma200 >= 512.3850 (상위 50%)"
+      },
+      {
+        "name": "distance_from_low_high_75",
+        "win_rate": "64.9%",
+        "avg_pnl_pct": "-0.30%",
+        "trade_count": 4654,
+        "description": "distance_from_low >= 0.0412 (상위 25%)"
+      },
+      {
+        "name": "sma200_low_75",
+        "win_rate": "63.5%",
+        "avg_pnl_pct": "-0.31%",
+        "trade_count": 4446,
+        "description": "sma200 < 1541.7437 (하위 75%)"
+      },
+      {
+        "name": "sma200_high_75",
+        "win_rate": "60.7%",
+        "avg_pnl_pct": "-0.56%",
+        "trade_count": 1482,
+        "description": "sma200 >= 1541.7437 (상위 25%)"
+      },
+      {
+        "name": "sma200_low_50",
+        "win_rate": "60.7%",
+        "avg_pnl_pct": "-0.34%",
+        "trade_count": 2964,
+        "description": "sma200 < 512.3850 (하위 50%)"
+      },
+      {
+        "name": "distance_from_low_high_50",
+        "win_rate": "60.5%",
+        "avg_pnl_pct": "-0.26%",
+        "trade_count": 9308,
+        "description": "distance_from_low >= 0.0192 (상위 50%)"
+      },
+      {
+        "name": "low_24h_high_50",
+        "win_rate": "57.5%",
+        "avg_pnl_pct": "-0.38%",
+        "trade_count": 9319,
+        "description": "low_24h >= 240.0000 (상위 50%)"
+      },
+      {
+        "name": "ema50_high_50",
+        "win_rate": "57.1%",
+        "avg_pnl_pct": "-0.41%",
+        "trade_count": 7800,
+        "description": "ema50 >= 291.5629 (상위 50%)"
+      },
+      {
+        "name": "distance_from_low_high_25",
+        "win_rate": "56.3%",
+        "avg_pnl_pct": "-0.28%",
+        "trade_count": 13961,
+        "description": "distance_from_low >= 0.0093 (상위 75%)"
+      },
+      {
+        "name": "low_24h_high_75",
+        "win_rate": "55.9%",
+        "avg_pnl_pct": "-0.41%",
+        "trade_count": 4655,
+        "description": "low_24h >= 866.0000 (상위 25%)"
+      },
+      {
+        "name": "low_24h_high_25",
+        "win_rate": "55.6%",
+        "avg_pnl_pct": "-0.33%",
+        "trade_count": 13961,
+        "description": "low_24h >= 88.2000 (상위 75%)"
+      },
+      {
+        "name": "ema20_high_50",
+        "win_rate": "54.7%",
+        "avg_pnl_pct": "-0.36%",
+        "trade_count": 11848,
+        "description": "ema20 >= 240.5292 (상위 50%)"
+      },
+      {
+        "name": "ema50_high_75",
+        "win_rate": "54.4%",
+        "avg_pnl_pct": "-0.47%",
+        "trade_count": 3900,
+        "description": "ema50 >= 979.7967 (상위 25%)"
+      },
+      {
+        "name": "holding_lte_15m",
+        "win_rate": "54.4%",
+        "avg_pnl_pct": "-0.03%",
+        "trade_count": 7958,
+        "description": "보유 시간 <= 15분"
+      },
+      {
+        "name": "holding_lte_30m",
+        "win_rate": "54.1%",
+        "avg_pnl_pct": "-0.04%",
+        "trade_count": 12673,
+        "description": "보유 시간 <= 30분"
+      },
+      {
+        "name": "ema50_high_25",
+        "win_rate": "53.7%",
+        "avg_pnl_pct": "-0.44%",
+        "trade_count": 11700,
+        "description": "ema50 >= 96.5687 (상위 75%)"
+      },
+      {
+        "name": "low_24h_low_75",
+        "win_rate": "53.5%",
+        "avg_pnl_pct": "-0.27%",
+        "trade_count": 13957,
+        "description": "low_24h < 866.0000 (하위 75%)"
+      },
+      {
+        "name": "holding_lte_60m",
+        "win_rate": "53.1%",
+        "avg_pnl_pct": "-0.10%",
+        "trade_count": 19238,
+        "description": "보유 시간 <= 60분"
+      },
+      {
+        "name": "pullback_pct_low_50",
+        "win_rate": "53.1%",
+        "avg_pnl_pct": "-0.23%",
+        "trade_count": 791,
+        "description": "pullback_pct < 0.0140 (하위 50%)"
+      }
+    ],
+    "strategies_breakdown": {
+      "DOUBLE_DIP_BUY": {
+        "total_trades": 4578,
+        "winning_trades": 2751,
+        "losing_trades": 1827,
+        "win_rate": 0.6009174311926605,
+        "avg_pnl_pct": 0.014762913590585128,
+        "avg_win_pct": 1.280945856543596,
+        "avg_loss_pct": -1.8917884143041785,
+        "total_pnl_pct": 67.58461841769872,
+        "avg_holding_minutes": 160.12123197903014
+      },
+      "EMA_BOUNCE_SCALP": {
+        "total_trades": 7968,
+        "winning_trades": 3659,
+        "losing_trades": 4309,
+        "win_rate": 0.4592118473895582,
+        "avg_pnl_pct": -0.27534144222999213,
+        "avg_win_pct": 1.1683173072606399,
+        "avg_loss_pct": -1.5012285075319698,
+        "total_pnl_pct": -2193.920611688577,
+        "avg_holding_minutes": 202.42218875502007
+      },
+      "MICRO_PULLBACK_LONG": {
+        "total_trades": 1585,
+        "winning_trades": 779,
+        "losing_trades": 806,
+        "win_rate": 0.4914826498422713,
+        "avg_pnl_pct": -0.30373076078186373,
+        "avg_win_pct": 1.4176443104363612,
+        "avg_loss_pct": -1.9674419028153591,
+        "total_pnl_pct": -481.413255839254,
+        "avg_holding_minutes": 78.8801261829653
+      },
+      "FAST_SCALP_REBOUND": {
+        "total_trades": 1760,
+        "winning_trades": 505,
+        "losing_trades": 1255,
+        "win_rate": 0.2869318181818182,
+        "avg_pnl_pct": -0.5957709239977184,
+        "avg_win_pct": 1.54932477724224,
+        "avg_loss_pct": -1.4589369233014466,
+        "total_pnl_pct": -1048.5568262359843,
+        "avg_holding_minutes": 39.84659090909091
+      },
+      "TIGHT_RANGE_BREAKOUT": {
+        "total_trades": 1230,
+        "winning_trades": 509,
+        "losing_trades": 721,
+        "win_rate": 0.4138211382113821,
+        "avg_pnl_pct": -0.4975110201179609,
+        "avg_win_pct": 1.5088347144106677,
+        "avg_loss_pct": -1.913918757808768,
+        "total_pnl_pct": -611.9385547450919,
+        "avg_holding_minutes": 144.8861788617886
+      },
+      "SUPPORT_TOUCH_BOUNCE": {
+        "total_trades": 4120,
+        "winning_trades": 1785,
+        "losing_trades": 2335,
+        "win_rate": 0.433252427184466,
+        "avg_pnl_pct": -0.3974298254233508,
+        "avg_win_pct": 0.9329936861033109,
+        "avg_loss_pct": -1.4144773492242464,
+        "total_pnl_pct": -1637.4108807442053,
+        "avg_holding_minutes": 211.20873786407768
+      },
+      "VOLUME_CLIMAX_REVERSAL": {
+        "total_trades": 3,
+        "winning_trades": 0,
+        "losing_trades": 3,
+        "win_rate": 0.0,
+        "avg_pnl_pct": -4.433930592862432,
+        "avg_win_pct": 0,
+        "avg_loss_pct": -4.433930592862432,
+        "total_pnl_pct": -13.301791778587297,
+        "avg_holding_minutes": 33.333333333333336
+      },
+      "EMA_CROSSOVER_MOMENTUM": {
+        "total_trades": 4100,
+        "winning_trades": 1773,
+        "losing_trades": 2327,
+        "win_rate": 0.4324390243902439,
+        "avg_pnl_pct": -0.5143033363256947,
+        "avg_win_pct": 1.567746284290644,
+        "avg_loss_pct": -2.1006694632499614,
+        "total_pnl_pct": -2108.6436789353484,
+        "avg_holding_minutes": 302.09634146341466
+      },
+      "ATR_EXPANSION_ENTRY": {
+        "total_trades": 9800,
+        "winning_trades": 4597,
+        "losing_trades": 5203,
+        "win_rate": 0.46908163265306124,
+        "avg_pnl_pct": -0.41879959202831196,
+        "avg_win_pct": 1.4884204909905334,
+        "avg_loss_pct": -2.1038833363369096,
+        "total_pnl_pct": -4104.236001877457,
+        "avg_holding_minutes": 205.47397959183672
+      },
+      "TRIPLE_CONFIRMATION_ENTRY": {
+        "total_trades": 5571,
+        "winning_trades": 2594,
+        "losing_trades": 2977,
+        "win_rate": 0.46562556094058516,
+        "avg_pnl_pct": -0.4153941314564186,
+        "avg_win_pct": 1.1684593579259432,
+        "avg_loss_pct": -1.7954801077607,
+        "total_pnl_pct": -2314.160706343708,
+        "avg_holding_minutes": 245.29617662897147
+      },
+      "DATA_DRIVEN_V28": {
+        "total_trades": 4343,
+        "winning_trades": 2946,
+        "losing_trades": 1397,
+        "win_rate": 0.6783329495740271,
+        "avg_pnl_pct": -0.3966622341708443,
+        "avg_win_pct": 0.951295928052706,
+        "avg_loss_pct": -3.2392425819951667,
+        "total_pnl_pct": -1722.7040830039768,
+        "avg_holding_minutes": 291.46672806815565
+      }
+    }
+  },
+  "indicator_distribution_analysis": {
+    "summary": {
+      "total_trades": 45058,
+      "baseline_win_rate": "48.6%",
+      "indicators_analyzed": 22
+    },
+    "indicator_distributions": {
+      "atr14": {
+        "all": {
+          "mean": "1090.1704",
+          "std": "19654.4599",
+          "median": "0.6429"
+        },
+        "win": {
+          "mean": "122.9455",
+          "std": "1260.3869",
+          "median": "0.6429"
+        },
+        "loss": {
+          "mean": "1772.9962",
+          "std": "25627.3668",
+          "median": "0.5714"
+        },
+        "optimal_range": "6.4225 ~ 13.7527",
+        "optimal_win_rate": "50.0%"
+      },
+      "atr50": {
+        "all": {
+          "mean": "1333.3577",
+          "std": "23860.2789",
+          "median": "0.8460"
+        },
+        "win": {
+          "mean": "161.4317",
+          "std": "1662.1406",
+          "median": "0.8800"
+        },
+        "loss": {
+          "mean": "2160.6952",
+          "std": "31106.6368",
+          "median": "0.8400"
+        },
+        "optimal_range": "2.6195 ~ 5.2271",
+        "optimal_win_rate": "52.2%"
+      },
+      "atr_expansion": {
+        "all": {
+          "mean": "0.3358",
+          "std": "0.4102",
+          "median": "0.2500"
+        },
+        "win": {
+          "mean": "0.3292",
+          "std": "0.3431",
+          "median": "0.2500"
+        },
+        "loss": {
+          "mean": "0.3418",
+          "std": "0.4613",
+          "median": "0.2500"
+        },
+        "optimal_range": "0.5492 ~ 0.5793",
+        "optimal_win_rate": "55.5%"
+      },
+      "atr_now": {
+        "all": {
+          "mean": "807.9142",
+          "std": "16339.5340",
+          "median": "0.9286"
+        },
+        "win": {
+          "mean": "532.0237",
+          "std": "12484.6913",
+          "median": "0.9286"
+        },
+        "loss": {
+          "mean": "1051.6713",
+          "std": "19105.6301",
+          "median": "0.9286"
+        },
+        "optimal_range": "14.4792 ~ 27.5000",
+        "optimal_win_rate": "50.9%"
+      },
+      "atr_old": {
+        "all": {
+          "mean": "661.0367",
+          "std": "13424.4792",
+          "median": "0.7143"
+        },
+        "win": {
+          "mean": "440.2593",
+          "std": "10313.4712",
+          "median": "0.7143"
+        },
+        "loss": {
+          "mean": "856.0998",
+          "std": "15664.7120",
+          "median": "0.7143"
+        },
+        "optimal_range": "12.2029 ~ 17.7457",
+        "optimal_win_rate": "50.6%"
+      },
+      "breakout_pct": {
+        "all": {
+          "mean": "0.0088",
+          "std": "0.0044",
+          "median": "0.0077"
+        },
+        "win": {
+          "mean": "0.0089",
+          "std": "0.0049",
+          "median": "0.0075"
+        },
+        "loss": {
+          "mean": "0.0088",
+          "std": "0.0040",
+          "median": "0.0079"
+        },
+        "optimal_range": "0.0130 ~ 0.0143",
+        "optimal_win_rate": "56.2%"
+      },
+      "dip_pct": {
+        "all": {
+          "mean": "-0.0037",
+          "std": "0.0076",
+          "median": "0.0005"
+        },
+        "win": {
+          "mean": "-0.0042",
+          "std": "0.0077",
+          "median": "0.0002"
+        },
+        "loss": {
+          "mean": "-0.0034",
+          "std": "0.0076",
+          "median": "0.0006"
+        },
+        "optimal_range": "-0.0155 ~ 0.0003",
+        "optimal_win_rate": "50.6%"
+      },
+      "distance_from_low": {
+        "all": {
+          "mean": "0.0392",
+          "std": "0.0630",
+          "median": "0.0192"
+        },
+        "win": {
+          "mean": "0.0446",
+          "std": "0.0640",
+          "median": "0.0248"
+        },
+        "loss": {
+          "mean": "0.0329",
+          "std": "0.0611",
+          "median": "0.0153"
+        },
+        "optimal_range": "0.0031 ~ 0.1632",
+        "optimal_win_rate": "53.3%"
+      },
+      "ema10": {
+        "all": {
+          "mean": "326931.3184",
+          "std": "5537436.8159",
+          "median": "157.4572"
+        },
+        "win": {
+          "mean": "211387.8543",
+          "std": "4213591.1190",
+          "median": "159.7641"
+        },
+        "loss": {
+          "mean": "414966.7983",
+          "std": "6362457.6717",
+          "median": "157.2142"
+        },
+        "optimal_range": "2762.0503 ~ 5177.1208",
+        "optimal_win_rate": "51.5%"
+      },
+      "ema20": {
+        "all": {
+          "mean": "399966.3732",
+          "std": "6301486.2053",
+          "median": "240.5292"
+        },
+        "win": {
+          "mean": "228912.7294",
+          "std": "4584846.1355",
+          "median": "284.5955"
+        },
+        "loss": {
+          "mean": "574903.9496",
+          "std": "7665536.0126",
+          "median": "201.4619"
+        },
+        "optimal_range": "3.8044 ~ 6124.8565",
+        "optimal_win_rate": "51.4%"
+      },
+      "ema30": {
+        "all": {
+          "mean": "326694.4182",
+          "std": "5533367.8703",
+          "median": "157.3094"
+        },
+        "win": {
+          "mean": "211252.6005",
+          "std": "4210588.1263",
+          "median": "159.4595"
+        },
+        "loss": {
+          "mean": "414652.4513",
+          "std": "6357735.8838",
+          "median": "157.0244"
+        },
+        "optimal_range": "2759.5422 ~ 5172.4199",
+        "optimal_win_rate": "51.2%"
+      },
+      "ema50": {
+        "all": {
+          "mean": "336393.6433",
+          "std": "5731284.7928",
+          "median": "291.5629"
+        },
+        "win": {
+          "mean": "145290.5041",
+          "std": "3530267.3870",
+          "median": "334.9442"
+        },
+        "loss": {
+          "mean": "542388.9281",
+          "std": "7398594.2734",
+          "median": "227.3101"
+        },
+        "optimal_range": "4.1512 ~ 5952.2142",
+        "optimal_win_rate": "52.9%"
+      },
+      "ema_distance": {
+        "all": {
+          "mean": "0.0061",
+          "std": "0.0047",
+          "median": "0.0049"
+        },
+        "win": {
+          "mean": "0.0063",
+          "std": "0.0048",
+          "median": "0.0052"
+        },
+        "loss": {
+          "mean": "0.0059",
+          "std": "0.0047",
+          "median": "0.0047"
+        },
+        "optimal_range": "0.0059 ~ 0.0099",
+        "optimal_win_rate": "50.3%"
+      },
+      "low_24h": {
+        "all": {
+          "mean": "402081.4242",
+          "std": "6321040.5932",
+          "median": "240.0000"
+        },
+        "win": {
+          "mean": "236815.5801",
+          "std": "4791612.8559",
+          "median": "274.0000"
+        },
+        "loss": {
+          "mean": "597163.2711",
+          "std": "7742580.0637",
+          "median": "209.0000"
+        },
+        "optimal_range": "2.3800 ~ 6660.0000",
+        "optimal_win_rate": "55.1%"
+      },
+      "price": {
+        "all": {
+          "mean": "399634.4657",
+          "std": "6311863.7169",
+          "median": "181.0000"
+        },
+        "win": {
+          "mean": "244473.3070",
+          "std": "4796228.2736",
+          "median": "207.0000"
+        },
+        "loss": {
+          "mean": "546340.8151",
+          "std": "7464165.2901",
+          "median": "169.0000"
+        },
+        "optimal_range": "339.7726 ~ 6415.0000",
+        "optimal_win_rate": "53.3%"
+      },
+      "pullback_pct": {
+        "all": {
+          "mean": "0.0149",
+          "std": "0.0039",
+          "median": "0.0140"
+        },
+        "win": {
+          "mean": "0.0146",
+          "std": "0.0037",
+          "median": "0.0137"
+        },
+        "loss": {
+          "mean": "0.0152",
+          "std": "0.0040",
+          "median": "0.0143"
+        },
+        "optimal_range": "0.0103 ~ 0.0197",
+        "optimal_win_rate": "50.2%"
+      },
+      "recovery": {
+        "all": {
+          "mean": "0.8797",
+          "std": "0.1894",
+          "median": "1.0000"
+        },
+        "win": {
+          "mean": "0.8479",
+          "std": "0.2062",
+          "median": "1.0000"
+        },
+        "loss": {
+          "mean": "0.8925",
+          "std": "0.1807",
+          "median": "1.0000"
+        },
+        "optimal_range": "0.4995 ~ 0.5259",
+        "optimal_win_rate": "52.0%"
+      },
+      "rvol": {
+        "all": {
+          "mean": "6.8180",
+          "std": "79.1774",
+          "median": "2.5961"
+        },
+        "win": {
+          "mean": "5.8022",
+          "std": "35.7056",
+          "median": "2.5484"
+        },
+        "loss": {
+          "mean": "7.7784",
+          "std": "104.8293",
+          "median": "2.6450"
+        },
+        "optimal_range": "6.6773 ~ 9.4176",
+        "optimal_win_rate": "50.0%"
+      },
+      "sma200": {
+        "all": {
+          "mean": "190195.6179",
+          "std": "4214159.9607",
+          "median": "512.3850"
+        },
+        "win": {
+          "mean": "64965.6603",
+          "std": "2290090.3215",
+          "median": "534.5100"
+        },
+        "loss": {
+          "mean": "401943.9575",
+          "std": "6232854.7959",
+          "median": "453.6750"
+        },
+        "optimal_range": "26.1286 ~ 3830.7500",
+        "optimal_win_rate": "65.1%"
+      },
+      "sma50": {
+        "all": {
+          "mean": "624.7057",
+          "std": "8126.2102",
+          "median": "105.5300"
+        },
+        "win": {
+          "mean": "378.2035",
+          "std": "828.3423",
+          "median": "115.1200"
+        },
+        "loss": {
+          "mean": "723.8958",
+          "std": "9607.1261",
+          "median": "103.1000"
+        },
+        "optimal_range": "243.9000 ~ 324.8906",
+        "optimal_win_rate": "58.8%"
+      },
+      "squeeze_ratio": {
+        "all": {
+          "mean": "0.7133",
+          "std": "0.1139",
+          "median": "0.7463"
+        },
+        "win": {
+          "mean": "0.7209",
+          "std": "0.1122",
+          "median": "0.7569"
+        },
+        "loss": {
+          "mean": "0.7080",
+          "std": "0.1147",
+          "median": "0.7389"
+        },
+        "optimal_range": "0.8031 ~ 0.8217",
+        "optimal_win_rate": "50.4%"
+      },
+      "wick_ratio": {
+        "all": {
+          "mean": "0.7100",
+          "std": "0.2314",
+          "median": "0.6515"
+        },
+        "win": {
+          "mean": "0.6968",
+          "std": "0.2294",
+          "median": "0.6000"
+        },
+        "loss": {
+          "mean": "0.7201",
+          "std": "0.2325",
+          "median": "0.6667"
+        },
+        "optimal_range": "0.5188 ~ 0.6391",
+        "optimal_win_rate": "50.0%"
+      }
+    },
+    "optimal_ranges": {
+      "sma200": {
+        "range": "26.1286 ~ 3830.7500",
+        "win_rate": "65.1%",
+        "avg_pnl": "-0.33%",
+        "trades": 5334,
+        "improvement": "+16.5%"
+      },
+      "sma50": {
+        "range": "243.9000 ~ 324.8906",
+        "win_rate": "58.8%",
+        "avg_pnl": "0.65%",
+        "trades": 34,
+        "improvement": "+10.2%"
+      },
+      "breakout_pct": {
+        "range": "0.0130 ~ 0.0143",
+        "win_rate": "56.2%",
+        "avg_pnl": "0.49%",
+        "trades": 32,
+        "improvement": "+7.7%"
+      },
+      "atr_expansion": {
+        "range": "0.5492 ~ 0.5793",
+        "win_rate": "55.5%",
+        "avg_pnl": "-0.05%",
+        "trades": 110,
+        "improvement": "+6.9%"
+      },
+      "low_24h": {
+        "range": "2.3800 ~ 6660.0000",
+        "win_rate": "55.1%",
+        "avg_pnl": "-0.29%",
+        "trades": 16756,
+        "improvement": "+6.5%"
+      },
+      "price": {
+        "range": "339.7726 ~ 6415.0000",
+        "win_rate": "53.3%",
+        "avg_pnl": "-0.32%",
+        "trades": 13970,
+        "improvement": "+4.7%"
+      },
+      "distance_from_low": {
+        "range": "0.0031 ~ 0.1632",
+        "win_rate": "53.3%",
+        "avg_pnl": "-0.32%",
+        "trades": 16754,
+        "improvement": "+4.7%"
+      },
+      "ema50": {
+        "range": "4.1512 ~ 5952.2142",
+        "win_rate": "52.9%",
+        "avg_pnl": "-0.40%",
+        "trades": 14039,
+        "improvement": "+4.3%"
+      },
+      "atr50": {
+        "range": "2.6195 ~ 5.2271",
+        "win_rate": "52.2%",
+        "avg_pnl": "0.37%",
+        "trades": 69,
+        "improvement": "+3.6%"
+      },
+      "recovery": {
+        "range": "0.4995 ~ 0.5259",
+        "win_rate": "52.0%",
+        "avg_pnl": "0.06%",
+        "trades": 75,
+        "improvement": "+3.4%"
+      },
+      "ema10": {
+        "range": "2762.0503 ~ 5177.1208",
+        "win_rate": "51.5%",
+        "avg_pnl": "-0.18%",
+        "trades": 169,
+        "improvement": "+2.9%"
+      },
+      "ema20": {
+        "range": "3.8044 ~ 6124.8565",
+        "win_rate": "51.4%",
+        "avg_pnl": "-0.34%",
+        "trades": 21327,
+        "improvement": "+2.8%"
+      },
+      "ema30": {
+        "range": "2759.5422 ~ 5172.4199",
+        "win_rate": "51.2%",
+        "avg_pnl": "-0.20%",
+        "trades": 170,
+        "improvement": "+2.6%"
+      },
+      "atr_now": {
+        "range": "14.4792 ~ 27.5000",
+        "win_rate": "50.9%",
+        "avg_pnl": "-0.32%",
+        "trades": 383,
+        "improvement": "+2.3%"
+      },
+      "atr_old": {
+        "range": "12.2029 ~ 17.7457",
+        "win_rate": "50.6%",
+        "avg_pnl": "-0.32%",
+        "trades": 231,
+        "improvement": "+2.0%"
+      },
+      "dip_pct": {
+        "range": "-0.0155 ~ 0.0003",
+        "win_rate": "50.6%",
+        "avg_pnl": "-0.18%",
+        "trades": 6079,
+        "improvement": "+2.0%"
+      },
+      "squeeze_ratio": {
+        "range": "0.8031 ~ 0.8217",
+        "win_rate": "50.4%",
+        "avg_pnl": "-0.17%",
+        "trades": 117,
+        "improvement": "+1.8%"
+      },
+      "ema_distance": {
+        "range": "0.0059 ~ 0.0099",
+        "win_rate": "50.3%",
+        "avg_pnl": "-0.24%",
+        "trades": 1183,
+        "improvement": "+1.7%"
+      },
+      "pullback_pct": {
+        "range": "0.0103 ~ 0.0197",
+        "win_rate": "50.2%",
+        "avg_pnl": "-0.29%",
+        "trades": 1308,
+        "improvement": "+1.6%"
+      },
+      "atr14": {
+        "range": "6.4225 ~ 13.7527",
+        "win_rate": "50.0%",
+        "avg_pnl": "-0.06%",
+        "trades": 42,
+        "improvement": "+1.4%"
+      },
+      "rvol": {
+        "range": "6.6773 ~ 9.4176",
+        "win_rate": "50.0%",
+        "avg_pnl": "-0.32%",
+        "trades": 2582,
+        "improvement": "+1.4%"
+      },
+      "wick_ratio": {
+        "range": "0.5188 ~ 0.6391",
+        "win_rate": "50.0%",
+        "avg_pnl": "-0.34%",
+        "trades": 242,
+        "improvement": "+1.4%"
+      }
+    },
+    "combined_conditions": []
+  },
+  "sl_tp_analysis": {
+    "summary": {
+      "total_trades": 34508
+    },
+    "price_movement_stats": {
+      "avg_max_profit_pct": "1.22%",
+      "avg_max_drawdown_pct": "-0.99%",
+      "median_max_profit_pct": "1.11%",
+      "median_max_drawdown_pct": "-0.84%"
+    },
+    "breakeven_analysis": {
+      "breakeven_rate": "100.0%",
+      "avg_drawdown_before_profit": "-0.99%",
+      "avg_time_to_breakeven": "242분"
+    },
+    "best_sl_tp": {
+      "sl_pct": "-5.0%",
+      "tp_pct": "5.0%",
+      "expected_win_rate": "63.5%",
+      "expected_avg_pnl": "0.12%",
+      "risk_reward_ratio": "1.00"
+    },
+    "top_sl_tp_combinations": [
+      {
+        "sl": "-5.0%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-4.5%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-4.0%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-3.5%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-3.0%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-2.5%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-2.0%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-1.5%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-1.0%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      },
+      {
+        "sl": "-0.5%",
+        "tp": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "0.12%"
+      }
+    ],
+    "best_trailing_stop": {
+      "trailing_pct": "0.3%",
+      "activation_pct": "0.3%",
+      "win_rate": "91.7%",
+      "avg_pnl": "0.76%",
+      "improvement_vs_fixed": "+0.64%"
+    }
+  },
+  "pattern_extraction": {
+    "summary": {
+      "total_patterns": 27,
+      "top_patterns": [
+        {
+          "id": "P018",
+          "name": "sma200_high_25",
+          "win_rate": "66.7%",
+          "avg_pnl": "-0.36%",
+          "confidence": "66.7",
+          "trades": 4446
+        },
+        {
+          "id": "P001",
+          "name": "sma200_range_filter",
+          "win_rate": "65.1%",
+          "avg_pnl": "-0.33%",
+          "confidence": "65.1",
+          "trades": 5334
+        },
+        {
+          "id": "P019",
+          "name": "sma200_high_50",
+          "win_rate": "65.0%",
+          "avg_pnl": "-0.40%",
+          "confidence": "65.0",
+          "trades": 2964
+        },
+        {
+          "id": "P020",
+          "name": "distance_from_low_high_75",
+          "win_rate": "64.9%",
+          "avg_pnl": "-0.30%",
+          "confidence": "64.9",
+          "trades": 4654
+        },
+        {
+          "id": "P021",
+          "name": "sma200_low_75",
+          "win_rate": "63.5%",
+          "avg_pnl": "-0.31%",
+          "confidence": "63.5",
+          "trades": 4446
+        }
+      ],
+      "best_sl_pct": -5.0,
+      "best_tp_pct": 5.0,
+      "trade_analysis": {
+        "total_trades": 45058,
+        "overall_win_rate": "48.6%"
+      }
+    },
+    "patterns": [
+      {
+        "id": "P018",
+        "name": "sma200_high_25",
+        "description": "sma200 >= 260.4825 (상위 75%)",
+        "conditions": [
+          {
+            "indicator": "sma200",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "66.7%",
+        "avg_pnl": "-0.36%",
+        "trades": 4446,
+        "confidence": "66.7"
+      },
+      {
+        "id": "P001",
+        "name": "sma200_range_filter",
+        "description": "sma200: 26.1286 ~ 3830.7500",
+        "conditions": [
+          {
+            "indicator": "sma200",
+            "operator": "between",
+            "value": 26.1286,
+            "upper_value": 3830.7499999999995
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "65.1%",
+        "avg_pnl": "-0.33%",
+        "trades": 5334,
+        "confidence": "65.1"
+      },
+      {
+        "id": "P019",
+        "name": "sma200_high_50",
+        "description": "sma200 >= 512.3850 (상위 50%)",
+        "conditions": [
+          {
+            "indicator": "sma200",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "65.0%",
+        "avg_pnl": "-0.40%",
+        "trades": 2964,
+        "confidence": "65.0"
+      },
+      {
+        "id": "P020",
+        "name": "distance_from_low_high_75",
+        "description": "distance_from_low >= 0.0412 (상위 25%)",
+        "conditions": [
+          {
+            "indicator": "distance_from_low",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "64.9%",
+        "avg_pnl": "-0.30%",
+        "trades": 4654,
+        "confidence": "64.9"
+      },
+      {
+        "id": "P021",
+        "name": "sma200_low_75",
+        "description": "sma200 < 1541.7437 (하위 75%)",
+        "conditions": [
+          {
+            "indicator": "sma200",
+            "operator": "<=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "63.5%",
+        "avg_pnl": "-0.31%",
+        "trades": 4446,
+        "confidence": "63.5"
+      },
+      {
+        "id": "P022",
+        "name": "sma200_high_75",
+        "description": "sma200 >= 1541.7437 (상위 25%)",
+        "conditions": [
+          {
+            "indicator": "sma200",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "60.7%",
+        "avg_pnl": "-0.56%",
+        "trades": 1482,
+        "confidence": "60.7"
+      },
+      {
+        "id": "P023",
+        "name": "sma200_low_50",
+        "description": "sma200 < 512.3850 (하위 50%)",
+        "conditions": [
+          {
+            "indicator": "sma200",
+            "operator": "<=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "60.7%",
+        "avg_pnl": "-0.34%",
+        "trades": 2964,
+        "confidence": "60.7"
+      },
+      {
+        "id": "P024",
+        "name": "distance_from_low_high_50",
+        "description": "distance_from_low >= 0.0192 (상위 50%)",
+        "conditions": [
+          {
+            "indicator": "distance_from_low",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "60.5%",
+        "avg_pnl": "-0.26%",
+        "trades": 9308,
+        "confidence": "60.5"
+      },
+      {
+        "id": "P025",
+        "name": "low_24h_high_50",
+        "description": "low_24h >= 240.0000 (상위 50%)",
+        "conditions": [
+          {
+            "indicator": "low_24h",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "57.5%",
+        "avg_pnl": "-0.38%",
+        "trades": 9319,
+        "confidence": "57.5"
+      },
+      {
+        "id": "P026",
+        "name": "ema50_high_50",
+        "description": "ema50 >= 291.5629 (상위 50%)",
+        "conditions": [
+          {
+            "indicator": "ema50",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "57.1%",
+        "avg_pnl": "-0.41%",
+        "trades": 7800,
+        "confidence": "57.1"
+      },
+      {
+        "id": "P027",
+        "name": "distance_from_low_high_25",
+        "description": "distance_from_low >= 0.0093 (상위 75%)",
+        "conditions": [
+          {
+            "indicator": "distance_from_low",
+            "operator": ">=",
+            "value": 0,
+            "upper_value": null
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "56.3%",
+        "avg_pnl": "-0.28%",
+        "trades": 13961,
+        "confidence": "56.3"
+      },
+      {
+        "id": "P003",
+        "name": "low_24h_range_filter",
+        "description": "low_24h: 2.3800 ~ 6660.0000",
+        "conditions": [
+          {
+            "indicator": "low_24h",
+            "operator": "between",
+            "value": 2.38,
+            "upper_value": 6660.0
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "55.1%",
+        "avg_pnl": "-0.29%",
+        "trades": 16756,
+        "confidence": "55.1"
+      },
+      {
+        "id": "P004",
+        "name": "price_range_filter",
+        "description": "price: 339.7726 ~ 6415.0000",
+        "conditions": [
+          {
+            "indicator": "price",
+            "operator": "between",
+            "value": 339.77263157894737,
+            "upper_value": 6415.0
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "53.3%",
+        "avg_pnl": "-0.32%",
+        "trades": 13970,
+        "confidence": "53.3"
+      },
+      {
+        "id": "P005",
+        "name": "distance_from_low_range_filter",
+        "description": "distance_from_low: 0.0031 ~ 0.1632",
+        "conditions": [
+          {
+            "indicator": "distance_from_low",
+            "operator": "between",
+            "value": 0.0030581039755351027,
+            "upper_value": 0.163177110606854
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "53.3%",
+        "avg_pnl": "-0.32%",
+        "trades": 16754,
+        "confidence": "53.3"
+      },
+      {
+        "id": "P006",
+        "name": "ema50_range_filter",
+        "description": "ema50: 4.1512 ~ 5952.2142",
+        "conditions": [
+          {
+            "indicator": "ema50",
+            "operator": "between",
+            "value": 4.151152674840472,
+            "upper_value": 5952.214220260726
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "52.9%",
+        "avg_pnl": "-0.40%",
+        "trades": 14039,
+        "confidence": "52.9"
+      },
+      {
+        "id": "P008",
+        "name": "ema20_range_filter",
+        "description": "ema20: 3.8044 ~ 6124.8565",
+        "conditions": [
+          {
+            "indicator": "ema20",
+            "operator": "between",
+            "value": 3.8043644814618247,
+            "upper_value": 6124.856451456879
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "51.4%",
+        "avg_pnl": "-0.34%",
+        "trades": 21327,
+        "confidence": "51.4"
+      },
+      {
+        "id": "P010",
+        "name": "atr_now_range_filter",
+        "description": "atr_now: 14.4792 ~ 27.5000",
+        "conditions": [
+          {
+            "indicator": "atr_now",
+            "operator": "between",
+            "value": 14.479165413533835,
+            "upper_value": 27.5
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "50.9%",
+        "avg_pnl": "-0.32%",
+        "trades": 383,
+        "confidence": "50.9"
+      },
+      {
+        "id": "P012",
+        "name": "dip_pct_range_filter",
+        "description": "dip_pct: -0.0155 ~ 0.0003",
+        "conditions": [
+          {
+            "indicator": "dip_pct",
+            "operator": "between",
+            "value": -0.015475886502186334,
+            "upper_value": 0.0002550825153436586
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "50.6%",
+        "avg_pnl": "-0.18%",
+        "trades": 6079,
+        "confidence": "50.6"
+      },
+      {
+        "id": "P014",
+        "name": "ema_distance_range_filter",
+        "description": "ema_distance: 0.0059 ~ 0.0099",
+        "conditions": [
+          {
+            "indicator": "ema_distance",
+            "operator": "between",
+            "value": 0.005942335337582432,
+            "upper_value": 0.009902773195149183
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "50.3%",
+        "avg_pnl": "-0.24%",
+        "trades": 1183,
+        "confidence": "50.3"
+      },
+      {
+        "id": "P015",
+        "name": "pullback_pct_range_filter",
+        "description": "pullback_pct: 0.0103 ~ 0.0197",
+        "conditions": [
+          {
+            "indicator": "pullback_pct",
+            "operator": "between",
+            "value": 0.010337699367370582,
+            "upper_value": 0.01974831097902941
+          }
+        ],
+        "sl_pct": "-5.0%",
+        "tp_pct": "5.0%",
+        "win_rate": "50.2%",
+        "avg_pnl": "-0.29%",
+        "trades": 1308,
+        "confidence": "50.2"
+      }
+    ],
+    "strategy_template_available": true
+  },
+  "generated_strategy_code": "\"\"\"\nDataDrivenStrategyV28\n\n데이터 분석 기반 자동 생성된 전략\n- 기대 승률: 66.7% (상위 패턴 기준)\n- 최적 SL: -5.0%, TP: 5.0%\n\n적용된 패턴:\n- sma200_high_25: sma200 >= 260.4825 (상위 75%)\n- sma200_range_filter: sma200: 26.1286 ~ 3830.7500\n- sma200_high_50: sma200 >= 512.3850 (상위 50%)\n\"\"\"\n\nfrom dataclasses import dataclass\nfrom typing import Optional\n\n\n@dataclass\nclass DataDrivenStrategyV28Config:\n    \"\"\"전략 설정\"\"\"\n\n    sl_pct: float = -5.0\n    tp_pct: float = 5.0\n    position_pct: float = 0.1\n    cooldown_minutes: int = 30\n\n\nclass DataDrivenStrategyV28SignalGenerator:\n    \"\"\"데이터 기반 신호 생성기\"\"\"\n\n    def __init__(self, config: Optional[DataDrivenStrategyV28Config] = None):\n        self.config = config or DataDrivenStrategyV28Config()\n        self.last_signal_time: dict[str, float] = {}\n\n    def __call__(\n        self,\n        symbol: str,\n        history_provider,\n        current_time: float,\n    ) -> Optional[dict]:\n        \"\"\"\n        진입 신호 생성\n\n        Args:\n            symbol: 심볼\n            history_provider: HistoryProvider 인스턴스\n            current_time: 현재 시간 (timestamp)\n\n        Returns:\n            신호 딕셔너리 또는 None\n        \"\"\"\n        # 쿨다운 체크\n        last_time = self.last_signal_time.get(symbol, 0)\n        if current_time - last_time < self.config.cooldown_minutes * 60:\n            return None\n\n        # 지표 계산\n        indicators = self._calculate_indicators(symbol, history_provider)\n\n        # 진입 조건 체크\n        if self._check_entry_conditions(indicators):\n            self.last_signal_time[symbol] = current_time\n\n            return {\n                \"symbol\": symbol,\n                \"action\": \"buy\",\n                \"strategy\": \"DataDrivenStrategyV28\",\n                \"score\": 66.7,\n                \"position_pct\": self.config.position_pct,\n                \"indicators\": indicators,\n                \"sl_pct\": self.config.sl_pct,\n                \"tp_pct\": self.config.tp_pct,\n            }\n\n        return None\n\n    def _calculate_indicators(\n        self,\n        symbol: str,\n        history_provider,\n    ) -> dict:\n        \"\"\"지표 계산\"\"\"\n        closes = history_provider.get_closes(symbol)\n        if len(closes) < 50:\n            return {}\n\n        price = closes[-1]\n        ema20 = history_provider.calc_ema(symbol, 20)\n        ema50 = history_provider.calc_ema(symbol, 50)\n        rvol = history_provider.calc_rvol(symbol)\n\n        return {\n            \"price\": price,\n            \"ema20\": ema20,\n            \"ema50\": ema50,\n            \"rvol\": rvol,\n            \"ema20_distance_pct\": (price - ema20) / ema20 * 100 if ema20 else 0,\n        }\n\n    def _check_entry_conditions(self, indicators: dict) -> bool:\n        \"\"\"\n        진입 조건 체크\n\n        데이터 분석으로 발견된 수익 조건들:\n        \"\"\"\n        if not indicators:\n            return False\n\n        # 자동 생성된 조건\n        return (\n        indicators.get('sma200', 0) >= 0.0000 and\n        26.1286 <= indicators.get('sma200', 0) <= 3830.7500 and\n        indicators.get('sma200', 0) >= 0.0000\n        )\n\n\ndef create_exit_checker(config: DataDrivenStrategyV28Config):\n    \"\"\"청산 조건 체커 생성\"\"\"\n\n    def check_exit(\n        position,\n        current_price: float,\n        current_time: float,\n    ) -> Optional[str]:\n        \"\"\"\n        청산 조건 체크\n\n        Returns:\n            청산 사유 또는 None\n        \"\"\"\n        entry_price = position.entry_price\n        pnl_pct = (current_price - entry_price) / entry_price * 100\n\n        # 손절\n        if pnl_pct <= config.sl_pct:\n            return \"stop_loss\"\n\n        # 익절\n        if pnl_pct >= config.tp_pct:\n            return \"take_profit\"\n\n        return None\n\n    return check_exit\n"
+}

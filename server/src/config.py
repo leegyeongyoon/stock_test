@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     telegram_chat_id: str = Field(default="")
 
+    # === OpenAI API ===
+    openai_api_key: SecretStr = Field(default=SecretStr(""))
+
     # === 서버 설정 ===
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)

@@ -12,74 +12,75 @@ import structlog
 
 from src.backtesting.data.data_loader import BacktestDataLoader
 from src.backtesting.engine.backtest_engine import BacktestEngine
-from src.backtesting.models.database import BacktestResultModel
+from src.backtesting.models.database import BacktestResultModel, BacktestTradeModel
 from src.backtesting.models.schemas import BacktestConfig
 from src.backtesting.strategies.strategy_adapters import get_signal_generator, get_exit_checker
 from src.models.database import async_session
 
 logger = structlog.get_logger()
 
-# v27: 고승률 10개 전략 청산 파라미터 (plan에서 정의된 R:R)
+# v27 개선: 스탑로스 확대 (-0.4~1.0% → -1.5~2.5%)
+# 노이즈에 의한 손절 감소를 위해 SL 완화
 STRATEGIES = {
     "EMA_BOUNCE_SCALP": {
-        "stop_loss_pct": -0.006,
+        "stop_loss_pct": -0.015,  # 완화: -0.6% → -1.5%
         "take_profit_pct": 0.015,
         "trailing_trigger_pct": 0.010,
-        "trailing_stop_pct": 0.004,
-    },
-    "DOUBLE_DIP_BUY": {
-        "stop_loss_pct": -0.004,
-        "take_profit_pct": 0.022,
-        "trailing_trigger_pct": 0.015,
-        "trailing_stop_pct": 0.003,
-    },
-    "TIGHT_RANGE_BREAKOUT": {
-        "stop_loss_pct": -0.008,
-        "take_profit_pct": 0.025,
-        "trailing_trigger_pct": 0.018,
-        "trailing_stop_pct": 0.005,
-    },
-    "SUPPORT_TOUCH_BOUNCE": {
-        "stop_loss_pct": -0.005,
-        "take_profit_pct": 0.012,
-        "trailing_trigger_pct": 0.008,
-        "trailing_stop_pct": 0.003,
-    },
-    "VOLUME_CLIMAX_REVERSAL": {
-        "stop_loss_pct": -0.006,
-        "take_profit_pct": 0.018,
-        "trailing_trigger_pct": 0.012,
-        "trailing_stop_pct": 0.004,
-    },
-    "EMA_CROSSOVER_MOMENTUM": {
-        "stop_loss_pct": -0.010,
-        "take_profit_pct": 0.030,
-        "trailing_trigger_pct": 0.020,
         "trailing_stop_pct": 0.006,
     },
-    "ATR_EXPANSION_ENTRY": {
-        "stop_loss_pct": -0.008,
-        "take_profit_pct": 0.024,
-        "trailing_trigger_pct": 0.016,
+    "DOUBLE_DIP_BUY": {
+        "stop_loss_pct": -0.020,  # 완화: -0.4% → -2.0%
+        "take_profit_pct": 0.015,  # 조정: 2.2% → 1.5%
+        "trailing_trigger_pct": 0.010,
+        "trailing_stop_pct": 0.006,
+    },
+    "TIGHT_RANGE_BREAKOUT": {
+        "stop_loss_pct": -0.018,  # 완화: -0.8% → -1.8%
+        "take_profit_pct": 0.020,  # 조정: 2.5% → 2.0%
+        "trailing_trigger_pct": 0.012,
+        "trailing_stop_pct": 0.006,
+    },
+    "SUPPORT_TOUCH_BOUNCE": {
+        "stop_loss_pct": -0.015,  # 완화: -0.5% → -1.5%
+        "take_profit_pct": 0.012,
+        "trailing_trigger_pct": 0.008,
         "trailing_stop_pct": 0.005,
     },
+    "VOLUME_CLIMAX_REVERSAL": {
+        "stop_loss_pct": -0.020,  # 완화: -0.6% → -2.0%
+        "take_profit_pct": 0.018,
+        "trailing_trigger_pct": 0.012,
+        "trailing_stop_pct": 0.006,
+    },
+    "EMA_CROSSOVER_MOMENTUM": {
+        "stop_loss_pct": -0.020,  # 완화: -1.0% → -2.0%
+        "take_profit_pct": 0.020,  # 조정: 3.0% → 2.0%
+        "trailing_trigger_pct": 0.014,
+        "trailing_stop_pct": 0.007,
+    },
+    "ATR_EXPANSION_ENTRY": {
+        "stop_loss_pct": -0.020,  # 완화: -0.8% → -2.0%
+        "take_profit_pct": 0.018,  # 조정: 2.4% → 1.8%
+        "trailing_trigger_pct": 0.012,
+        "trailing_stop_pct": 0.006,
+    },
     "MICRO_PULLBACK_LONG": {
-        "stop_loss_pct": -0.006,
-        "take_profit_pct": 0.016,
-        "trailing_trigger_pct": 0.010,
-        "trailing_stop_pct": 0.004,
+        "stop_loss_pct": -0.020,  # 완화: -0.6% → -2.0%
+        "take_profit_pct": 0.012,  # 조정: 1.6% → 1.2%
+        "trailing_trigger_pct": 0.008,
+        "trailing_stop_pct": 0.005,
     },
     "TRIPLE_CONFIRMATION_ENTRY": {
-        "stop_loss_pct": -0.005,
+        "stop_loss_pct": -0.018,  # 완화: -0.5% → -1.8%
         "take_profit_pct": 0.014,
         "trailing_trigger_pct": 0.010,
-        "trailing_stop_pct": 0.003,
+        "trailing_stop_pct": 0.005,
     },
     "FAST_SCALP_REBOUND": {
-        "stop_loss_pct": -0.005,
-        "take_profit_pct": 0.015,
-        "trailing_trigger_pct": 0.010,
-        "trailing_stop_pct": 0.003,
+        "stop_loss_pct": -0.015,  # 완화: -0.5% → -1.5%
+        "take_profit_pct": 0.010,  # 조정: 1.5% → 1.0%
+        "trailing_trigger_pct": 0.007,
+        "trailing_stop_pct": 0.004,
     },
 }
 
@@ -165,6 +166,32 @@ async def run_single_backtest(strategy: str, days: int, label: str):
         )
 
         db.add(result_model)
+
+        # v28: 개별 거래도 저장 (분석용)
+        for trade in result.trades:
+            trade_model = BacktestTradeModel(
+                run_id=result.run_id,
+                trade_id=trade.trade_id,
+                symbol=trade.symbol,
+                strategy=trade.strategy,
+                entry_time=trade.entry_time,
+                entry_price=trade.entry_price,
+                entry_quantity=trade.entry_quantity,
+                entry_value=trade.entry_price * trade.entry_quantity,
+                exit_time=trade.exit_time,
+                exit_price=trade.exit_price,
+                exit_reason=trade.exit_reason,
+                pnl=trade.pnl,
+                pnl_pct=trade.pnl_pct * 100,  # 백분율로 변환
+                commission=trade.commission,
+                slippage=0,
+                holding_minutes=trade.holding_minutes,
+                max_profit_pct=trade.max_profit_pct * 100,
+                max_drawdown_pct=trade.max_drawdown_pct * 100,
+                entry_indicators_json=trade.entry_indicators,
+            )
+            db.add(trade_model)
+
         await db.commit()
 
         return {

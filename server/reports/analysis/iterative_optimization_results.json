@@ -1,0 +1,157 @@
+{
+  "timestamp": "2026-02-10T01:51:52.735924",
+  "iterations": 6,
+  "best_result": {
+    "return_pct": 2.45,
+    "win_rate": 60.9,
+    "trades": 1464,
+    "params": {
+      "entry": {
+        "min_dip_pct": 0.01,
+        "support_tolerance": 0.04,
+        "min_rvol": 1.7,
+        "cooldown_minutes": 15
+      },
+      "exit": {
+        "stop_loss_pct": -0.018,
+        "take_profit_pct": 0.019,
+        "trailing_trigger_pct": 0.01,
+        "trailing_stop_pct": 0.005
+      }
+    }
+  },
+  "all_results": [
+    {
+      "name": "Baseline",
+      "return_pct": -0.95,
+      "win_rate": 62.2,
+      "trades": 3464,
+      "avg_win": 1.21,
+      "avg_loss": -1.99,
+      "params": {
+        "entry": {
+          "min_dip_pct": 0.008,
+          "support_tolerance": 0.05,
+          "min_rvol": 1.5,
+          "cooldown_minutes": 15
+        },
+        "exit": {
+          "stop_loss_pct": -0.02,
+          "take_profit_pct": 0.015,
+          "trailing_trigger_pct": 0.01,
+          "trailing_stop_pct": 0.005
+        }
+      }
+    },
+    {
+      "name": "Iteration 1",
+      "return_pct": 0.28,
+      "win_rate": 58.3,
+      "trades": 2384,
+      "avg_win": 1.19,
+      "avg_loss": -1.7,
+      "params": {
+        "entry": {
+          "min_dip_pct": 0.009,
+          "support_tolerance": 0.045,
+          "min_rvol": 1.6,
+          "cooldown_minutes": 15
+        },
+        "exit": {
+          "stop_loss_pct": -0.018,
+          "take_profit_pct": 0.017,
+          "trailing_trigger_pct": 0.01,
+          "trailing_stop_pct": 0.005
+        }
+      }
+    },
+    {
+      "name": "Iteration 2",
+      "return_pct": 2.45,
+      "win_rate": 60.9,
+      "trades": 1464,
+      "avg_win": 1.11,
+      "avg_loss": -1.72,
+      "params": {
+        "entry": {
+          "min_dip_pct": 0.01,
+          "support_tolerance": 0.04,
+          "min_rvol": 1.7,
+          "cooldown_minutes": 15
+        },
+        "exit": {
+          "stop_loss_pct": -0.018,
+          "take_profit_pct": 0.019,
+          "trailing_trigger_pct": 0.01,
+          "trailing_stop_pct": 0.005
+        }
+      }
+    },
+    {
+      "name": "Iteration 3",
+      "return_pct": 1.3,
+      "win_rate": 59.6,
+      "trades": 998,
+      "avg_win": 1.06,
+      "avg_loss": -1.6,
+      "params": {
+        "entry": {
+          "min_dip_pct": 0.011,
+          "support_tolerance": 0.035,
+          "min_rvol": 1.8,
+          "cooldown_minutes": 15
+        },
+        "exit": {
+          "stop_loss_pct": -0.017,
+          "take_profit_pct": 0.021,
+          "trailing_trigger_pct": 0.01,
+          "trailing_stop_pct": 0.005
+        }
+      }
+    },
+    {
+      "name": "Iteration 4",
+      "return_pct": -4.28,
+      "win_rate": 58.0,
+      "trades": 1836,
+      "avg_win": 1.09,
+      "avg_loss": -1.65,
+      "params": {
+        "entry": {
+          "min_dip_pct": 0.0095,
+          "support_tolerance": 0.042,
+          "min_rvol": 1.65,
+          "cooldown_minutes": 15
+        },
+        "exit": {
+          "stop_loss_pct": -0.0175,
+          "take_profit_pct": 0.02,
+          "trailing_trigger_pct": 0.01,
+          "trailing_stop_pct": 0.005
+        }
+      }
+    },
+    {
+      "name": "Iteration 5",
+      "return_pct": 0.81,
+      "win_rate": 60.5,
+      "trades": 1228,
+      "avg_win": 1.08,
+      "avg_loss": -1.68,
+      "params": {
+        "entry": {
+          "min_dip_pct": 0.0105,
+          "support_tolerance": 0.038,
+          "min_rvol": 1.75,
+          "cooldown_minutes": 15
+        },
+        "exit": {
+          "stop_loss_pct": -0.018,
+          "take_profit_pct": 0.02,
+          "trailing_trigger_pct": 0.01,
+          "trailing_stop_pct": 0.005
+        }
+      }
+    }
+  ]
+}
