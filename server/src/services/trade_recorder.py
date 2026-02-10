@@ -229,7 +229,7 @@ class TradeRecorder:
 
         Args:
             symbol: 종목 심볼
-            strategy: 전략 이름 (PULLBACK, REBOUND, DIP_SCALPER, ATTACK)
+            strategy: 전략 이름 (VOLATILE_OVERSOLD_BOUNCE, CRASH_RECOVERY, TRIPLE_BEARISH_REVERSAL)
             entry_price: 진입 가격
             quantity: 진입 수량
             market_data: 진입 시점 시장 데이터

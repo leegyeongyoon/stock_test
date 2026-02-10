@@ -29,7 +29,7 @@ class PositionLedgerEntry:
     """포지션 원장 엔트리 - 단일 포지션의 모든 상태"""
 
     position_id: str  # UUID
-    strategy_id: str  # "SATELLITE", "ATTACK", "IGNITION", "SURGE", "PULLBACK"
+    strategy_id: str  # "VOLATILE_OVERSOLD_BOUNCE", "CRASH_RECOVERY", "TRIPLE_BEARISH_REVERSAL"
     symbol: str  # "KRW-BTC"
     side: str  # "LONG" (업비트는 LONG only)
     quantity: float  # 보유 수량

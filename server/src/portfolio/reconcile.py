@@ -11,8 +11,6 @@ import structlog
 from src.config import get_settings
 
 if TYPE_CHECKING:
-    from src.exchange.binance_perp import BinancePerpExchange
-    from src.exchange.binance_spot import BinanceSpotExchange
     from src.portfolio.ledger import Ledger
     from src.risk.risk_engine import RiskEngine
 

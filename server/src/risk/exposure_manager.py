@@ -47,11 +47,9 @@ class ExposureConfig:
     def __post_init__(self):
         if self.max_positions_per_strategy is None:
             self.max_positions_per_strategy = {
-                "SATELLITE": 3,
-                "ATTACK": 2,
-                "IGNITION": 2,
-                "SURGE": 2,
-                "PULLBACK": 2,
+                "VOLATILE_OVERSOLD_BOUNCE": 2,
+                "CRASH_RECOVERY": 2,
+                "TRIPLE_BEARISH_REVERSAL": 2,
             }
 
 
@@ -350,7 +348,7 @@ class ExposureManager:
 
         # 전략별 노출
         strategy_exposures = {}
-        for strategy in ["SATELLITE", "ATTACK", "IGNITION", "SURGE", "PULLBACK"]:
+        for strategy in ["VOLATILE_OVERSOLD_BOUNCE", "CRASH_RECOVERY", "TRIPLE_BEARISH_REVERSAL"]:
             strategy_exposures[strategy] = {
                 "exposure": await self._ledger.get_strategy_exposure(strategy),
                 "positions": len(await self._ledger.get_positions_by_strategy(strategy)),

@@ -117,10 +117,9 @@ export default function TradingHistoryPage() {
                 className="bg-slate-700 border border-slate-600 rounded px-3 py-2"
               >
                 <option value="">전체</option>
-                <option value="PULLBACK">Pullback</option>
-                <option value="REBOUND">Rebound</option>
-                <option value="DIP_SCALPER">Dip Scalper</option>
-                <option value="ATTACK">Attack</option>
+                <option value="VOLATILE_OVERSOLD_BOUNCE">VOB (과매도 반등)</option>
+                <option value="CRASH_RECOVERY">CR (급락 회복)</option>
+                <option value="TRIPLE_BEARISH_REVERSAL">TBR (3연음봉 반전)</option>
               </select>
             </div>
           </>
@@ -213,13 +212,13 @@ export default function TradingHistoryPage() {
                           <td className="px-4 py-3">
                             <span
                               className={`px-2 py-1 rounded text-xs ${
-                                trade.strategy === 'PULLBACK'
-                                  ? 'bg-purple-900 text-purple-200'
-                                  : trade.strategy === 'REBOUND'
+                                trade.strategy === 'VOLATILE_OVERSOLD_BOUNCE'
                                   ? 'bg-blue-900 text-blue-200'
-                                  : trade.strategy === 'DIP_SCALPER'
+                                  : trade.strategy === 'CRASH_RECOVERY'
                                   ? 'bg-orange-900 text-orange-200'
-                                  : 'bg-red-900 text-red-200'
+                                  : trade.strategy === 'TRIPLE_BEARISH_REVERSAL'
+                                  ? 'bg-purple-900 text-purple-200'
+                                  : 'bg-slate-700 text-slate-300'
                               }`}
                             >
                               {trade.strategy}

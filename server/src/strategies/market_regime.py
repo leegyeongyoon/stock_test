@@ -54,9 +54,9 @@ class MarketRegimeDetector:
         self.sideways_threshold = 0.01   # ±1% 횡보장
 
         # 전략 매핑
-        self.long_strategies = ["PULLBACK", "REBOUND", "DIP_SCALPER", "ATTACK"]
-        self.short_strategies = ["SHORT_BREAKDOWN", "SHORT_RALLY_FADE"]
-        self.conservative_strategies = ["PULLBACK"]  # 횡보장에서 보수적 운영
+        self.long_strategies = ["VOLATILE_OVERSOLD_BOUNCE", "CRASH_RECOVERY", "TRIPLE_BEARISH_REVERSAL"]
+        self.short_strategies = []
+        self.conservative_strategies = ["TRIPLE_BEARISH_REVERSAL"]
 
     def detect(self, candles: list, current_time: datetime = None) -> RegimeSignal:
         """시장 추세 감지
@@ -276,37 +276,20 @@ class AdaptiveStrategyManager:
 
         # 전략별 설정
         self.strategy_configs = {
-            # 롱 전략
-            "PULLBACK": {
+            "VOLATILE_OVERSOLD_BOUNCE": {
                 "type": "long",
                 "min_confidence": 0.5,
-                "exit_params": {"stop_loss_pct": -0.015, "take_profit_pct": 0.012},
+                "exit_params": {"stop_loss_pct": -0.02, "take_profit_pct": 0.02},
             },
-            "REBOUND": {
+            "CRASH_RECOVERY": {
                 "type": "long",
                 "min_confidence": 0.6,
-                "exit_params": {"stop_loss_pct": -0.015, "take_profit_pct": 0.012},
+                "exit_params": {"stop_loss_pct": -0.015, "take_profit_pct": 0.02},
             },
-            "DIP_SCALPER": {
+            "TRIPLE_BEARISH_REVERSAL": {
                 "type": "long",
-                "min_confidence": 0.7,
-                "exit_params": {"stop_loss_pct": -0.012, "take_profit_pct": 0.01},
-            },
-            "ATTACK": {
-                "type": "long",
-                "min_confidence": 0.7,
-                "exit_params": {"stop_loss_pct": -0.018, "take_profit_pct": 0.014},
-            },
-            # 숏 전략
-            "SHORT_BREAKDOWN": {
-                "type": "short",
                 "min_confidence": 0.5,
-                "exit_params": {"stop_loss_pct": -0.01, "take_profit_pct": 0.01},
-            },
-            "SHORT_RALLY_FADE": {
-                "type": "short",
-                "min_confidence": 0.5,
-                "exit_params": {"stop_loss_pct": -0.012, "take_profit_pct": 0.01},
+                "exit_params": {"stop_loss_pct": -0.02, "take_profit_pct": 0.02},
             },
         }
 

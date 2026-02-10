@@ -484,17 +484,20 @@ def create_pullback_exit_checker(
     take_profit_pct: float = 0.015,
     trailing_trigger_pct: float = 0.008,
     trailing_stop_pct: float = 0.004,
+    time_stop_minutes: int = 0,
 ):
     """
-    PULLBACK 전략용 청산 체커 생성
+    SL/TP/트레일링/타임스톱 청산 체커 생성
 
     Args:
         stop_loss_pct: 손절 (-1%)
         take_profit_pct: 익절 (+1.5%)
         trailing_trigger_pct: 트레일링 시작 (+0.8%)
         trailing_stop_pct: 트레일링 스탑 (0.4%)
+        time_stop_minutes: 타임스탑 (0이면 비활성, 분 단위)
 
     v2: 캔들 내 고가/저가 체크 (스탑로스 정확도 향상)
+    v3: 타임스탑 추가 (포지션 보유 시간 제한)
     """
 
     def check_exit(
@@ -503,6 +506,15 @@ def create_pullback_exit_checker(
         history_provider: HistoryProvider,
     ) -> Optional[str]:
         entry_price = position.entry_price
+
+        # v3: 타임스탑 체크
+        if time_stop_minutes > 0:
+            candles = history_provider.get_candles(position.symbol, "5m", 1)
+            if candles:
+                current_time = candles[-1].open_time
+                holding_minutes = (current_time - position.entry_time).total_seconds() / 60
+                if holding_minutes >= time_stop_minutes:
+                    return "time_stop"
 
         # v2: 캔들 내 가격 변동 체크 (고가/저가로 스탑로스 정확도 향상)
         candles = history_provider.get_candles(position.symbol, "5m", 1)

@@ -139,10 +139,10 @@ class RiskEngine:
 
     @property
     def satellite_enabled(self) -> bool:
-        """Satellite 전략 활성화 여부"""
+        """v3 전략 활성화 여부"""
         if self._satellite_disabled_by_weekly_loss:
             return False
-        return settings.satellite_enabled
+        return settings.v3_enabled
 
     def set_feature_engine(self, feature_engine: "FeatureEngine") -> None:
         """Feature Engine 설정 (나중에 주입)"""

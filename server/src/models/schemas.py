@@ -44,16 +44,11 @@ class OrderType(str, Enum):
 
 
 class StrategyType(str, Enum):
-    """전략 타입"""
+    """전략 타입 (v3 데이터 기반)"""
 
-    CORE = "CORE"  # 캐시앤캐리 / Defensive Core
-    SATELLITE = "SATELLITE"  # 5m 스캐너
-    ATTACK = "ATTACK"  # 급등주 공격
-    DIP_SCALPER = "DIP_SCALPER"  # 급락 스캘핑
-    PULLBACK = "PULLBACK"  # 눌림목 매수
-    REBOUND = "REBOUND"  # 반등 스캘핑
-    IGNITION = "IGNITION"  # 점화 전략
-    SURGE = "SURGE"  # 급등 감지
+    VOLATILE_OVERSOLD_BOUNCE = "VOLATILE_OVERSOLD_BOUNCE"
+    CRASH_RECOVERY = "CRASH_RECOVERY"
+    TRIPLE_BEARISH_REVERSAL = "TRIPLE_BEARISH_REVERSAL"
 
 
 class EventLevel(str, Enum):
@@ -74,19 +69,10 @@ class EventType(str, Enum):
     STRATEGY = "STRATEGY"
     CONNECTION = "CONNECTION"
     MODE_CHANGE = "MODE_CHANGE"
-    ATTACK = "ATTACK"
-    ATTACK_MODE_CHANGE = "ATTACK_MODE_CHANGE"
-    ATTACK_SIGNAL = "ATTACK_SIGNAL"
-    ATTACK_ENTRY = "ATTACK_ENTRY"
-    ATTACK_EXIT = "ATTACK_EXIT"
-    SATELLITE = "SATELLITE"
-    SATELLITE_EXIT = "SATELLITE_EXIT"
-    PULLBACK = "PULLBACK"
-    FILTER = "FILTER"  # 필터링/차단 이벤트
-    SURGE = "SURGE"  # Surge 감지 이벤트
-    IGNITION = "IGNITION"  # Ignition 전략 이벤트
-    REBOUND = "REBOUND"  # Rebound 전략 이벤트
-    DIP_SCALPER = "DIP_SCALPER"  # 급락 스캘퍼 이벤트
+    FILTER = "FILTER"
+    V3_SIGNAL = "V3_SIGNAL"
+    V3_ENTRY = "V3_ENTRY"
+    V3_EXIT = "V3_EXIT"
 
 
 # === API 응답 스키마 ===
@@ -172,17 +158,11 @@ class ConfigSchema(BaseModel):
     """설정 정보 (readonly)"""
 
     is_paper_mode: bool
-    futures_only_mode: bool = Field(description="Futures만으로 Core 전략 테스트 (Spot 불필요)")
     daily_loss_limit_safe: float
     daily_loss_limit_halt: float
     reconcile_interval_sec: int
-    core_min_edge_pct: float
-    core_max_position_usd: float
-    satellite_enabled: bool
-    satellite_max_position_usd: float
-    satellite_hard_stop_pct: float
-    satellite_trailing_stop_pct: float
-    satellite_time_stop_minutes: int
+    v3_enabled: bool = Field(default=True, description="v3 전략 활성화")
+    v3_max_positions: int = Field(default=6, description="v3 최대 포지션 수")
 
 
 # === API 요청 스키마 ===

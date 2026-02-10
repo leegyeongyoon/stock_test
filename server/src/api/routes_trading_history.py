@@ -186,7 +186,7 @@ async def get_daily_trading_history(
 
 @router.get("/trades", response_model=list[TradeDetailResponse])
 async def get_trades_by_strategy(
-    strategy: Optional[str] = Query(None, description="전략 (PULLBACK, REBOUND, DIP_SCALPER, ATTACK)"),
+    strategy: Optional[str] = Query(None, description="전략 (VOLATILE_OVERSOLD_BOUNCE, CRASH_RECOVERY, TRIPLE_BEARISH_REVERSAL)"),
     date: Optional[str] = Query(None, description="조회 날짜 (YYYY-MM-DD)"),
     days: int = Query(7, ge=1, le=90, description="조회 기간 (일)"),
     limit: int = Query(100, ge=1, le=500, description="최대 조회 수"),
@@ -256,9 +256,9 @@ async def get_strategy_pnl_history(
 
     Response:
     {
-        "PULLBACK": [{"date": "2026-02-07", "pnl": 5000, "trades": 3}, ...],
-        "REBOUND": [...],
-        "DIP_SCALPER": [...]
+        "VOLATILE_OVERSOLD_BOUNCE": [{"date": "2026-02-07", "pnl": 5000, "trades": 3}, ...],
+        "CRASH_RECOVERY": [...],
+        "TRIPLE_BEARISH_REVERSAL": [...]
     }
     """
     start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")

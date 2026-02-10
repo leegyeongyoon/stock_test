@@ -8,8 +8,7 @@ interface MarketData {
   btc_regime: string
   symbols: string[]
   data: Record<string, SymbolData>
-  core_strategy_enabled: boolean
-  satellite_strategy_enabled: boolean
+  v3_enabled: boolean
 }
 
 interface SymbolData {
@@ -140,19 +139,11 @@ export default function MarketPage() {
           </div>
         </div>
 
-        {/* Core Strategy */}
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
-          <h3 className="text-slate-400 text-sm mb-2">Core 전략</h3>
-          <div className={`text-2xl font-bold ${data?.core_strategy_enabled ? 'text-green-400' : 'text-red-400'}`}>
-            {data?.core_strategy_enabled ? '✅ 활성화' : '❌ 비활성화'}
-          </div>
-        </div>
-
-        {/* Satellite Strategy */}
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
-          <h3 className="text-slate-400 text-sm mb-2">Satellite 전략</h3>
-          <div className={`text-2xl font-bold ${data?.satellite_strategy_enabled ? 'text-green-400' : 'text-red-400'}`}>
-            {data?.satellite_strategy_enabled ? '✅ 활성화' : '❌ 비활성화'}
+        {/* v3 전략 */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700 col-span-2">
+          <h3 className="text-slate-400 text-sm mb-2">v3 전략</h3>
+          <div className={`text-2xl font-bold ${data?.v3_enabled ? 'text-green-400' : 'text-red-400'}`}>
+            {data?.v3_enabled ? 'ON' : 'OFF'}
           </div>
         </div>
       </div>

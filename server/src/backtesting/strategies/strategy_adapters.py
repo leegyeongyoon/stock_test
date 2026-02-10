@@ -1,6 +1,6 @@
-"""백테스트용 전략 어댑터 (v27)
+"""백테스트용 전략 어댑터 (v3 데이터 기반 전략)
 
-고승률 10개 전략 - SMA/EMA/RVOL/ATR 전용
+v3.2 OpenAI 최적화 30일 +12.49% 달성 3개 전략
 """
 
 from typing import Callable
@@ -10,32 +10,16 @@ from src.backtesting.data.data_loader import HistoryProvider
 
 def get_signal_generator(strategy: str, params: dict = None) -> Callable:
     """전략별 시그널 생성기 반환"""
-    from src.backtesting.strategies.new_strategies import (
-        EmaBouncScalpSignalGenerator,
-        DoubleDipBuySignalGenerator,
-        TightRangeBreakoutSignalGenerator,
-        SupportTouchBounceSignalGenerator,
-        VolumeClimaxReversalSignalGenerator,
-        EmaCrossoverMomentumSignalGenerator,
-        AtrExpansionEntrySignalGenerator,
-        MicroPullbackLongSignalGenerator,
-        TripleConfirmationEntrySignalGenerator,
-        FastScalpReboundSignalGenerator,
-        DataDrivenStrategyV28SignalGenerator,
+    from src.backtesting.strategies.v3_strategies import (
+        VolatileOversoldBounceSignalGenerator,
+        CrashRecoverySignalGenerator,
+        TripleBearishReversalSignalGenerator,
     )
 
     generators = {
-        "EMA_BOUNCE_SCALP": EmaBouncScalpSignalGenerator,
-        "DOUBLE_DIP_BUY": DoubleDipBuySignalGenerator,
-        "TIGHT_RANGE_BREAKOUT": TightRangeBreakoutSignalGenerator,
-        "SUPPORT_TOUCH_BOUNCE": SupportTouchBounceSignalGenerator,
-        "VOLUME_CLIMAX_REVERSAL": VolumeClimaxReversalSignalGenerator,
-        "EMA_CROSSOVER_MOMENTUM": EmaCrossoverMomentumSignalGenerator,
-        "ATR_EXPANSION_ENTRY": AtrExpansionEntrySignalGenerator,
-        "MICRO_PULLBACK_LONG": MicroPullbackLongSignalGenerator,
-        "TRIPLE_CONFIRMATION_ENTRY": TripleConfirmationEntrySignalGenerator,
-        "FAST_SCALP_REBOUND": FastScalpReboundSignalGenerator,
-        "DATA_DRIVEN_V28": DataDrivenStrategyV28SignalGenerator,
+        "VOLATILE_OVERSOLD_BOUNCE": VolatileOversoldBounceSignalGenerator,
+        "CRASH_RECOVERY": CrashRecoverySignalGenerator,
+        "TRIPLE_BEARISH_REVERSAL": TripleBearishReversalSignalGenerator,
     }
 
     if strategy not in generators:
@@ -50,92 +34,37 @@ def get_exit_checker(strategy: str, params: dict = None) -> Callable:
 
     params = params or {}
 
-    # v27: 고승률 10개 전략 청산 파라미터
+    # v3.2 최적화 파라미터
     default_params = {
-        # Strategy 1: EMA_BOUNCE_SCALP (68% WR) - R:R 2.5:1
-        "EMA_BOUNCE_SCALP": {
-            "stop_loss_pct": -0.006,       # -0.6%
-            "take_profit_pct": 0.015,      # +1.5%
-            "trailing_trigger_pct": 0.010,
-            "trailing_stop_pct": 0.004,
-        },
-        # Strategy 2: DOUBLE_DIP_BUY (65% WR) - R:R 5.5:1
-        "DOUBLE_DIP_BUY": {
-            "stop_loss_pct": -0.004,       # -0.4%
-            "take_profit_pct": 0.022,      # +2.2%
+        "VOLATILE_OVERSOLD_BOUNCE": {
+            "stop_loss_pct": -0.020,
+            "take_profit_pct": 0.020,
             "trailing_trigger_pct": 0.015,
-            "trailing_stop_pct": 0.003,
+            "trailing_stop_pct": 0.008,
+            "time_stop_minutes": 180,
         },
-        # Strategy 3: TIGHT_RANGE_BREAKOUT (62% WR) - R:R 3.1:1
-        "TIGHT_RANGE_BREAKOUT": {
-            "stop_loss_pct": -0.008,       # -0.8%
-            "take_profit_pct": 0.025,      # +2.5%
-            "trailing_trigger_pct": 0.018,
+        "CRASH_RECOVERY": {
+            "stop_loss_pct": -0.015,
+            "take_profit_pct": 0.020,
+            "trailing_trigger_pct": 0.015,
             "trailing_stop_pct": 0.005,
+            "time_stop_minutes": 120,
         },
-        # Strategy 4: SUPPORT_TOUCH_BOUNCE (70% WR) - R:R 2.4:1
-        "SUPPORT_TOUCH_BOUNCE": {
-            "stop_loss_pct": -0.005,       # -0.5%
-            "take_profit_pct": 0.012,      # +1.2%
-            "trailing_trigger_pct": 0.008,
-            "trailing_stop_pct": 0.003,
-        },
-        # Strategy 5: VOLUME_CLIMAX_REVERSAL (66% WR) - R:R 3:1
-        "VOLUME_CLIMAX_REVERSAL": {
-            "stop_loss_pct": -0.006,       # -0.6%
-            "take_profit_pct": 0.018,      # +1.8%
-            "trailing_trigger_pct": 0.012,
-            "trailing_stop_pct": 0.004,
-        },
-        # Strategy 6: EMA_CROSSOVER_MOMENTUM (58% WR) - R:R 3:1
-        "EMA_CROSSOVER_MOMENTUM": {
-            "stop_loss_pct": -0.010,       # -1.0%
-            "take_profit_pct": 0.030,      # +3.0%
+        "TRIPLE_BEARISH_REVERSAL": {
+            "stop_loss_pct": -0.020,
+            "take_profit_pct": 0.020,
             "trailing_trigger_pct": 0.020,
-            "trailing_stop_pct": 0.006,
-        },
-        # Strategy 7: ATR_EXPANSION_ENTRY (64% WR) - R:R 3:1
-        "ATR_EXPANSION_ENTRY": {
-            "stop_loss_pct": -0.008,       # -0.8%
-            "take_profit_pct": 0.024,      # +2.4%
-            "trailing_trigger_pct": 0.016,
-            "trailing_stop_pct": 0.005,
-        },
-        # Strategy 8: MICRO_PULLBACK_LONG (67% WR) - R:R 2.7:1
-        "MICRO_PULLBACK_LONG": {
-            "stop_loss_pct": -0.006,       # -0.6%
-            "take_profit_pct": 0.016,      # +1.6%
-            "trailing_trigger_pct": 0.010,
-            "trailing_stop_pct": 0.004,
-        },
-        # Strategy 9: TRIPLE_CONFIRMATION_ENTRY (71% WR) - R:R 2.8:1
-        "TRIPLE_CONFIRMATION_ENTRY": {
-            "stop_loss_pct": -0.005,       # -0.5%
-            "take_profit_pct": 0.014,      # +1.4%
-            "trailing_trigger_pct": 0.010,
-            "trailing_stop_pct": 0.003,
-        },
-        # Strategy 10: FAST_SCALP_REBOUND (63% WR) - R:R 3:1
-        "FAST_SCALP_REBOUND": {
-            "stop_loss_pct": -0.005,       # -0.5%
-            "take_profit_pct": 0.015,      # +1.5%
-            "trailing_trigger_pct": 0.010,
-            "trailing_stop_pct": 0.003,
-        },
-        # Strategy V28: DATA_DRIVEN (OpenAI 최적화) - 타이트 트레일링
-        "DATA_DRIVEN_V28": {
-            "stop_loss_pct": -0.015,       # -1.5% (더 타이트)
-            "take_profit_pct": 0.030,      # +3.0%
-            "trailing_trigger_pct": 0.003, # 0.3% (OpenAI 권장)
-            "trailing_stop_pct": 0.003,    # 0.3% (OpenAI 권장)
+            "trailing_stop_pct": 0.010,
+            "time_stop_minutes": 180,
         },
     }
 
-    strategy_defaults = default_params.get(strategy, default_params["EMA_BOUNCE_SCALP"])
+    strategy_defaults = default_params.get(strategy, default_params["VOLATILE_OVERSOLD_BOUNCE"])
 
     return create_pullback_exit_checker(
         stop_loss_pct=params.get("stop_loss_pct", strategy_defaults["stop_loss_pct"]),
         take_profit_pct=params.get("take_profit_pct", strategy_defaults["take_profit_pct"]),
         trailing_trigger_pct=params.get("trailing_trigger_pct", strategy_defaults["trailing_trigger_pct"]),
         trailing_stop_pct=params.get("trailing_stop_pct", strategy_defaults["trailing_stop_pct"]),
+        time_stop_minutes=params.get("time_stop_minutes", strategy_defaults.get("time_stop_minutes", 0)),
     )

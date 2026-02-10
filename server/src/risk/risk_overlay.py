@@ -76,8 +76,8 @@ class RiskDecision:
     mode: RiskMode = RiskMode.NORMAL
     regime: MarketRegime = MarketRegime.NEUTRAL
 
-    # 전략별 허용
-    satellite_allowed: bool = True
+    # 신규 진입 허용
+    satellite_allowed: bool = True  # v3 전략 신규 진입 허용 플래그
     core_allowed: bool = True
 
     # 노출 제한
@@ -225,10 +225,10 @@ class RiskOverlay:
         reasons = []
         settings = get_settings()
 
-        # === 0. SATELLITE_ENABLED 설정 체크 (최우선) ===
-        if not settings.satellite_enabled:
+        # === 0. V3_ENABLED 설정 체크 (최우선) ===
+        if not settings.v3_enabled:
             decision.satellite_allowed = False
-            reasons.append("CONFIG: satellite_enabled=false")
+            reasons.append("CONFIG: v3_enabled=false")
 
         # Portfolio Risk에 equity 업데이트
         if current_equity is not None:
@@ -531,7 +531,7 @@ class RiskOverlay:
         return MarketRegime.NEUTRAL, True, ""
 
     def can_open_satellite(self) -> tuple[bool, str]:
-        """Satellite 신규 진입 가능 여부"""
+        """v3 전략 신규 진입 가능 여부"""
         decision = self._last_decision or self.evaluate()
 
         if decision.mode == RiskMode.HALT:

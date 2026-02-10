@@ -10,12 +10,12 @@ interface Props {
 
 function getStrategyStyle(strategy: string): { bg: string; text: string } {
   switch (strategy) {
-    case 'CORE':
+    case 'VOLATILE_OVERSOLD_BOUNCE':
       return { bg: 'bg-blue-900/50', text: 'text-blue-400' }
-    case 'SATELLITE':
-      return { bg: 'bg-purple-900/50', text: 'text-purple-400' }
-    case 'ATTACK':
+    case 'CRASH_RECOVERY':
       return { bg: 'bg-orange-900/50', text: 'text-orange-400' }
+    case 'TRIPLE_BEARISH_REVERSAL':
+      return { bg: 'bg-purple-900/50', text: 'text-purple-400' }
     default:
       return { bg: 'bg-slate-900/50', text: 'text-slate-400' }
   }

@@ -119,11 +119,13 @@ export default function OrdersPage() {
                     <td className="p-3">
                       <span
                         className={`px-2 py-1 rounded text-xs ${
-                          order.strategy === 'CORE'
+                          order.strategy === 'VOLATILE_OVERSOLD_BOUNCE'
                             ? 'bg-blue-900/50 text-blue-400'
-                            : order.strategy === 'ATTACK'
+                            : order.strategy === 'CRASH_RECOVERY'
                             ? 'bg-orange-900/50 text-orange-400'
-                            : 'bg-purple-900/50 text-purple-400'
+                            : order.strategy === 'TRIPLE_BEARISH_REVERSAL'
+                            ? 'bg-purple-900/50 text-purple-400'
+                            : 'bg-slate-900/50 text-slate-400'
                         }`}
                       >
                         {order.strategy}

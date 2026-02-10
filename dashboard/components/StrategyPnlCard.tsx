@@ -10,12 +10,12 @@ interface Props {
 
 function getStrategyLabel(strategy: string): string {
   switch (strategy) {
-    case 'CORE':
-      return 'Core (방어형 현금비중)'
-    case 'SATELLITE':
-      return 'Satellite (모멘텀)'
-    case 'ATTACK':
-      return 'Attack (공격형)'
+    case 'VOLATILE_OVERSOLD_BOUNCE':
+      return 'VOB (과매도 반등)'
+    case 'CRASH_RECOVERY':
+      return 'CR (급락 회복)'
+    case 'TRIPLE_BEARISH_REVERSAL':
+      return 'TBR (3연음봉 반전)'
     default:
       return strategy
   }
@@ -23,12 +23,12 @@ function getStrategyLabel(strategy: string): string {
 
 function getStrategyStyle(strategy: string): { border: string; dot: string } {
   switch (strategy) {
-    case 'CORE':
+    case 'VOLATILE_OVERSOLD_BOUNCE':
       return { border: 'border-blue-500/50', dot: 'bg-blue-500' }
-    case 'SATELLITE':
-      return { border: 'border-purple-500/50', dot: 'bg-purple-500' }
-    case 'ATTACK':
+    case 'CRASH_RECOVERY':
       return { border: 'border-orange-500/50', dot: 'bg-orange-500' }
+    case 'TRIPLE_BEARISH_REVERSAL':
+      return { border: 'border-purple-500/50', dot: 'bg-purple-500' }
     default:
       return { border: 'border-slate-500/50', dot: 'bg-slate-500' }
   }

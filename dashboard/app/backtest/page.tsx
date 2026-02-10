@@ -10,50 +10,42 @@ import {
   BulkFetchResponse,
 } from '@/lib/backtest-api'
 
-// 전략 목록
-const STRATEGIES = ['PULLBACK', 'REBOUND', 'DIP_SCALPER', 'ATTACK']
+// v3 전략 목록
+const STRATEGIES = ['VOLATILE_OVERSOLD_BOUNCE', 'CRASH_RECOVERY', 'TRIPLE_BEARISH_REVERSAL']
 const INTERVALS = ['1m', '5m', '15m', '1h']
 
-// 전략별 기본 파라미터
+// v3.2 최적화 파라미터
 const STRATEGY_PARAMS: Record<string, {
   stopLoss: number
   takeProfit: number
   trailingTrigger: number
   trailingStop: number
-  timeStop: number  // 분 단위
+  timeStop: number
   description: string
 }> = {
-  PULLBACK: {
+  VOLATILE_OVERSOLD_BOUNCE: {
+    stopLoss: -2.0,
+    takeProfit: 2.0,
+    trailingTrigger: 1.5,
+    trailingStop: 0.8,
+    timeStop: 180,
+    description: 'ATR>1% + RSI<30 + RVOL>2.5 + 양봉 반전 (v3.2 +5.74%)'
+  },
+  CRASH_RECOVERY: {
     stopLoss: -1.5,
-    takeProfit: 1.0,
+    takeProfit: 2.0,
     trailingTrigger: 1.5,
     trailingStop: 0.5,
     timeStop: 120,
-    description: '눌림목 매수: 급등 후 눌림에서 매수, 반등 시 수익'
+    description: '30분 -2% 급락 + RSI<35 + RVOL>2.5 + 양봉 (v3.2 +4.64%)'
   },
-  REBOUND: {
-    stopLoss: -0.7,
-    takeProfit: 1.0,
-    trailingTrigger: 0,  // 트레일링 없음
-    trailingStop: 0,
-    timeStop: 15,
-    description: '반등 스캘핑: 지지선 반등 포착, R:R = 1:1.43'
-  },
-  DIP_SCALPER: {
-    stopLoss: -1.0,
-    takeProfit: 1.5,
-    trailingTrigger: 1.0,
-    trailingStop: 0.5,
-    timeStop: 30,
-    description: '급락 스캘핑: ATR 기반 급락 감지, 패닉셀링 포착'
-  },
-  ATTACK: {
+  TRIPLE_BEARISH_REVERSAL: {
     stopLoss: -2.0,
-    takeProfit: 3.0,
+    takeProfit: 2.0,
     trailingTrigger: 2.0,
     trailingStop: 1.0,
-    timeStop: 240,
-    description: '돌파 매매: 저항선 돌파 시 진입, 추세 추종'
+    timeStop: 180,
+    description: '3연속 음봉 + RSI<30 + ATR>1% 반전 (v3.2 +2.11%)'
   },
 }
 
@@ -78,7 +70,7 @@ export default function BacktestPage() {
   const [dataRanges, setDataRanges] = useState<Record<string, DataRangeResponse>>({})
 
   // 백테스트 설정
-  const [strategy, setStrategy] = useState('PULLBACK')
+  const [strategy, setStrategy] = useState('VOLATILE_OVERSOLD_BOUNCE')
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>(['KRW-BTC'])
   const [interval, setInterval] = useState('5m')
   const [startDate, setStartDate] = useState('')
@@ -555,7 +547,7 @@ export default function BacktestPage() {
                   onChange={e => setTrailingTrigger(Number(e.target.value))}
                   className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2"
                   step={0.1}
-                  disabled={strategy === 'REBOUND'}
+                  disabled={false}
                 />
               </div>
               <div>
@@ -566,7 +558,7 @@ export default function BacktestPage() {
                   onChange={e => setTrailingStop(Number(e.target.value))}
                   className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2"
                   step={0.1}
-                  disabled={strategy === 'REBOUND'}
+                  disabled={false}
                 />
               </div>
               <div>

@@ -1,6 +1,7 @@
 """Trading Engine - 메인 엔진 루프"""
 
 import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Optional, Union
 
@@ -21,7 +22,6 @@ from src.exchange.upbit import UpbitExchange
 # Binance exchanges removed - Upbit only
 from src.features.feature_engine import FeatureEngine
 from src.models.schemas import OrderSide, OrderType, StrategyType, TradingMode
-from src.position import PositionStateMachine
 from src.risk.capital_profile import CapitalProfileManager, get_capital_profile_manager
 from src.risk.exec_health import get_exec_health_monitor
 from src.risk.risk_engine import RiskEngine
@@ -35,15 +35,7 @@ from src.risk.stop_watchdog import (
 )
 from src.services.mode_manager import get_mode_manager
 from src.services.trade_recorder import trade_recorder
-# Core Carry 전략 비활성화 (Upbit 현물 전용)
-# from src.strategies.core_carry import CoreCarryStrategy
-from src.strategies.core_safety import get_core_safety_guard
-from src.strategies.satellite import Regime, SatelliteStrategy
-from src.strategies.attack_breakout import AttackBreakoutStrategy, get_attack_strategy
-from src.strategies.pullback_strategy import PullbackStrategy, get_pullback_strategy
-from src.strategies.rebound_strategy import ReboundScalperStrategy, get_rebound_strategy
-from src.strategies.dip_scalper import DipScalperStrategy, get_dip_scalper
-from src.strategies.ignition import IgnitionStrategy, get_ignition_strategy, SurgeDetector, get_surge_detector
+from src.strategies.v3_live import get_v3_strategies, V3Signal, V3Position
 from src.monitoring.slack import SlackNotifier, AlertLevel, SlackMessage
 from src.portfolio.position_ledger import PositionLedger, FillEvent
 from src.risk.exposure_manager import (
@@ -99,32 +91,17 @@ class TradingEngine:
         self.candle_manager = get_candle_manager()
         self.feature_engine = FeatureEngine(candle_manager=self.candle_manager)
 
-        # 포지션 상태 머신 (Satellite 전략용)
-        self.position_state_machine = PositionStateMachine(
-            feature_engine=self.feature_engine,
-            candle_manager=self.candle_manager,
-            risk_engine=self.risk_engine,
-        )
-
         # Risk Overlay (MDD 5% 방어)
         self.risk_overlay = get_risk_overlay(
             candle_manager=self.candle_manager,
             feature_engine=self.feature_engine,
         )
         self.exec_health = get_exec_health_monitor()
-        self.core_safety = get_core_safety_guard()
 
-        # 전략 (Upbit 현물 전용)
-        self.core_strategy = None  # Core Carry 비활성화 (선물 헤지 불가)
-        self.satellite_strategy = SatelliteStrategy()
-        self.attack_strategy = get_attack_strategy()  # Attack 전략 (급등 추격 - 비권장)
-        self.pullback_strategy = get_pullback_strategy()  # Pullback 전략 (눌림목 매수)
-        self.rebound_strategy = get_rebound_strategy()  # v4.2 Rebound 전략 (반등 스캘핑)
-        self.dip_scalper = get_dip_scalper()  # v5.0 Dip Scalper (급락 스캘핑)
-        self.ignition_strategy = get_ignition_strategy()  # v4.0 Ignition 전략 (전조 패턴 + 점화)
-        self.surge_detector = get_surge_detector()  # 급등 시작 실시간 감지
-        self.pullback_strategy.set_mode(settings.pullback_mode)  # 설정에서 모드 로드
-        self.rebound_strategy.set_mode(settings.rebound_mode)  # Rebound 모드 로드 (config.py 기본값: NORMAL)
+        # v3 전략 (3개: VOB, CR, TBR)
+        self.v3_strategies = get_v3_strategies()
+        self.v3_enabled = os.environ.get("V3_ENABLED", "true").lower() == "true"
+        self.v3_max_positions = int(os.environ.get("V3_MAX_POSITIONS", "6"))
 
         # User Mode Manager
         self.mode_manager = get_mode_manager()
@@ -167,7 +144,7 @@ class TradingEngine:
 
         # 시장 데이터 캐시
         self._market_data: dict[str, dict] = {}
-        self._btc_regime: str = Regime.NEUTRAL
+        self._btc_regime: str = "NEUTRAL"
 
         # 캐시된 상태 (API 조회용)
         self._cached_summary: dict = {}
@@ -182,18 +159,6 @@ class TradingEngine:
         # 호가창 캐시 (Rate Limit 방지)
         self._orderbook_cache: dict[str, tuple[dict, float]] = {}  # symbol -> (data, timestamp)
         self._orderbook_cache_ttl: float = 30.0  # 30초 캐시
-
-        # v5.2: 모니터링 캐시 (Attack Score Top 후보)
-        self._attack_score_cache: dict[str, dict] = {}  # symbol -> score result
-        self._attack_score_cache_time: Optional[datetime] = None
-
-        # v5.2: Rebound Score 캐시 (Top 후보)
-        self._rebound_score_cache: dict[str, dict] = {}  # symbol -> score result
-        self._rebound_score_cache_time: Optional[datetime] = None
-
-        # Pullback Score 캐시 (Top 후보)
-        self._pullback_score_cache: dict[str, dict] = {}  # symbol -> score result
-        self._pullback_score_cache_time: Optional[datetime] = None
 
         # v5.2: 필터링 통계 (오늘 기준)
         self._filter_stats: dict[str, int] = {
@@ -240,475 +205,35 @@ class TradingEngine:
             logger.warning(f"Orderbook fetch failed for {symbol}: {e}")
             return None
 
-    # 저유동성 코인 블랙리스트 (과거 손실 분석 기반)
-    _PULLBACK_BLACKLIST: frozenset[str] = frozenset({"SENT", "POKT", "STORJ", "STMX", "HUNT", "BORA"})
+    _STABLECOIN_BASES = {"USDT", "USDC", "USD1", "USDE", "DAI", "BUSD", "TUSD", "PYUSD"}
 
-    def _prefilter_symbols_for_pullback(self, market_data: dict) -> list[str]:
-        """Pullback 전략용 심볼 Pre-filtering (호가창 조회 대상 축소)
+    def _prefilter_symbols_for_v3(self, market_data: dict) -> list[str]:
+        """v3 전략용 심볼 Pre-filtering
 
-        강화된 필터:
+        필터:
         - 스테이블코인 제외
-        - 블랙리스트 코인 제외 (저유동성 손실 종목)
-        - 거래대금 > 30억 (저유동성 잡코인 배제 - 기존 10억에서 상향)
+        - 거래대금 > 10억 (저유동성 잡코인 배제)
         - 가격 > 100원 (극저가 코인 제외)
-        - 변화율 -10% ~ +20% (눌림목 범위)
         - 거래대금 순 정렬 (유동성 높은 것 우선)
         """
         candidates = []
         for sym, md in market_data.items():
-            # 스테이블코인 제외
             base = sym.split("-")[-1] if "-" in sym else sym
             if base in self._STABLECOIN_BASES:
                 continue
 
-            # 블랙리스트 코인 제외 (저유동성으로 인한 과거 손실 종목)
-            if base in self._PULLBACK_BLACKLIST:
-                continue
-
-            price_change = md.get("price_change_pct", 0)
             volume_24h = md.get("volume_24h", 0)
             price = md.get("price", 0)
 
-            # 1. 거래대금 > 30억 (저유동성 잡코인 제외 - 기존 10억에서 상향)
-            if volume_24h < 3_000_000_000:
+            if volume_24h < 1_000_000_000:
                 continue
-
-            # 2. 가격 > 100원 (극저가 코인 제외)
             if price < 100:
                 continue
 
-            # 3. 눌림목 범위: -10% ~ +20%
-            if not (-10.0 < price_change < 20.0):
-                continue
+            candidates.append((sym, volume_24h))
 
-            candidates.append((sym, price_change, volume_24h))
-
-        # 거래대금 순 정렬 (유동성 높은 것 우선)
-        candidates.sort(key=lambda x: x[2], reverse=True)
-
-        # 최대 15개로 제한 (Rate Limit 방지)
-        return [c[0] for c in candidates[:15]]
-
-    # 스테이블코인 제외 목록 (반등 스캘핑 부적합)
-    _STABLECOIN_BASES = {"USDT", "USDC", "USD1", "USDE", "DAI", "BUSD", "TUSD", "PYUSD"}
-
-    @staticmethod
-    def _upbit_tick_size(price: float) -> float:
-        """Upbit KRW 마켓 호가 단위 (가격대별)"""
-        if price < 10:
-            return 0.01
-        elif price < 100:
-            return 0.1
-        elif price < 1000:
-            return 1
-        elif price < 5000:
-            return 5
-        elif price < 10000:
-            return 10
-        elif price < 50000:
-            return 50
-        elif price < 100000:
-            return 100
-        elif price < 500000:
-            return 500
-        elif price < 1000000:
-            return 1000
-        else:
-            return 5000
-
-    def _prefilter_symbols_for_rebound(self, market_data: dict) -> list[str]:
-        """Rebound 전략용 심볼 Pre-filtering (반등 후보 축소)
-
-        Rebound 조건:
-        - 스테이블코인 제외
-        - 거래대금 > 5억 (저유동성 제외)
-        - 가격 > 100원 (극저가 제외)
-        - 하락/조정 중인 종목 (변화율 -12% ~ +2%)
-        """
-        candidates = []
-        for sym, md in market_data.items():
-            base = sym.split("-")[-1] if "-" in sym else sym
-            if base in self._STABLECOIN_BASES:
-                continue
-
-            price_change = md.get("price_change_pct", 0)
-            volume_24h = md.get("volume_24h", 0)
-            price = md.get("price", 0)
-
-            if volume_24h < 500_000_000:
-                continue
-
-            if price < 100:
-                continue
-
-            if not (-12.0 < price_change < 2.0):
-                continue
-
-            candidates.append((sym, price_change, volume_24h))
-
-        # 하락률이 큰 순으로 정렬 (과매도 종목 우선)
-        candidates.sort(key=lambda x: x[1])
-
-        return [c[0] for c in candidates[:15]]
-
-    def _reset_filter_stats_if_new_day(self) -> None:
-        """새로운 날짜면 필터 통계 리셋"""
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        if self._filter_stats_date != today:
-            self._filter_stats = {
-                "anti_chase": 0,
-                "exposure_limit": 0,
-                "overheat": 0,
-                "total": 0,
-            }
-            self._filter_stats_date = today
-
-    def increment_filter_stat(self, filter_type: str) -> None:
-        """필터링 통계 증가"""
-        self._reset_filter_stats_if_new_day()
-        if filter_type in self._filter_stats:
-            self._filter_stats[filter_type] += 1
-        self._filter_stats["total"] += 1
-
-    def get_filter_stats(self) -> dict:
-        """필터링 통계 조회"""
-        self._reset_filter_stats_if_new_day()
-        return self._filter_stats.copy()
-
-    async def update_attack_score_cache(self) -> None:
-        """Attack Score 캐시 업데이트 (상위 후보 추적용)"""
-        if not self._is_upbit or not self.attack_strategy:
-            return
-
-        try:
-            # 거래대금 상위 30개만 계산 (성능 최적화)
-            sorted_symbols = sorted(
-                self._market_data.items(),
-                key=lambda x: x[1].get("volume_24h", 0),
-                reverse=True
-            )[:30]
-
-            cache = {}
-            for symbol, md in sorted_symbols:
-                try:
-                    # market_data에 change_rate 추가
-                    market_data_for_score = {
-                        **md,
-                        "change_rate": md.get("price_change_pct", 0) / 100,
-                    }
-                    score_result = self.attack_strategy.get_attack_score(market_data_for_score)
-                    korean_name = self.symbol_manager.get_korean_name(symbol) if self.symbol_manager else ""
-                    cache[symbol] = {
-                        "symbol": symbol,
-                        "korean_name": korean_name,
-                        "score": score_result.total_score,
-                        "level": score_result.level,
-                        "distance_to_entry": max(0, get_settings().attack_score_l1 - score_result.total_score),  # v5.4: 동적 임계값
-                        "change_rate": md.get("price_change_pct", 0) / 100,
-                        "volume_24h": md.get("volume_24h", 0),
-                        "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
-                    }
-                except Exception as e:
-                    logger.debug(f"Failed to calculate attack score for {symbol}: {e}")
-                    continue
-
-            self._attack_score_cache = cache
-            self._attack_score_cache_time = datetime.utcnow()
-
-        except Exception as e:
-            logger.warning("Failed to update attack score cache", error=str(e))
-
-    def get_top_attack_candidates(self, limit: int = 5, min_score: int = 50) -> list[dict]:
-        """상위 Attack 후보 반환 (점수 높은 순)"""
-        if not self._attack_score_cache:
-            return []
-
-        # 점수로 정렬하여 상위 N개 반환
-        sorted_candidates = sorted(
-            self._attack_score_cache.values(),
-            key=lambda x: x["score"],
-            reverse=True
-        )
-
-        # min_score 이상만 필터링
-        filtered = [c for c in sorted_candidates if c["score"] >= min_score]
-
-        return filtered[:limit]
-
-    async def update_rebound_score_cache(self) -> None:
-        """Rebound Score 캐시 업데이트 (상위 후보 추적용)
-
-        실제 candle_manager 지표 계산 (시그널 경로와 동일한 패턴)
-        """
-        if not self._is_upbit or not self.rebound_strategy:
-            return
-
-        try:
-            from src.strategies.rebound_score import get_rebound_score_calculator
-
-            calculator = get_rebound_score_calculator()
-
-            # Rebound 후보 pre-filtering
-            candidates = self._prefilter_symbols_for_rebound(self._market_data)
-
-            cache = {}
-            for symbol in candidates[:15]:
-                try:
-                    md = self._market_data.get(symbol, {})
-                    if not md:
-                        continue
-
-                    price = md.get("price", 0)
-                    if price <= 0:
-                        continue
-
-                    # RSI 14 (5분봉 기준) - 실제 계산
-                    rsi = 50.0
-                    if self.candle_manager:
-                        closes_for_rsi = self.candle_manager.get_closes(symbol, "5m", 15)
-                        if len(closes_for_rsi) >= 15:
-                            changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
-                            gains = [c if c > 0 else 0 for c in changes[-14:]]
-                            losses = [-c if c < 0 else 0 for c in changes[-14:]]
-                            avg_gain = sum(gains) / 14
-                            avg_loss = sum(losses) / 14
-                            if avg_loss == 0:
-                                rsi = 100.0 if avg_gain > 0 else 50.0
-                            else:
-                                rs = avg_gain / avg_loss
-                                rsi = 100 - (100 / (1 + rs))
-
-                    # SMA 20 (5분봉)
-                    sma_20 = self.candle_manager.calc_sma(symbol, "5m", 20) if self.candle_manager else 0
-                    sma_20 = sma_20 or 0
-
-                    # BB 하단 (5분봉, 20기간, 2 sigma)
-                    bb_lower = 0.0
-                    if self.candle_manager:
-                        bb_closes = self.candle_manager.get_closes(symbol, "5m", 20)
-                        if len(bb_closes) >= 20:
-                            bb_sma = sum(bb_closes) / len(bb_closes)
-                            variance = sum((c - bb_sma) ** 2 for c in bb_closes) / len(bb_closes)
-                            std = variance ** 0.5
-                            bb_lower = bb_sma - 2 * std
-
-                    # VWAP (5분봉)
-                    vwap = md.get("vwap", 0)
-                    if self.candle_manager:
-                        precise_vwap = self.candle_manager.calc_vwap(symbol, "5m", 20)
-                        if precise_vwap:
-                            vwap = precise_vwap
-
-                    # ATR% (5분봉)
-                    atr_pct = 0.01
-                    if self.candle_manager:
-                        calc_atr = self.candle_manager.calc_atr_percent(symbol, "5m", 14)
-                        if calc_atr is not None:
-                            atr_pct = calc_atr
-
-                    # 호가창 조회
-                    orderbook = await self._get_orderbook_cached(symbol)
-                    ob_units = (orderbook or {}).get("orderbook_units", [])
-                    bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
-                    ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
-
-                    # 5분봉 캔들 (연속 양봉 패턴용)
-                    candles_5m = self.candle_manager.get_candles(symbol, "5m", 10) if self.candle_manager else []
-
-                    # 24h 가격 범위
-                    highest_24h = md.get("high_20", price * 1.01)
-                    lowest_24h = md.get("low_20", price * 0.99)
-                    price_range_pct = (highest_24h - lowest_24h) / price if price > 0 else 0.02
-
-                    market_data_for_score = {
-                        "symbol": symbol,
-                        "price": price,
-                        "rsi": rsi,
-                        "sma_20": sma_20,
-                        "bb_lower": bb_lower,
-                        "vwap": vwap,
-                        "atr_pct": atr_pct,
-                        "bid_volume": bid_volume,
-                        "ask_volume": ask_volume,
-                        "change_1m": md.get("change_1m", 0),
-                        "change_5m": md.get("change_5m", 0),
-                        "rvol": md.get("rvol", 1.0),
-                        "close_pos": md.get("close_pos", 0.5),
-                        "candles_5m": candles_5m,
-                        "highest_24h": highest_24h,
-                        "lowest_24h": lowest_24h,
-                        "price_range_pct": price_range_pct,
-                    }
-
-                    score_result = calculator.calculate(market_data_for_score)
-                    korean_name = self.symbol_manager.get_korean_name(symbol) if self.symbol_manager else ""
-                    cache[symbol] = {
-                        "symbol": symbol,
-                        "korean_name": korean_name,
-                        "score": score_result.total_score,
-                        "level": score_result.level,
-                        "distance_to_entry": max(0, get_settings().rebound_score_l1 - score_result.total_score),
-                        "change_rate": md.get("price_change_pct", 0) / 100,
-                        "volume_24h": md.get("volume_24h", 0),
-                        "rsi": score_result.rsi,
-                        "support_distance_pct": score_result.support_distance_pct,
-                        "orderbook_ratio": score_result.orderbook_ratio,
-                        "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
-                    }
-                except Exception as e:
-                    logger.debug(f"Failed to calculate rebound score for {symbol}: {e}")
-                    continue
-
-            self._rebound_score_cache = cache
-            self._rebound_score_cache_time = datetime.utcnow()
-
-        except Exception as e:
-            logger.warning("Failed to update rebound score cache", error=str(e))
-
-    def get_top_rebound_candidates(self, limit: int = 5, min_score: int = 30) -> list[dict]:
-        """상위 Rebound 후보 반환 (점수 높은 순)"""
-        if not self._rebound_score_cache:
-            return []
-
-        # 점수로 정렬하여 상위 N개 반환
-        sorted_candidates = sorted(
-            self._rebound_score_cache.values(),
-            key=lambda x: x["score"],
-            reverse=True
-        )
-
-        # min_score 이상만 필터링
-        filtered = [c for c in sorted_candidates if c["score"] >= min_score]
-
-        return filtered[:limit]
-
-    async def update_pullback_score_cache(self) -> None:
-        """Pullback Score 캐시 업데이트 (상위 후보 추적용)"""
-        if not self._is_upbit or not self.pullback_strategy:
-            return
-
-        try:
-            from src.strategies.pullback_score import get_pullback_score_calculator
-
-            calculator = get_pullback_score_calculator()
-
-            # Pullback 후보 pre-filtering
-            candidates = self._prefilter_symbols_for_pullback(self._market_data)
-
-            cache = {}
-            for symbol in candidates[:15]:
-                try:
-                    md = self._market_data.get(symbol, {})
-                    if not md:
-                        continue
-
-                    price = md.get("price", 0)
-
-                    # === 기술적 지표 계산 (candle_manager 사용, 시그널 경로와 동일) ===
-                    rsi = 50.0
-                    if self.candle_manager:
-                        closes_for_rsi = self.candle_manager.get_closes(symbol, "5m", 15)
-                        if len(closes_for_rsi) >= 15:
-                            changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
-                            gains = [c if c > 0 else 0 for c in changes[-14:]]
-                            losses = [-c if c < 0 else 0 for c in changes[-14:]]
-                            avg_gain = sum(gains) / 14
-                            avg_loss = sum(losses) / 14
-                            if avg_loss == 0:
-                                rsi = 100.0 if avg_gain > 0 else 50.0
-                            else:
-                                rs = avg_gain / avg_loss
-                                rsi = 100 - (100 / (1 + rs))
-
-                    sma_20 = self.candle_manager.calc_sma(symbol, "5m", 20) if self.candle_manager else 0
-                    sma_20 = sma_20 or 0
-
-                    vwap = md.get("vwap", 0)
-                    if self.candle_manager:
-                        precise_vwap = self.candle_manager.calc_vwap(symbol, "5m", 20)
-                        if precise_vwap:
-                            vwap = precise_vwap
-
-                    atr_pct = 0.01
-                    if self.candle_manager:
-                        calc_atr = self.candle_manager.calc_atr_percent(symbol, "5m", 14)
-                        if calc_atr is not None:
-                            atr_pct = calc_atr
-
-                    # 호가창 캐시 조회
-                    orderbook = await self._get_orderbook_cached(symbol)
-                    ob_units = (orderbook or {}).get("orderbook_units", [])
-                    bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
-                    ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
-
-                    highest_24h = md.get("high_20", price * 1.01 if price > 0 else 0)
-                    lowest_24h = md.get("low_20", price * 0.99 if price > 0 else 0)
-
-                    candles_5m = self.candle_manager.get_candles(symbol, "5m", 10) if self.candle_manager else []
-
-                    change_5m = 0.0
-                    change_1h = 0.0
-                    if self.candle_manager:
-                        closes_5m = self.candle_manager.get_closes(symbol, "5m", 13)
-                        if len(closes_5m) >= 2 and closes_5m[-2] > 0:
-                            change_5m = (closes_5m[-1] - closes_5m[-2]) / closes_5m[-2]
-                        if len(closes_5m) >= 13 and closes_5m[0] > 0:
-                            change_1h = (closes_5m[-1] - closes_5m[0]) / closes_5m[0]
-
-                    market_data_for_score = {
-                        **md,
-                        "symbol": symbol,
-                        "highest_24h": highest_24h,
-                        "lowest_24h": lowest_24h,
-                        "change_rate": md.get("price_change_pct", 0) / 100,
-                        "change_1h": change_1h,
-                        "change_5m": change_5m,
-                        "rsi": rsi,
-                        "sma_20": sma_20,
-                        "vwap": vwap,
-                        "atr_pct": atr_pct,
-                        "bid_volume": bid_volume,
-                        "ask_volume": ask_volume,
-                        "recent_candles": candles_5m,
-                        "rvol": md.get("rvol", 1.0),
-                    }
-
-                    score_result = calculator.calculate(market_data_for_score)
-                    korean_name = self.symbol_manager.get_korean_name(symbol) if self.symbol_manager else ""
-                    cache[symbol] = {
-                        "symbol": symbol,
-                        "korean_name": korean_name,
-                        "score": score_result.total_score,
-                        "level": score_result.level,
-                        "distance_to_entry": max(0, get_settings().pullback_score_l1 - score_result.total_score),
-                        "change_rate": md.get("price_change_pct", 0) / 100,
-                        "volume_24h": md.get("volume_24h", 0),
-                        "components": [c.to_dict() for c in score_result.components] if score_result.components else [],
-                    }
-                except Exception as e:
-                    logger.debug(f"Failed to calculate pullback score for {symbol}: {e}")
-                    continue
-
-            self._pullback_score_cache = cache
-            self._pullback_score_cache_time = datetime.utcnow()
-
-        except Exception as e:
-            logger.warning("Failed to update pullback score cache", error=str(e))
-
-    def get_top_pullback_candidates(self, limit: int = 5, min_score: int = 0) -> list[dict]:
-        """상위 Pullback 후보 반환 (점수 높은 순)"""
-        if not self._pullback_score_cache:
-            return []
-
-        sorted_candidates = sorted(
-            self._pullback_score_cache.values(),
-            key=lambda x: x["score"],
-            reverse=True
-        )
-
-        filtered = [c for c in sorted_candidates if c["score"] >= min_score]
-
-        return filtered[:limit]
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [c[0] for c in candidates[:30]]
 
     async def start(self) -> None:
         """엔진 시작"""
@@ -754,15 +279,6 @@ class TradingEngine:
         # DB에서 오픈 포지션 복구 (서버 재시작 시 전략별 포지션 복구)
         await self._restore_positions_from_db()
 
-        # DIP_SCALPER 미체결 주문 복구
-        await self._restore_dip_pending_orders()
-
-        # DIP_SCALPER 쿨다운 복원
-        await self._restore_dip_cooldowns()
-
-        # DIP_SCALPER 통계 복원
-        await self._restore_dip_stats()
-
         # 메인 루프 시작
         self._running = True
         self._candle_update_counter = 0  # 캔들 업데이트 카운터 (v5.3: 10초마다)
@@ -770,9 +286,6 @@ class TradingEngine:
         self._candle_refresh_round = 0   # 캔들 갱신 라운드 로빈
         self._pending_order_cleanup_counter = 0  # v5.5: 미체결 주문 정리 카운터
         self._main_task = asyncio.create_task(self._main_loop())
-
-        # v2.3: 근접 종목 1초 모니터링 태스크
-        self._near_trigger_task = asyncio.create_task(self._near_trigger_monitor_loop())
 
         # v5.5: 초기 캔들 로드를 백그라운드로 이동 (엔진 시작 블로킹 방지)
         asyncio.create_task(self._load_initial_candles_background(qualified_symbols))
@@ -795,20 +308,6 @@ class TradingEngine:
                 await self._main_task
             except asyncio.CancelledError:
                 pass
-
-        # v2.3: 근접 종목 모니터 중지
-        if hasattr(self, '_near_trigger_task') and self._near_trigger_task:
-            self._near_trigger_task.cancel()
-            try:
-                await self._near_trigger_task
-            except asyncio.CancelledError:
-                pass
-
-        # DIP_SCALPER dirty 포지션 최종 flush
-        try:
-            await self._persist_dirty_dip_positions()
-        except Exception as e:
-            logger.warning("Failed to flush dip positions on stop", error=str(e))
 
         # Risk Engine 중지
         await self.risk_engine.stop()
@@ -849,14 +348,6 @@ class TradingEngine:
                     except Exception as e:
                         logger.warning("KMVI update failed", error=str(e))
 
-                # v5.2: Attack Score 캐시 업데이트 (10초마다)
-                self._attack_cache_counter = getattr(self, "_attack_cache_counter", 0) + 1
-                if self._attack_cache_counter >= 10:
-                    self._attack_cache_counter = 0
-                    await self.update_attack_score_cache()
-                    await self.update_rebound_score_cache()
-                    await self.update_pullback_score_cache()
-
                 # v2.3: 미체결 주문 자동 정리 (30초마다 체크, 3분 초과 시 취소)
                 self._pending_order_cleanup_counter = getattr(self, "_pending_order_cleanup_counter", 0) + 1
                 if self._pending_order_cleanup_counter >= 30:
@@ -870,8 +361,8 @@ class TradingEngine:
                 if can_open:
                     await self._execute_strategies()
 
-                # 3.5. Dip 포지션 청산 & 미체결 확인 (모드 무관, 항상 실행)
-                await self._manage_dip_exits()
+                # 3.5. v3 포지션 청산 체크 (모드 무관, 항상 실행)
+                await self._manage_v3_exits()
 
                 # 4. 포지션 관리 (SAFE 모드에서도 실행)
                 await self._manage_positions()
@@ -1163,8 +654,7 @@ class TradingEngine:
 
     def _calc_candle_surge_data(self, symbol: str, current_price: float) -> dict:
         """
-        v5.0: 분봉 급등 데이터 계산
-        v6.0: 30분봉 RVOL 추가 (DIP_SCALPER 개선)
+        분봉 급등 데이터 계산
 
         Returns:
             dict with change_1m, rvol_1m, change_3m, rvol_3m, change_5m, rvol_5m, change_30m, rvol_30m
@@ -1220,7 +710,7 @@ class TradingEngine:
                 if rvol_5m is not None:
                     result["rvol_5m"] = rvol_5m
 
-            # 30분봉 데이터 계산 (v6.0: DIP_SCALPER 개선)
+            # 30분봉 데이터 계산
             candles_30m = self.candle_manager.get_candles(symbol, "30m", 21)
             if len(candles_30m) >= 2:
                 # change_30m: 현재가 vs 30분 전 종가
@@ -1254,15 +744,8 @@ class TradingEngine:
 
             # 보유 포지션 심볼 강제 포함 (유동성 필터와 무관하게 가격 추적)
             position_symbols = set()
-            if self.dip_scalper:
-                position_symbols.update(self.dip_scalper.get_all_positions().keys())
-                position_symbols.update(self.dip_scalper.get_pending_orders().keys())
-            if self.attack_strategy:
-                position_symbols.update(self.attack_strategy._active_positions.keys())
-            if self.rebound_strategy:
-                position_symbols.update(self.rebound_strategy.get_all_positions().keys())
-            if self.pullback_strategy:
-                position_symbols.update(self.pullback_strategy.get_all_positions().keys())
+            for strat in self.v3_strategies:
+                position_symbols.update(strat.get_all_positions().keys())
 
             for sym in position_symbols:
                 if sym not in watch_symbols:
@@ -1336,7 +819,7 @@ class TradingEngine:
                     "rvol_1m": candle_surge["rvol_1m"],
                     "change_5m": candle_surge["change_5m"],
                     "rvol_5m": candle_surge["rvol_5m"],
-                    # v6.0: 30분봉 데이터 추가 (DIP_SCALPER 개선)
+                    # 30분봉 데이터
                     "change_30m": candle_surge["change_30m"],
                     "rvol_30m": candle_surge["rvol_30m"],
                 }
@@ -1346,126 +829,35 @@ class TradingEngine:
             if btc_data:
                 btc_change = btc_data.get("price_change_pct", 0)
 
-                # 가격 변화율 기반 레짐 판단
-                if btc_change > 3.0:  # +3% 이상 -> 상승장
-                    self._btc_regime = Regime.BULLISH
-                elif btc_change < -3.0:  # -3% 이하 -> 하락장
-                    self._btc_regime = Regime.BEARISH
-                elif abs(btc_change) > 5.0:  # 변동성 큼
-                    self._btc_regime = Regime.VOLATILE
+                if btc_change > 3.0:
+                    self._btc_regime = "BULLISH"
+                elif btc_change < -3.0:
+                    self._btc_regime = "BEARISH"
+                elif abs(btc_change) > 5.0:
+                    self._btc_regime = "VOLATILE"
                 else:
-                    self._btc_regime = Regime.NEUTRAL
-
-                self.satellite_strategy.update_btc_regime(self._btc_regime)
+                    self._btc_regime = "NEUTRAL"
 
         except Exception as e:
             logger.error("Failed to update Upbit market data", error=str(e))
 
-    async def _update_market_data_binance(self, watch_symbols: list[str]) -> None:
-        """Binance 시장 데이터 업데이트 (기존 로직)"""
-        # 일괄 조회 (개별 조회 대비 API 호출 90% 절감)
-        perp_tickers = await self.perp_exchange.get_all_tickers()
-        perp_books = await self.perp_exchange.get_all_book_tickers()
-        funding_rates = await self.perp_exchange.get_all_funding_rates()
-
-        # Spot도 일괄 조회 (FUTURES_ONLY 모드가 아닌 경우)
-        spot_tickers = {}
-        spot_books = {}
-        if not settings.futures_only_mode:
-            spot_tickers = await self.spot_exchange.get_all_tickers()
-            spot_books = await self.spot_exchange.get_all_book_tickers()
-
-        # 심볼별 데이터 업데이트
-        for symbol in watch_symbols:
-            perp_ticker = perp_tickers.get(symbol, {})
-            perp_book = perp_books.get(symbol, {})
-            spot_ticker = spot_tickers.get(symbol, {})
-            spot_book = spot_books.get(symbol, {})
-            funding_rate = funding_rates.get(symbol, 0)
-
-            perp_last = perp_ticker.get("last", 0)
-            spot_last = spot_ticker.get("last", perp_last)  # Spot 없으면 Perp 사용
-
-            if perp_last > 0:
-                # 24h 고점/저점 (돌파 기준)
-                high_24h = perp_ticker.get("highPrice", perp_last * 1.005)
-                low_24h = perp_ticker.get("lowPrice", perp_last * 0.995)
-
-                # RVOL 계산: 가격 변동률 기반 추정
-                price_change_pct = abs(perp_ticker.get("priceChangePercent", 0))
-                estimated_rvol = 1.0 + (price_change_pct / 1.5)
-
-                # VWAP 근사: (고점+저점+종가) / 3
-                vwap_approx = (high_24h + low_24h + perp_last) / 3
-
-                # ClosePos 계산
-                price_range = high_24h - low_24h
-                close_pos = (perp_last - low_24h) / price_range if price_range > 0 else 0.5
-
-                self._market_data[symbol] = {
-                    "symbol": symbol,
-                    "spot_price": spot_last,
-                    "perp_price": perp_last,
-                    "spot_bid": spot_book.get("bid", spot_last),
-                    "spot_ask": spot_book.get("ask", spot_last),
-                    "perp_bid": perp_book.get("bid", perp_last),
-                    "perp_ask": perp_book.get("ask", perp_last),
-                    "funding_rate": funding_rate,
-                    "price": perp_last,
-                    "volume_24h": perp_ticker.get("quoteVolume", 0),
-                    "high_20": high_24h,
-                    "low_20": low_24h,
-                    "highest_12_5m": high_24h,
-                    "lowest_12_5m": low_24h,
-                    "rvol": estimated_rvol,
-                    "vwap": vwap_approx,
-                    "close_pos": close_pos,
-                    "price_change_pct": price_change_pct,
-                    "timestamp": datetime.utcnow(),
-                }
-
-                # Core Safety Guard에 펀딩 레이트 업데이트
-                self.core_safety.update_funding_rate(symbol, funding_rate)
-
-        # BTC 레짐 계산 (Binance: 펀딩비 기반)
-        btc_data = self._market_data.get("BTCUSDT", {})
-        if btc_data:
-            btc_funding = btc_data.get("funding_rate", 0)
-
-            if btc_funding > 0.0003:
-                self._btc_regime = Regime.BULLISH
-            elif btc_funding < -0.0001:
-                self._btc_regime = Regime.BEARISH
-            else:
-                self._btc_regime = Regime.NEUTRAL
-
-            self.satellite_strategy.update_btc_regime(self._btc_regime)
-
     async def _execute_strategies(self) -> None:
-        """전략 실행 (우선순위 체인 적용)"""
+        """v3 전략 실행"""
         try:
-            # === 우선순위 1-3: Risk Overlay 평가 ===
-            # 현재 자산 조회
-            if self._is_upbit:
-                # Upbit: KRW 잔고 + 보유 자산 가치
-                krw_balance = await self.exchange.get_balance("KRW")
-                all_balances = await self.exchange.get_all_balances()
-                current_equity = krw_balance.total if krw_balance else 0
-                # 보유 자산 가치 추가
-                for bal in all_balances:
-                    if bal.asset != "KRW" and bal.total > 0:
-                        symbol = f"KRW-{bal.asset}"
-                        market_data = self._market_data.get(symbol, {})
-                        price = market_data.get("price", 0)
-                        if price > 0:
-                            current_equity += bal.total * price
-            else:
-                perp_balance = await self.perp_exchange.get_balance("USDT")
-                spot_balance = await self.spot_exchange.get_balance("USDT")
-                current_equity = (
-                    (perp_balance.total if perp_balance else 0)
-                    + (spot_balance.total if spot_balance else 0)
-                )
+            if not self.v3_enabled:
+                return
+
+            # 현재 자산 조회 (Upbit KRW)
+            krw_balance = await self.exchange.get_balance("KRW")
+            all_balances = await self.exchange.get_all_balances()
+            current_equity = krw_balance.total if krw_balance else 0
+            for bal in all_balances:
+                if bal.asset != "KRW" and bal.total > 0:
+                    symbol = f"KRW-{bal.asset}"
+                    market_data = self._market_data.get(symbol, {})
+                    price = market_data.get("price", 0)
+                    if price > 0:
+                        current_equity += bal.total * price
 
             # Risk Overlay 평가
             risk_decision = self.risk_overlay.evaluate(current_equity)
@@ -1475,3716 +867,310 @@ class TradingEngine:
 
             # HALT 모드면 신규 진입 완전 차단
             if risk_decision.mode == RiskMode.HALT:
-                logger.warning(
-                    "Strategy execution blocked: HALT mode",
-                    reason=risk_decision.primary_reason,
-                )
                 return
 
-            for symbol, market_data in self._market_data.items():
-                # Core 전략 비활성화 (Upbit 현물 전용 - 선물 헤지 불가)
-                # if risk_decision.core_allowed and self.core_strategy:
-                #     core_ok, core_reason = self.core_safety.can_open_core(symbol)
-                #     if core_ok:
-                #         core_signal = await self.core_strategy.generate_signal(market_data)
-                #         if core_signal:
-                #             await self._execute_signal(core_signal, market_data, risk_decision)
-                pass  # Core 전략 스킵
+            # 현재 v3 포지션 수 체크
+            total_v3_positions = sum(
+                len(s.get_all_positions()) for s in self.v3_strategies
+            )
+            if total_v3_positions >= self.v3_max_positions:
+                return
 
-                # Satellite 전략 (모멘텀) - Risk Overlay 체크
-                if risk_decision.satellite_allowed:
-                    sat_signal = await self.satellite_strategy.generate_signal(market_data)
-                    if sat_signal:
-                        await self._execute_signal(sat_signal, market_data, risk_decision)
+            # Pre-filter 심볼
+            candidates = self._prefilter_symbols_for_v3(self._market_data)
+            now = datetime.utcnow()
 
-                # Attack 전략 (급등주 공격) - Upbit 전용
-                if self._is_upbit and self.attack_strategy and risk_decision.satellite_allowed:
-                    # Attack 전략에 리스크 상태 업데이트
-                    dd_tier = getattr(self.risk_overlay, '_dd_tier', 0)
-                    daily_loss = getattr(self.risk_overlay, '_daily_loss_pct', 0)
-                    btc_regime = self._btc_regime if isinstance(self._btc_regime, str) else self._btc_regime.value
+            # 각 전략 스캔
+            all_signals: list[V3Signal] = []
+            for strategy in self.v3_strategies:
+                for symbol in candidates:
+                    md = self._market_data.get(symbol, {})
+                    if not md or md.get("price", 0) <= 0:
+                        continue
+                    # 이미 포지션이 있으면 스킵
+                    if strategy.get_position(symbol):
+                        continue
+                    signal = strategy.scan(symbol, md, self.candle_manager, now)
+                    if signal:
+                        all_signals.append(signal)
 
-                    self.attack_strategy.update_risk_state(
-                        dd_tier=dd_tier,
-                        daily_loss=daily_loss,
-                        regime=btc_regime,
-                        is_volatile=(self._btc_regime == Regime.VOLATILE),
-                    )
+            # 점수 순 정렬
+            all_signals.sort(key=lambda s: s.score, reverse=True)
 
-                    # market_data에 equity 추가
-                    market_data_with_equity = {
-                        **market_data,
-                        "equity": current_equity,
-                        "change_rate": market_data.get("price_change_pct", 0) / 100,  # % to ratio
-                    }
-
-                    attack_signal = await self.attack_strategy.generate_signal(market_data_with_equity)
-                    if attack_signal:
-                        await self._execute_attack_signal(attack_signal, market_data, risk_decision)
-
-            # === Pullback 전략 (눌림목 매수) - Upbit 전용 ===
-            # Note: Pullback은 Satellite와 독립적으로 운영됨
-            if self._is_upbit and self.pullback_strategy and self.pullback_strategy.is_enabled():
-                pullback_allowed = risk_decision.mode not in [RiskMode.HALT]
-                if pullback_allowed:
-                    # Pre-filtering: 호가창 조회 대상 축소 (Rate Limit 방지)
-                    candidates = self._prefilter_symbols_for_pullback(self._market_data)
-                    logger.debug(f"Pullback candidates: {len(candidates)} symbols (pre-filtered)")
-
-                    # market_data에 기술지표 + 호가 정보 추가 (Rebound 패턴)
-                    enhanced_market_data = {}
-                    for sym in candidates:
-                        md = self._market_data.get(sym, {})
-                        price = md.get("price", 0)
-
-                        # 캐시된 호가창 조회
-                        orderbook = await self._get_orderbook_cached(sym)
-
-                        # === 기술적 지표 계산 (candle_manager 사용) ===
-                        # RSI 14 (5분봉)
-                        rsi = 50.0
-                        if self.candle_manager:
-                            closes_for_rsi = self.candle_manager.get_closes(sym, "5m", 15)
-                            if len(closes_for_rsi) >= 15:
-                                changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
-                                gains = [c if c > 0 else 0 for c in changes[-14:]]
-                                losses = [-c if c < 0 else 0 for c in changes[-14:]]
-                                avg_gain = sum(gains) / 14
-                                avg_loss = sum(losses) / 14
-                                if avg_loss == 0:
-                                    rsi = 100.0 if avg_gain > 0 else 50.0
-                                else:
-                                    rs = avg_gain / avg_loss
-                                    rsi = 100 - (100 / (1 + rs))
-
-                        # SMA 20 (5분봉)
-                        sma_20 = self.candle_manager.calc_sma(sym, "5m", 20) if self.candle_manager else 0
-                        sma_20 = sma_20 or 0
-
-                        # VWAP (5분봉)
-                        vwap = md.get("vwap", 0)
-                        if self.candle_manager:
-                            precise_vwap = self.candle_manager.calc_vwap(sym, "5m", 20)
-                            if precise_vwap:
-                                vwap = precise_vwap
-
-                        # ATR% (5분봉)
-                        atr_pct = 0.01
-                        if self.candle_manager:
-                            calc_atr = self.candle_manager.calc_atr_percent(sym, "5m", 14)
-                            if calc_atr is not None:
-                                atr_pct = calc_atr
-
-                        # 호가 잔량 (상위 5호가)
-                        ob_units = (orderbook or {}).get("orderbook_units", [])
-                        bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
-                        ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
-
-                        # 24h 고/저
-                        highest_24h = md.get("high_20", price * 1.01 if price > 0 else 0)
-                        lowest_24h = md.get("low_20", price * 0.99 if price > 0 else 0)
-
-                        # 캔들 데이터
-                        candles_5m = self.candle_manager.get_candles(sym, "5m", 10) if self.candle_manager else []
-
-                        # 단기 변화율 계산 (5분봉 close 비교)
-                        change_5m = 0.0
-                        change_1h = 0.0
-                        if self.candle_manager:
-                            closes_5m = self.candle_manager.get_closes(sym, "5m", 13)
-                            if len(closes_5m) >= 2 and closes_5m[-2] > 0:
-                                change_5m = (closes_5m[-1] - closes_5m[-2]) / closes_5m[-2]
-                            if len(closes_5m) >= 13 and closes_5m[0] > 0:
-                                change_1h = (closes_5m[-1] - closes_5m[0]) / closes_5m[0]
-
-                        enhanced_market_data[sym] = {
-                            **md,
-                            "symbol": sym,
-                            "highest_24h": highest_24h,
-                            "lowest_24h": lowest_24h,
-                            "change_rate": md.get("price_change_pct", 0) / 100,
-                            "change_1h": change_1h,
-                            "change_5m": change_5m,
-                            "rsi": rsi,
-                            "sma_20": sma_20,
-                            "vwap": vwap,
-                            "atr_pct": atr_pct,
-                            "bid_volume": bid_volume,
-                            "ask_volume": ask_volume,
-                            "recent_candles": candles_5m,
-                            "rvol": md.get("rvol", 1.0),
-                        }
-
-                    # 눌림목 시그널 스캔 (pre-filtered 심볼만)
-                    pullback_signals = await self.pullback_strategy.scan_for_signals(
-                        symbols=candidates,
-                        market_data_map=enhanced_market_data,
-                    )
-
-                    # 시그널 실행
-                    for signal in pullback_signals:
-                        await self._execute_pullback_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
-
-            # === v4.2 Rebound Scalper 전략 (반등 스캘핑) - Upbit 전용 ===
-            # Note: Rebound는 Satellite/Pullback과 독립적으로 운영됨
-            if self._is_upbit and self.rebound_strategy and self.rebound_strategy.is_enabled():
-                rebound_allowed = risk_decision.mode not in [RiskMode.HALT]
-                if rebound_allowed:
-                    # Pre-filtering: 후보 심볼 축소
-                    candidates = self._prefilter_symbols_for_rebound(self._market_data)
-
-                    # market_data에 캔들, 호가, 기술적 지표 추가
-                    enhanced_market_data = {}
-                    for sym in candidates:
-                        md = self._market_data.get(sym, {})
-                        price = md.get("price", 0)
-                        # 캐시된 호가창 조회
-                        orderbook = await self._get_orderbook_cached(sym)
-                        # 1분봉/5분봉 조회
-                        candles_1m = self.candle_manager.get_candles(sym, "1m", 50) if self.candle_manager else []
-                        candles_5m = self.candle_manager.get_candles(sym, "5m", 50) if self.candle_manager else []
-
-                        # === 기술적 지표 계산 (ReboundScoreCalculator 입력용) ===
-                        # RSI 14 (5분봉 기준)
-                        rsi = 50.0  # fallback
-                        if self.candle_manager:
-                            closes_for_rsi = self.candle_manager.get_closes(sym, "5m", 15)
-                            if len(closes_for_rsi) >= 15:
-                                changes = [closes_for_rsi[i] - closes_for_rsi[i - 1] for i in range(1, len(closes_for_rsi))]
-                                gains = [c if c > 0 else 0 for c in changes[-14:]]
-                                losses = [-c if c < 0 else 0 for c in changes[-14:]]
-                                avg_gain = sum(gains) / 14
-                                avg_loss = sum(losses) / 14
-                                if avg_loss == 0:
-                                    rsi = 100.0
-                                else:
-                                    rs = avg_gain / avg_loss
-                                    rsi = 100 - (100 / (1 + rs))
-
-                        # SMA 20 (5분봉)
-                        sma_20 = self.candle_manager.calc_sma(sym, "5m", 20) if self.candle_manager else 0
-                        sma_20 = sma_20 or 0
-
-                        # BB 하단 (5분봉, 20기간, 2σ)
-                        bb_lower = 0.0
-                        if self.candle_manager:
-                            bb_closes = self.candle_manager.get_closes(sym, "5m", 20)
-                            if len(bb_closes) >= 20:
-                                bb_sma = sum(bb_closes) / len(bb_closes)
-                                variance = sum((c - bb_sma) ** 2 for c in bb_closes) / len(bb_closes)
-                                std = variance ** 0.5
-                                bb_lower = bb_sma - 2 * std
-
-                        # VWAP (5분봉, candle_manager의 정밀 계산)
-                        vwap = md.get("vwap", 0)
-                        if self.candle_manager:
-                            precise_vwap = self.candle_manager.calc_vwap(sym, "5m", 20)
-                            if precise_vwap:
-                                vwap = precise_vwap
-
-                        # ATR% (5분봉)
-                        atr_pct = 0.01  # fallback
-                        if self.candle_manager:
-                            calc_atr = self.candle_manager.calc_atr_percent(sym, "5m", 14)
-                            if calc_atr is not None:
-                                atr_pct = calc_atr
-
-                        # 호가 잔량 (상위 5호가) - Upbit format: orderbook_units
-                        ob = orderbook or {}
-                        ob_units = ob.get("orderbook_units", [])
-                        bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
-                        ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
-
-                        # 24h 가격 범위
-                        highest_24h = md.get("high_20", price * 1.01 if price > 0 else 0)
-                        lowest_24h = md.get("low_20", price * 0.99 if price > 0 else 0)
-                        price_range_pct = (highest_24h - lowest_24h) / price if price > 0 else 0.02
-
-                        enhanced_market_data[sym] = {
-                            **md,
-                            "symbol": sym,
-                            "orderbook": ob,
-                            "candles_1m": candles_1m,
-                            "candles_5m": candles_5m,
-                            "highest_24h": highest_24h,
-                            "lowest_24h": lowest_24h,
-                            # 기술적 지표 (score calculator 입력)
-                            "rsi": rsi,
-                            "sma_20": sma_20,
-                            "bb_lower": bb_lower,
-                            "vwap": vwap,
-                            "atr_pct": atr_pct,
-                            "price_range_pct": price_range_pct,
-                            "bid_volume": bid_volume,
-                            "ask_volume": ask_volume,
-                        }
-
-                    # Rebound 시그널 스캔 (모드 체크 추가)
-                    if self.rebound_strategy and self.rebound_strategy.is_enabled():
-                        rebound_signals = await self.rebound_strategy.scan_for_signals(
-                            symbols=candidates,
-                            market_data_map=enhanced_market_data,
-                        )
-                        if rebound_signals:
-                            logger.info("REBOUND scan complete", signal_count=len(rebound_signals), candidates=len(candidates))
-
-                        # 시그널 실행
-                        for signal in rebound_signals:
-                            logger.info("REBOUND executing signal", symbol=signal.symbol, score=signal.score)
-                            await self._execute_rebound_signal(signal, enhanced_market_data.get(signal.symbol, {}), risk_decision, current_equity)
-
-            # === v4.0 Ignition 전략 (전조 패턴 + 점화) - Upbit 전용 ===
-            # Note: Ignition은 Satellite와 독립적으로 운영됨 (satellite_enabled와 무관)
-            logger.info(f"[IGNITION CHECK] is_upbit={self._is_upbit}, strategy={self.ignition_strategy is not None}, mode={settings.ignition_mode}")
-            if self._is_upbit and self.ignition_strategy and settings.ignition_mode != "OFF":
-                # Ignition은 SAFE/HALT 모드에서만 차단, satellite_enabled와 무관
-                ignition_allowed = risk_decision.mode not in [RiskMode.HALT]
-                logger.info(f"[IGNITION] ignition_allowed={ignition_allowed}, risk_mode={risk_decision.mode}")
-                if ignition_allowed:
-                    try:
-                        # BTC 24시간 변화율 설정 (상대강도 계산용)
-                        btc_data = self._market_data.get("KRW-BTC", {})
-                        btc_change_24h = btc_data.get("price_change_pct", 0) / 100
-                        self.ignition_strategy.set_btc_change(btc_change_24h)
-                        self.ignition_strategy.set_account_balance(current_equity)
-                        self.ignition_strategy.set_mode(settings.ignition_mode)
-
-                        # Setup 스캔 (항상 실행)
-                        logger.info("[IGNITION] Starting setup scan...")
-                        qualified_symbols = self.symbol_manager.get_qualified_symbols()
-                        logger.info(f"[IGNITION] Qualified symbols: {len(qualified_symbols)}")
-                        new_candidates = await self.ignition_strategy.scan_setups(
-                            symbols=qualified_symbols,
-                            market_data_map=self._market_data,
-                        )
-                        if new_candidates:
-                            logger.info(
-                                "Ignition setup candidates found",
-                                count=len(new_candidates),
-                                symbols=[c.symbol for c in new_candidates],
-                            )
-
-                        # Watchlist 종목들 점화 체크 (실시간)
-                        watchlist = self.ignition_strategy.get_watchlist()
-                        for candidate in watchlist:
-                            symbol = candidate.symbol
-                            md = self._market_data.get(symbol, {})
-                            if not md:
-                                continue
-
-                            # 점화 신호 체크
-                            ignition_signal = self.ignition_strategy.check_ignition(symbol, md)
-                            if ignition_signal:
-                                # 호가 정보 조회
-                                orderbook = await self._get_orderbook_cached(symbol)
-                                ob_units = orderbook.get("orderbook_units", []) if orderbook else []
-                                bid_price = ob_units[0].get("bid_price", 0) if ob_units else md.get("price", 0)
-                                ask_price = ob_units[0].get("ask_price", 0) if ob_units else md.get("price", 0)
-                                current_price = md.get("price", 0)
-
-                                # 진입 시도 (Anti-Chase Gate 포함)
-                                position = self.ignition_strategy.try_entry(
-                                    signal=ignition_signal,
-                                    current_price=current_price,
-                                    bid_price=bid_price,
-                                    ask_price=ask_price,
-                                )
-
-                                if position:
-                                    # 실제 주문 실행
-                                    await self._execute_ignition_entry(position, md, risk_decision)
-
-                        # 기존 포지션 청산 체크
-                        for pos in self.ignition_strategy.get_all_positions():
-                            symbol = pos.symbol
-                            md = self._market_data.get(symbol, {})
-                            current_price = md.get("price", 0)
-
-                            exit_result = self.ignition_strategy.check_exits(symbol, current_price)
-                            if exit_result:
-                                exit_reason, exit_pct = exit_result
-                                await self._execute_ignition_exit(pos, exit_reason, exit_pct, md)
-
-                        # 정리
-                        self.ignition_strategy.cleanup()
-
-                    except Exception as e:
-                        logger.error("Ignition strategy error", error=str(e))
-
-            # === Surge Detector (급등 시작 실시간 감지) - Upbit 전용 ===
-            # Note: Surge Detector는 Satellite와 독립적으로 운영됨
-            if self._is_upbit and self.surge_detector and settings.ignition_mode != "OFF":
-                surge_allowed = risk_decision.mode not in [RiskMode.HALT]
-                if surge_allowed:
-                    try:
-                        # 전체 심볼 스캔하여 급등 시작 감지
-                        qualified_symbols = self.symbol_manager.get_qualified_symbols()
-                        surge_signals = self.surge_detector.scan_all_symbols(
-                            symbols=qualified_symbols,
-                            market_data_map=self._market_data,
-                        )
-
-                        # 급등 신호 처리
-                        for surge in surge_signals:
-                            await self._execute_surge_entry(surge, self._market_data.get(surge.symbol, {}), risk_decision, current_equity)
-
-                        # 기존 Surge 포지션 청산 체크
-                        for pos in self.surge_detector.get_positions():
-                            symbol = pos.symbol
-                            md = self._market_data.get(symbol, {})
-                            current_price = md.get("price", 0)
-
-                            exit_result = self.surge_detector.check_exit(symbol, current_price)
-                            if exit_result:
-                                exit_reason, exit_pct = exit_result
-                                await self._execute_surge_exit(symbol, pos, exit_reason, exit_pct, current_price)
-
-                        # 만료 신호 정리
-                        self.surge_detector.clear_expired()
-
-                    except Exception as e:
-                        logger.error("Surge detector error", error=str(e))
-
-            # === Dip Scalper (급락 스캘퍼) v2.0 - Upbit 전용 ===
-            if self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled():
-                dip_allowed = risk_decision.mode not in [RiskMode.HALT]
-                if dip_allowed:
-                    try:
-                        # v2.0: BTC 1분 변화율 설정
-                        btc_data = self._market_data.get("KRW-BTC", {})
-                        btc_change_1m = btc_data.get("change_1m", 0)
-                        self.dip_scalper.set_btc_status(btc_change_1m)
-
-                        # 1분봉 급락 종목 스캔
-                        qualified_symbols = self.symbol_manager.get_qualified_symbols()
-
-                        # v2.0: Pre-filter - 급락 중인 종목만 추출 (호가창 조회 최소화)
-                        dip_candidates = []
-                        for symbol in qualified_symbols:
-                            md = self._market_data.get(symbol, {})
-                            if not md or md.get("price", 0) <= 0:
-                                continue
-
-                            change_1m = md.get("change_1m", 0)
-                            # 급락 기준 (min_drop_pct = -2%)보다 낮은 종목만
-                            if change_1m <= -0.01:  # -1% 이상 하락 시 후보
-                                dip_candidates.append(symbol)
-
-                        # v2.0: 후보에 대해 호가창 조회 및 데이터 구성
-                        market_data_list = []
-                        for symbol in dip_candidates[:20]:  # 최대 20개만 조회 (Rate Limit)
-                            md = self._market_data.get(symbol, {})
-                            price = md.get("price", 0)
-
-                            # ATR 계산 (5분봉 기반)
-                            atr = md.get("atr", 0)
-                            atr_pct = atr / price if price > 0 and atr > 0 else 0.02
-
-                            # v2.0: 호가창 조회 (캐시 사용)
-                            orderbook = await self._get_orderbook_cached(symbol)
-                            if orderbook:
-                                ob_units = orderbook.get("orderbook_units", [])
-                                bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
-                                ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
-                            else:
-                                bid_volume = 0
-                                ask_volume = 0
-
-                            market_data_list.append({
-                                "symbol": symbol,
-                                "price": price,
-                                "change_1m": md.get("change_1m", 0),
-                                "change_3m": md.get("change_3m", 0),  # v2.2: 3분봉 지원
-                                "atr_pct": atr_pct,
-                                "volume_24h_krw": md.get("volume_24h", 0),
-                                # v2.0 추가 데이터
-                                "rvol": md.get("rvol", 1.0),
-                                "bid_volume": bid_volume,
-                                "ask_volume": ask_volume,
-                            })
-
-                        # 급락 시그널 스캔 (v2.0: 추가 조건 포함)
-                        dip_signals = self.dip_scalper.scan_for_dips(market_data_list)
-
-                        # 시그널 실행
-                        for signal in dip_signals:
-                            await self._execute_dip_signal(signal, self._market_data.get(signal.symbol, {}), risk_decision, current_equity)
-
-                        # NOTE: 청산 체크 & 미체결 확인은 _manage_dip_exits()에서 모드 무관 실행
-
-                        # v2.3: 근접 종목 추적 (1초 모니터링 대상 업데이트)
-                        near_symbols = self.dip_scalper.update_near_trigger_symbols(market_data_list)
-                        if near_symbols:
-                            logger.debug(
-                                "Near-trigger symbols updated",
-                                count=len(near_symbols),
-                                symbols=near_symbols[:5],
-                            )
-
-                    except Exception as e:
-                        logger.error("Dip scalper error", error=str(e))
+            # 시그널 실행 (최대 포지션 제한)
+            for signal in all_signals:
+                if total_v3_positions >= self.v3_max_positions:
+                    break
+                await self._execute_v3_signal(signal, risk_decision, current_equity)
+                total_v3_positions += 1
 
         except Exception as e:
             logger.error("Strategy execution error", error=str(e), exc_info=True)
 
-    async def _execute_dip_signal(self, signal, market_data: dict, risk_decision, current_equity: float) -> None:
-        """Dip Scalper 시그널 실행 (급락 스캘핑)"""
+    async def _execute_v3_signal(self, signal: V3Signal, risk_decision, current_equity: float) -> None:
+        """v3 시그널 실행 (매수 주문)"""
         try:
             symbol = signal.symbol
-            current_price = market_data.get("price", 0)
+            price = signal.entry_price
 
-            logger.info(
-                "Executing Dip signal",
-                symbol=symbol,
-                drop=f"{signal.drop_pct:.2%}",
-                threshold=f"{signal.threshold_pct:.2%}",
-                entry_price=signal.entry_price,
-            )
+            # 포지션 크기 계산
+            position_krw = current_equity * signal.position_pct * risk_decision.sizing_multiplier
+            quantity = position_krw / price if price > 0 else 0
 
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="DIP_SCALPER",
-                message=f"Dip entry: {symbol} {signal.drop_pct:.1%}",
-                details={
-                    "drop_pct": signal.drop_pct,
-                    "atr_pct": signal.atr_pct,
-                    "entry_price": signal.entry_price,
-                    "stop_loss": signal.stop_loss,
-                    "take_profit": signal.take_profit,
-                },
-            )
-
-            # 매수 금액 (설정에서 가져옴)
-            order_amount = signal.buy_amount_krw
-
-            # 최소 주문 금액 체크
-            MIN_ORDER = 5000
-            if order_amount < MIN_ORDER:
-                logger.debug("Dip order too small", amount=order_amount, min=MIN_ORDER)
+            # 최소 주문 금액 체크 (Upbit: 5,000 KRW)
+            if position_krw < 5000:
                 return
 
-            # 잔고 체크
+            # KRW 잔고 체크
             krw_balance = await self.exchange.get_balance("KRW")
             available = krw_balance.free if krw_balance else 0
-
-            if available < order_amount:
-                logger.warning("Insufficient balance for dip", available=available, required=order_amount)
-                return
-
-            # v2.5: 가격 유효성 체크
-            if current_price <= 0:
-                logger.warning("Dip blocked: invalid current price", symbol=symbol, price=current_price)
-                return
-
-            # v2.5: 스프레드 체크 (슬리피지 방지)
-            orderbook = await self._get_orderbook_cached(symbol)
-            if not orderbook or not orderbook.get("orderbook_units"):
-                logger.warning("Dip blocked: no orderbook data", symbol=symbol)
-                return
-
-            ob_units = orderbook.get("orderbook_units", [])
-            best_ask = ob_units[0].get("ask_price", 0)
-            best_bid = ob_units[0].get("bid_price", 0)
-
-            if best_bid > 0:
-                spread_bps = (best_ask - best_bid) / best_bid * 10000
-                max_spread = 15.0  # 15bps
-
-                if spread_bps > max_spread:
-                    logger.info(
-                        "Dip blocked: spread too wide",
-                        symbol=symbol,
-                        spread_bps=round(spread_bps, 1),
-                        max_spread_bps=max_spread,
-                    )
-                    return
-
-            # v2.5: 유동성 필터 체크
-            liquidity_filter = get_upbit_liquidity_filter()
-            volume_24h = market_data.get("volume_24h", 0)
-            liq_check = await liquidity_filter.check(
-                symbol=symbol,
-                strategy_id="DIP_SCALPER",
-                order_size_krw=order_amount,
-                current_price=current_price,
-                orderbook=orderbook,
-                volume_24h=volume_24h,
-            )
-
-            if not liq_check.passed:
-                logger.info("Dip blocked by liquidity filter", symbol=symbol, reason=liq_check.reason)
+            if available < position_krw:
                 return
 
             # PAPER 모드 체크
             if not self.mode_manager.should_execute_trades():
                 logger.info(
-                    "PAPER mode - skipping Dip trade execution",
+                    "PAPER mode - skipping v3 entry",
                     symbol=symbol,
-                    amount=order_amount,
+                    strategy=signal.strategy,
+                    score=signal.score,
                 )
-                return
-
-            # 금액 → 수량 변환
-            order_quantity = order_amount / signal.entry_price
-
-            logger.info(
-                "Dip order executing",
-                symbol=symbol,
-                amount_krw=order_amount,
-                price=signal.entry_price,
-                quantity=order_quantity,
-            )
-
-            # 중복 매수 방지: 주문 전에 pending_signals에 추가
-            self.dip_scalper._pending_signals[symbol] = signal
-
-            # v2.3: 지정가 또는 시장가 매수
-            # 지정가 = 임계값 가격 (예: -2.4% 레벨)
-            # 현재가가 임계값 아래이면 지정가로 주문해도 즉시 체결됨
-            use_limit = self.dip_scalper.use_limit_order
-
-            if use_limit:
-                # 지정가 매수 (임계값 가격)
-                result = await self.exchange.place_order(
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    order_type=OrderType.LIMIT,
-                    quantity=order_quantity,
-                    price=signal.entry_price,
-                )
-                logger.info(
-                    "Dip limit order placed",
-                    symbol=symbol,
-                    limit_price=signal.entry_price,
-                    current_price=current_price,
-                )
-            else:
-                # 시장가 매수
-                result = await self.exchange.place_order(
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    order_type=OrderType.MARKET,
-                    quantity=order_quantity,
-                )
-
-            if not result.success:
-                logger.error("Dip order failed", symbol=symbol, error=result.error)
-                return
-
-            # 체결 수량/가격 확인
-            filled_qty = result.filled_qty
-            avg_price = result.avg_price
-
-            if filled_qty <= 0 or avg_price <= 0:
-                # 잔고에서 확인
-                try:
-                    asset = symbol.replace("KRW-", "")
-                    balance = await self.exchange.get_balance(asset)
-                    if balance and balance.total > 0:
-                        ticker = await self.exchange.get_ticker(symbol)
-                        filled_qty = balance.total
-                        avg_price = ticker.get("trade_price", 0) if ticker else 0
-                except Exception as e:
-                    logger.warning(f"Failed to get balance for {symbol}: {e}")
-
-            if filled_qty <= 0 or avg_price <= 0:
-                # v2.3: 미체결 주문 추적 (지정가인 경우)
-                if use_limit:
-                    order_id = result.order_id if hasattr(result, 'order_id') and result.order_id else f"DIP-{symbol}-{int(datetime.utcnow().timestamp())}"
-                    self.dip_scalper.add_pending_order(
-                        symbol=symbol,
-                        order_id=order_id,
-                        entry_price=signal.entry_price,
-                        quantity=order_quantity,
-                        signal=signal,
-                    )
-                    logger.info(
-                        "Dip order pending (limit order not filled yet)",
-                        symbol=symbol,
-                        entry_price=signal.entry_price,
-                        order_id=order_id,
-                    )
-                    # 주문 기록 (PENDING 상태)
-                    self.add_order(
-                        symbol=symbol,
-                        strategy="DIP_SCALPER",
-                        side="BUY",
-                        order_type="LIMIT",
-                        quantity=order_quantity,
-                        price=signal.entry_price,
-                        status="PENDING",
-                    )
-
-                    # Slack 알림 (미체결)
-                    await self._send_slack_notification(
-                        level=AlertLevel.INFO,
-                        title=f"급락 매수 주문: {symbol}",
-                        message=f"지정가 대기중\n급락: {signal.drop_pct:.1%}\n주문가: {signal.entry_price:,.0f}원",
-                    )
-                else:
-                    logger.warning("Dip order not filled (market order)", symbol=symbol)
                 return
 
             logger.info(
-                "Dip order filled",
+                "Executing v3 signal",
                 symbol=symbol,
-                filled_qty=filled_qty,
-                avg_price=avg_price,
+                strategy=signal.strategy,
+                score=f"{signal.score:.1f}",
+                amount=f"₩{position_krw:,.0f}",
+                indicators=signal.indicators,
             )
 
-            # 포지션 추적 시작 (v2.1: bid_ratio 전달)
-            self.dip_scalper.track_position(
-                symbol=symbol,
-                entry_price=avg_price,
-                quantity=filled_qty,
-                bid_ratio=signal.bid_strength,  # v2.1: 동적 익절용
-            )
-
-            # PositionLedger에 포지션 추가
-            from src.portfolio.position_ledger import FillEvent
-            fill_event = FillEvent(
-                order_id=order_id if 'order_id' in locals() else f"DIP-{symbol}-{int(datetime.utcnow().timestamp())}",
-                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
-                position_id=None,
-                symbol=symbol,
-                strategy_id="DIP_SCALPER",
-                side="BUY",
-                filled_quantity=filled_qty,
-                fill_price=avg_price,
-                fee=0.0,
-                fee_asset="KRW",
-                timestamp=datetime.utcnow(),
-            )
-            ledger_entry = await self.position_ledger.on_buy_fill(fill_event)
-
-            # 즉시 DipPosition 상태를 metadata에 저장
-            dip_pos = self.dip_scalper.get_position(symbol)
-            if ledger_entry and dip_pos:
-                ledger_entry.metadata.update(dip_pos.to_metadata())
-                await self.position_ledger._persist_position_to_db(ledger_entry)
-                dip_pos._dirty = False
-
-            # 주문 기록
-            self.add_order(
-                symbol=symbol,
-                strategy="DIP_SCALPER",
-                side="BUY",
-                order_type="LIMIT" if use_limit else "MARKET",
-                quantity=filled_qty,
-                price=avg_price,
-                status="FILLED",
-            )
-
-            # Slack 알림
-            await self._send_slack_notification(
-                level=AlertLevel.INFO,
-                title=f"급락 매수: {symbol}",
-                message=f"급락: {signal.drop_pct:.1%}\n진입가: {avg_price:,.0f}원\n수량: {filled_qty:.8f}",
-            )
-
-        except Exception as e:
-            logger.error("Dip signal execution error", symbol=signal.symbol, error=str(e))
-            # 주문 실패 시 pending_signals에서 제거
-            self.dip_scalper._pending_signals.pop(symbol, None)
-
-    async def _manage_dip_exits(self) -> None:
-        """Dip Scalper 포지션 청산 & 미체결 주문 확인 (모드 무관, 항상 실행)"""
-        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
-            return
-
-        try:
-            # 1. 기존 포지션 청산 체크
-            for symbol, pos in list(self.dip_scalper.get_all_positions().items()):
-                md = self._market_data.get(symbol, {})
-                current_price = md.get("price", 0)
-                if current_price <= 0:
-                    continue
-
-                exit_result = self.dip_scalper.should_exit(symbol, current_price)
-                if exit_result:
-                    await self._execute_dip_exit(symbol, pos, exit_result, current_price)
-
-            # 2. 미체결 주문 체결 확인
-            await self._check_dip_pending_orders()
-
-            # 3. DB ↔ 인메모리 동기화 (30초마다, 첫 실행은 즉시)
-            self._dip_sync_counter = getattr(self, "_dip_sync_counter", 29) + 1
-            if self._dip_sync_counter >= 30:
-                self._dip_sync_counter = 0
-                await self._sync_dip_positions_from_db()
-
-            # 4. dirty 포지션 DB persist (10초마다)
-            self._dip_persist_counter = getattr(self, "_dip_persist_counter", 9) + 1
-            if self._dip_persist_counter >= 10:
-                self._dip_persist_counter = 0
-                await self._persist_dirty_dip_positions()
-
-        except Exception as e:
-            logger.error("Dip exit management error", error=str(e))
-
-    async def _persist_dirty_dip_positions(self) -> None:
-        """dirty 플래그가 설정된 DIP_SCALPER 포지션의 상태를 metadata_json에 저장"""
-        try:
-            dirty_positions = self.dip_scalper.get_dirty_positions()
-            if not dirty_positions:
-                return
-
-            for dip_pos in dirty_positions:
-                try:
-                    ledger_entry = await self.position_ledger.get_position_by_symbol(
-                        dip_pos.symbol, "DIP_SCALPER"
-                    )
-                    if not ledger_entry:
-                        continue
-
-                    ledger_entry.metadata.update(dip_pos.to_metadata())
-                    await self.position_ledger._persist_position_to_db(ledger_entry)
-                    self.dip_scalper.mark_clean(dip_pos.symbol)
-
-                except Exception as e:
-                    logger.warning(
-                        "Failed to persist dip position",
-                        symbol=dip_pos.symbol,
-                        error=str(e),
-                    )
-
-            if dirty_positions:
-                logger.debug(
-                    "Dip positions persisted",
-                    count=len(dirty_positions),
-                    symbols=[p.symbol for p in dirty_positions],
-                )
-
-        except Exception as e:
-            logger.error("Persist dirty dip positions error", error=str(e))
-
-    async def _sync_dip_positions_from_db(self) -> None:
-        """DB의 DIP_SCALPER 포지션 중 인메모리에 없는 것을 자동 복구"""
-        try:
-            from src.models.database import async_session, PositionModel
-            from src.models.schemas import StrategyType
-            from sqlalchemy import select, and_
-
-            async with async_session() as session:
-                stmt = select(PositionModel).where(
-                    and_(
-                        PositionModel.strategy == StrategyType.DIP_SCALPER,
-                        PositionModel.is_open == True,
-                    )
-                )
-                result = await session.execute(stmt)
-                db_positions = result.scalars().all()
-
-            if not db_positions:
-                return
-
-            active_symbols = set(self.dip_scalper.get_all_positions().keys())
-            restored = 0
-
-            for pos in db_positions:
-                if pos.symbol in active_symbols:
-                    continue  # 이미 추적 중
-
-                # Upbit 잔고 확인
-                asset = pos.symbol.replace("KRW-", "")
-                try:
-                    balance = await self.exchange.get_balance(asset)
-                except Exception:
-                    continue
-
-                if not balance or balance.total <= 0:
-                    # 잔고 없으면 DB 포지션 닫기
-                    pos.is_open = False
-                    async with async_session() as s:
-                        merged = await s.merge(pos)
-                        merged.is_open = False
-                        await s.commit()
-                    logger.info(
-                        "Dip position closed (no balance)",
-                        symbol=pos.symbol,
-                    )
-                    continue
-
-                # 인메모리에 복구 (metadata 기반 완전 복원 우선)
-                from src.strategies.dip_scalper import DipPosition as _DipPos
-                ledger_entry = await self.position_ledger.get_position_by_symbol(
-                    pos.symbol, "DIP_SCALPER"
-                )
-                restored_from_meta = False
-                if ledger_entry and ledger_entry.metadata:
-                    dip_pos = _DipPos.from_metadata(pos.symbol, ledger_entry.metadata)
-                    if dip_pos:
-                        dip_pos.quantity = balance.total
-                        self.dip_scalper.restore_position(dip_pos)
-                        restored_from_meta = True
-
-                if not restored_from_meta:
-                    self.dip_scalper.track_position(
-                        symbol=pos.symbol,
-                        entry_price=pos.avg_price,
-                        quantity=balance.total,
-                        bid_ratio=0.5,
-                    )
-
-                restored += 1
-                logger.warning(
-                    "Dip position restored from DB (was missing in memory)",
-                    symbol=pos.symbol,
-                    entry_price=pos.avg_price,
-                    quantity=balance.total,
-                    from_metadata=restored_from_meta,
-                )
-
-            if restored > 0:
-                logger.info(
-                    "Dip position sync completed",
-                    restored=restored,
-                    total_db=len(db_positions),
-                    total_active=len(active_symbols) + restored,
-                )
-
-        except Exception as e:
-            logger.warning("Dip position sync failed", error=str(e))
-
-    async def _execute_dip_exit(self, symbol: str, pos, exit_result: dict, current_price: float) -> None:
-        """Dip Scalper 청산 실행"""
-        try:
-            exit_reason = exit_result.get("reason", "unknown")
-            exit_type = exit_result.get("exit_type", "unknown")
-            quantity = exit_result.get("quantity", pos.quantity)
-
-            logger.info(
-                "Executing Dip exit",
-                symbol=symbol,
-                reason=exit_reason,
-                exit_type=exit_type,
-                quantity=quantity,
-            )
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info("PAPER mode - skipping Dip exit", symbol=symbol)
-                return
-
-            # 시장가 매도
+            # 시장가 매수
             result = await self.exchange.place_order(
                 symbol=symbol,
-                side=OrderSide.SELL,
+                side=OrderSide.BUY,
                 order_type=OrderType.MARKET,
                 quantity=quantity,
             )
 
-            if not result.success:
-                logger.error("Dip exit order failed", symbol=symbol, error=result.error)
-                return
+            if result.success:
+                fill_price = result.avg_price or price
+                fill_qty = result.filled_qty or quantity
 
-            # PnL 계산
-            exit_price = result.avg_price if result.avg_price > 0 else current_price
-            filled_qty = result.filled_qty if result.filled_qty > 0 else quantity
-            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+                # 전략에서 해당 전략 객체 찾기
+                strategy_obj = None
+                for s in self.v3_strategies:
+                    if s.name == signal.strategy:
+                        strategy_obj = s
+                        break
 
-            logger.info(
-                "Dip position closed",
-                symbol=symbol,
-                exit_price=exit_price,
-                pnl_pct=f"{pnl_pct:.2%}",
-                exit_type=exit_type,
-            )
+                if strategy_obj:
+                    strategy_obj.record_entry(symbol, datetime.utcnow())
+                    strategy_obj.track_position(V3Position(
+                        symbol=symbol,
+                        strategy=signal.strategy,
+                        entry_price=fill_price,
+                        quantity=fill_qty,
+                        entry_time=datetime.utcnow(),
+                        stop_loss_pct=strategy_obj.SL_PCT,
+                        take_profit_pct=strategy_obj.TP_PCT,
+                        trail_trigger_pct=strategy_obj.TRAIL_TRIGGER,
+                        trail_stop_pct=strategy_obj.TRAIL_STOP,
+                        time_stop_minutes=strategy_obj.TIME_STOP_MIN,
+                        highest_price=fill_price,
+                    ))
 
-            # 청산 전 exit 정보를 metadata에 저장
-            ledger_entry = await self.position_ledger.get_position_by_symbol(symbol, "DIP_SCALPER")
-            if ledger_entry:
-                ledger_entry.metadata.update({
-                    "exit_type": exit_type,
-                    "exit_price": exit_price,
-                    "final_pnl_pct": pnl_pct,
-                })
-                await self.position_ledger._persist_position_to_db(ledger_entry)
+                # PositionLedger에 기록
+                fill_event = FillEvent(
+                    order_id=f"V3-BUY-{symbol}-{int(datetime.utcnow().timestamp())}",
+                    exchange_order_id=result.exchange_order_id if hasattr(result, "exchange_order_id") else None,
+                    position_id=None,
+                    symbol=symbol,
+                    strategy_id=signal.strategy,
+                    side="BUY",
+                    filled_quantity=fill_qty,
+                    fill_price=fill_price,
+                    fee=0.0,
+                    fee_asset="KRW",
+                    timestamp=datetime.utcnow(),
+                )
+                await self.position_ledger.on_buy_fill(fill_event)
 
-            # 전략에서 포지션 제거
-            self.dip_scalper.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
+                self.add_event(
+                    level="INFO",
+                    event_type="V3_ENTRY",
+                    message=f"v3 entry: {symbol} ({signal.strategy})",
+                    details={
+                        "strategy": signal.strategy,
+                        "score": signal.score,
+                        "quantity": fill_qty,
+                        "price": fill_price,
+                        "amount_krw": fill_qty * fill_price,
+                        **signal.indicators,
+                    },
+                )
 
-            # PositionLedger에서 포지션 청산
-            from src.portfolio.position_ledger import FillEvent
-            sell_fill_event = FillEvent(
-                order_id=f"DIP-SELL-{symbol}-{int(datetime.utcnow().timestamp())}",
-                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
-                position_id=None,
-                symbol=symbol,
-                strategy_id="DIP_SCALPER",
-                side="SELL",
-                filled_quantity=filled_qty,
-                fill_price=exit_price,
-                fee=0.0,
-                fee_asset="KRW",
-                timestamp=datetime.utcnow(),
-            )
-            await self.position_ledger.on_sell_fill(sell_fill_event)
+                self.add_order(
+                    symbol=symbol,
+                    strategy=signal.strategy,
+                    side="BUY",
+                    order_type="MARKET",
+                    quantity=fill_qty,
+                    price=fill_price,
+                    status="FILLED",
+                    filled_qty=fill_qty,
+                    avg_fill_price=fill_price,
+                )
 
-            # 주문 기록 (매도)
-            self.add_order(
-                symbol=symbol,
-                strategy="DIP_SCALPER",
-                side="SELL",
-                order_type="MARKET",
-                quantity=filled_qty,
-                price=exit_price,
-                status="FILLED",
-            )
+                # Slack 알림
+                if self.slack_notifier.is_enabled:
+                    await self.slack_notifier.send(SlackMessage(
+                        text=f"""
+:chart_with_upwards_trend: *v3 진입* ({signal.strategy})
+> 심볼: 
+> 점수: {signal.score:.1f}
+> 수량: {fill_qty:.4f}
+> 가격: ₩{fill_price:,.0f}
+> 금액: ₩{fill_qty * fill_price:,.0f}
+                        """.strip(),
+                        level=AlertLevel.INFO,
+                    ))
 
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="DIP_SCALPER",
-                message=f"Dip exit: {symbol} {pnl_pct:.1%}",
-                details={
-                    "exit_type": exit_type,
-                    "exit_price": exit_price,
-                    "pnl_pct": pnl_pct,
-                },
-            )
-
-            # Slack 알림
-            emoji = "✅" if pnl_pct >= 0 else "❌"
-            await self._send_slack_notification(
-                level=AlertLevel.INFO if pnl_pct >= 0 else AlertLevel.WARNING,
-                title=f"{emoji} 급락 청산: {symbol}",
-                message=f"사유: {exit_reason}\nPnL: {pnl_pct:.2%}",
-            )
+            else:
+                logger.warning("v3 entry failed", symbol=symbol, error=result.error)
 
         except Exception as e:
-            logger.error("Dip exit execution error", symbol=symbol, error=str(e))
+            logger.error("v3 signal execution error", symbol=signal.symbol, error=str(e))
 
-    async def _check_dip_pending_orders(self) -> None:
-        """v2.3: 미체결 Dip 주문 체결 확인"""
+    async def _manage_v3_exits(self) -> None:
+        """v3 포지션 SL/TP/trailing/time_stop 체크"""
         try:
-            pending_orders = self.dip_scalper.get_pending_orders()
-            if not pending_orders:
-                return
+            now = datetime.utcnow()
+            for strategy in self.v3_strategies:
+                positions = strategy.get_all_positions()
+                for symbol, pos in list(positions.items()):
+                    md = self._market_data.get(symbol, {})
+                    current_price = md.get("price", 0)
+                    if current_price <= 0:
+                        continue
 
-            for symbol, order_info in list(pending_orders.items()):
-                try:
-                    # 잔고에서 체결 확인
-                    asset = symbol.replace("KRW-", "")
-                    balance = await self.exchange.get_balance(asset)
+                    exit_result = strategy.check_exit(symbol, current_price, now)
+                    if not exit_result:
+                        continue
 
-                    if balance and balance.total > 0:
-                        # 체결됨! 포지션 추적 시작
-                        signal = order_info.get("signal")
-                        filled_qty = balance.total
-                        avg_price = balance.avg_buy_price if balance.avg_buy_price > 0 else order_info["entry_price"]
+                    reason = exit_result["reason"]
+                    exit_type = exit_result.get("exit_type", "unknown")
 
-                        logger.info(
-                            "Dip pending order filled!",
+                    # PAPER 모드 체크
+                    if not self.mode_manager.should_execute_trades():
+                        logger.info("PAPER mode - skipping v3 exit", symbol=symbol, reason=reason)
+                        continue
+
+                    # Upbit 잔고에서 실제 수량 확인
+                    base = symbol.split("-")[-1]
+                    balance = await self.exchange.get_balance(base)
+                    sell_qty = balance.total if balance and balance.total > 0 else pos.quantity
+
+                    logger.info(
+                        "v3 exit signal",
+                        symbol=symbol,
+                        strategy=pos.strategy,
+                        reason=reason,
+                        exit_type=exit_type,
+                    )
+
+                    result = await self.exchange.place_order(
+                        symbol=symbol,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        quantity=sell_qty,
+                    )
+
+                    if result.success:
+                        fill_price = result.avg_price or current_price
+                        realized_pnl = (fill_price - pos.entry_price) * result.filled_qty
+
+                        # 전략에서 포지션 제거
+                        strategy.close_position(symbol)
+
+                        # PositionLedger 청산
+                        sell_fill = FillEvent(
+                            order_id=f"V3-SELL-{symbol}-{int(now.timestamp())}",
+                            exchange_order_id=result.exchange_order_id if hasattr(result, "exchange_order_id") else None,
+                            position_id=None,
                             symbol=symbol,
-                            filled_qty=filled_qty,
-                            avg_price=avg_price,
+                            strategy_id=pos.strategy,
+                            side="SELL",
+                            filled_quantity=result.filled_qty,
+                            fill_price=fill_price,
+                            fee=0.0,
+                            fee_asset="KRW",
+                            timestamp=now,
                         )
+                        await self.position_ledger.on_sell_fill(sell_fill)
 
-                        # 포지션 추적 시작 (signal=None 시 bid_ratio 기본값 사용)
-                        bid_ratio = signal.bid_strength if signal else 0.5
-                        self.dip_scalper.track_position(
-                            symbol=symbol,
-                            entry_price=avg_price,
-                            quantity=filled_qty,
-                            bid_ratio=bid_ratio,
-                        )
-
-                        # 미체결에서 제거
-                        self.dip_scalper.remove_pending_order(symbol, reason="filled")
-
-                        # 주문 상태 업데이트 (PENDING -> FILLED)
-                        self.add_order(
-                            symbol=symbol,
-                            strategy="DIP_SCALPER",
-                            side="BUY",
-                            order_type="LIMIT",
-                            quantity=filled_qty,
-                            price=avg_price,
-                            status="FILLED",
-                        )
-
-                        # 이벤트 기록
                         self.add_event(
                             level="INFO",
-                            event_type="DIP_SCALPER",
-                            message=f"Pending order filled: {symbol}",
+                            event_type="V3_EXIT",
+                            message=f"v3 exit: {symbol} ({exit_type})",
                             details={
-                                "entry_price": avg_price,
-                                "quantity": filled_qty,
-                                "wait_time_sec": (datetime.utcnow() - order_info["placed_at"]).total_seconds(),
+                                "strategy": pos.strategy,
+                                "reason": reason,
+                                "exit_type": exit_type,
+                                "quantity": result.filled_qty,
+                                "entry_price": pos.entry_price,
+                                "exit_price": fill_price,
+                                "pnl": realized_pnl,
                             },
+                        )
+
+                        pnl_pct = (fill_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+                        self.add_order(
+                            symbol=symbol,
+                            strategy=pos.strategy,
+                            side="SELL",
+                            order_type="MARKET",
+                            quantity=sell_qty,
+                            price=fill_price,
+                            status="FILLED",
+                            filled_qty=result.filled_qty,
+                            avg_fill_price=fill_price,
+                            realized_pnl=realized_pnl,
                         )
 
                         # Slack 알림
-                        await self._send_slack_notification(
-                            level=AlertLevel.INFO,
-                            title=f"급락 매수 체결: {symbol}",
-                            message=f"대기 후 체결!\n진입가: {avg_price:,.0f}원\n수량: {filled_qty:.8f}",
-                        )
-                    else:
-                        # 미체결 상태 유지 - 타임아웃 체크 (5분)
-                        elapsed = (datetime.utcnow() - order_info["placed_at"]).total_seconds()
-                        if elapsed > 300:  # 5분 초과
-                            logger.warning(
-                                "Dip pending order timeout, cancelling",
-                                symbol=symbol,
-                                elapsed_sec=elapsed,
-                            )
-                            # 주문 취소 시도
+                        if self.slack_notifier.is_enabled:
+                            pnl_emoji = ":moneybag:" if realized_pnl >= 0 else ":money_with_wings:"
+                            pnl_sign = "+" if realized_pnl >= 0 else ""
                             try:
-                                await self.exchange.cancel_order(symbol, order_info.get("order_id", ""))
+                                krw_balance = await self.exchange.get_balance("KRW")
+                                remaining_krw = krw_balance.available if krw_balance else 0
                             except Exception:
-                                pass
-                            self.dip_scalper.remove_pending_order(symbol, reason="timeout")
-
-                            self.add_event(
-                                level="WARNING",
-                                event_type="DIP_SCALPER",
-                                message=f"Pending order cancelled (timeout): {symbol}",
-                                details={"elapsed_sec": elapsed},
-                            )
-
-                except Exception as e:
-                    logger.warning(f"Failed to check pending order for {symbol}: {e}")
-
-        except Exception as e:
-            logger.error("Check dip pending orders error", error=str(e))
-
-    async def _cleanup_stale_pending_orders(self) -> None:
-        """
-        v2.3: 미체결 주문 자동 정리
-
-        Upbit에서 3분 이상 미체결 상태인 주문을 자동 취소
-        """
-        if not self._is_upbit:
-            return
-
-        try:
-            now = datetime.utcnow()
-            max_pending_seconds = 180  # 3분
-
-            # 1) Upbit 미체결 주문 조회 & 취소
-            open_orders = await self.exchange.get_open_orders()
-            cancelled_count = 0
-
-            for order in (open_orders or []):
-                try:
-                    order_id = order.get("uuid", "")
-                    symbol = order.get("market", "")
-                    created_at_str = order.get("created_at", "")
-                    side = order.get("side", "")
-                    price = float(order.get("price", 0) or 0)
-                    volume = float(order.get("volume", 0) or 0)
-                    remaining = float(order.get("remaining_volume", 0) or 0)
-
-                    if not order_id or not created_at_str:
-                        continue
-
-                    # 생성 시간 파싱 (ISO 8601)
-                    # Upbit: "2024-01-01T12:00:00+09:00"
-                    try:
-                        created_at = datetime.fromisoformat(created_at_str.replace("+09:00", ""))
-                    except Exception:
-                        continue
-
-                    elapsed_sec = (now - created_at).total_seconds()
-
-                    # 3분 초과 시 취소
-                    if elapsed_sec > max_pending_seconds:
-                        logger.warning(
-                            "Cancelling stale pending order",
-                            symbol=symbol,
-                            order_id=order_id,
-                            side=side,
-                            price=price,
-                            remaining=remaining,
-                            elapsed_sec=int(elapsed_sec),
-                        )
-
-                        # 주문 취소
-                        cancelled = await self.exchange.cancel_order(symbol, order_id)
-                        if cancelled:
-                            cancelled_count += 1
-
-                            # 이벤트 기록
-                            self.add_event(
-                                level="WARNING",
-                                event_type="ORDER_CLEANUP",
-                                message=f"Stale order cancelled: {symbol}",
-                                details={
-                                    "order_id": order_id,
-                                    "side": side,
-                                    "price": price,
-                                    "remaining_volume": remaining,
-                                    "elapsed_minutes": round(elapsed_sec / 60, 1),
-                                },
-                            )
-
-                            # Dip Scalper 미체결 추적에서도 제거
-                            if self.dip_scalper.has_pending_order(symbol):
-                                self.dip_scalper.remove_pending_order(symbol, reason="auto_cancelled")
-
-                except Exception as e:
-                    logger.warning(f"Failed to process pending order: {e}")
-
-            if cancelled_count > 0:
-                logger.info(
-                    "Stale pending orders cleaned up",
-                    cancelled_count=cancelled_count,
-                    total_pending=len(open_orders),
-                )
-
-            # v5.5: DB 유령 주문 정리 (exchange_order_id가 null인 오래된 PENDING 주문)
-            try:
-                from src.models.database import async_session, OrderModel
-                from src.models.schemas import OrderStatus
-                from sqlalchemy import select, and_
-
-                async with async_session() as session:
-                    # exchange_order_id가 null이고 PENDING 상태인 주문 조회
-                    stmt = select(OrderModel).where(
-                        and_(
-                            OrderModel.status == OrderStatus.PENDING,
-                            OrderModel.exchange_order_id == None,
-                        )
-                    )
-                    result = await session.execute(stmt)
-                    ghost_orders = result.scalars().all()
-
-                    ghost_cleaned = 0
-                    for order in ghost_orders:
-                        elapsed_sec = (now - order.created_at).total_seconds()
-
-                        # 3분 이상 경과한 유령 주문만 취소
-                        if elapsed_sec > max_pending_seconds:
-                            logger.warning(
-                                "Cancelling ghost order (no exchange_order_id)",
-                                symbol=order.symbol,
-                                strategy=order.strategy.value,
-                                elapsed_sec=int(elapsed_sec),
-                            )
-                            order.status = OrderStatus.CANCELED
-                            order.updated_at = now
-                            ghost_cleaned += 1
-
-                    if ghost_cleaned > 0:
-                        await session.commit()
-                        logger.info(
-                            "Ghost orders cleaned up",
-                            ghost_cleaned=ghost_cleaned,
-                        )
-
-            except Exception as e:
-                logger.warning("Ghost order cleanup failed", error=str(e))
-
-        except Exception as e:
-            logger.error("Cleanup stale pending orders error", error=str(e))
-
-    async def _restore_dip_pending_orders(self) -> None:
-        """서버 시작 시 Upbit 미체결 주문을 DIP_SCALPER pending_orders에 복구"""
-        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
-            return
-
-        try:
-            open_orders = await self.exchange.get_open_orders()
-            if not open_orders:
-                return
-
-            now = datetime.utcnow()
-            restored = 0
-            cancelled = 0
-
-            for order in open_orders:
-                try:
-                    order_id = order.get("uuid", "")
-                    symbol = order.get("market", "")
-                    side = order.get("side", "")
-                    price = float(order.get("price", 0) or 0)
-                    volume = float(order.get("remaining_volume", 0) or 0)
-                    created_at_str = order.get("created_at", "")
-
-                    # 매수 주문만 대상
-                    if side != "bid" or not symbol or not order_id:
-                        continue
-
-                    # DIP_SCALPER 주문인지 확인 (DB OrderModel에서 매치)
-                    try:
-                        from src.models.database import async_session as _async_session, OrderModel
-                        from sqlalchemy import select, and_
-                        async with _async_session() as session:
-                            stmt = select(OrderModel).where(
-                                and_(
-                                    OrderModel.symbol == symbol,
-                                    OrderModel.strategy == StrategyType.DIP_SCALPER,
-                                    OrderModel.status == "PENDING",
-                                )
-                            ).order_by(OrderModel.created_at.desc()).limit(1)
-                            result = await session.execute(stmt)
-                            db_order = result.scalar_one_or_none()
-
-                        if not db_order:
-                            continue  # DIP_SCALPER 주문 아님
-                    except Exception:
-                        continue
-
-                    # 생성 시간 파싱
-                    try:
-                        created_at = datetime.fromisoformat(created_at_str.replace("+09:00", ""))
-                    except Exception:
-                        created_at = now
-
-                    elapsed_sec = (now - created_at).total_seconds()
-
-                    if elapsed_sec > 300:  # 5분 초과 → 취소
-                        try:
-                            await self.exchange.cancel_order(symbol, order_id)
-                            cancelled += 1
-                            logger.info(
-                                "Stale DIP pending order cancelled on restore",
-                                symbol=symbol,
-                                order_id=order_id,
-                                elapsed_sec=int(elapsed_sec),
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        # 5분 이내 → pending_orders에 재등록
-                        self.dip_scalper._pending_orders[symbol] = {
-                            "order_id": order_id,
-                            "entry_price": price,
-                            "quantity": volume,
-                            "signal": None,  # 복구 시 signal 없음
-                            "placed_at": created_at,
-                            "check_count": 0,
-                        }
-                        restored += 1
-                        logger.info(
-                            "DIP pending order restored",
-                            symbol=symbol,
-                            order_id=order_id,
-                            price=price,
-                            elapsed_sec=int(elapsed_sec),
-                        )
-
-                except Exception as e:
-                    logger.warning(f"Failed to process pending order for restore: {e}")
-
-            if restored > 0 or cancelled > 0:
-                logger.info(
-                    "DIP pending orders restore complete",
-                    restored=restored,
-                    cancelled=cancelled,
-                )
-
-        except Exception as e:
-            logger.error("Restore dip pending orders error", error=str(e))
-
-    async def _restore_dip_cooldowns(self) -> None:
-        """서버 시작 시 최근 청산된 DIP_SCALPER 포지션에서 쿨다운 복원"""
-        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
-            return
-
-        try:
-            from src.models.database import async_session as _async_session, PositionLedgerModel
-            from sqlalchemy import select, and_
-            from datetime import timedelta
-
-            cooldown_window = datetime.utcnow() - timedelta(minutes=self.dip_scalper.cooldown_minutes)
-
-            async with _async_session() as session:
-                stmt = select(PositionLedgerModel).where(
-                    and_(
-                        PositionLedgerModel.strategy_id == "DIP_SCALPER",
-                        PositionLedgerModel.status == "CLOSED",
-                        PositionLedgerModel.last_fill_time >= cooldown_window,
-                    )
-                )
-                result = await session.execute(stmt)
-                recent_closed = result.scalars().all()
-
-            if not recent_closed:
-                return
-
-            restored = 0
-            for pos in recent_closed:
-                self.dip_scalper._last_exit[pos.symbol] = pos.last_fill_time
-                restored += 1
-
-            logger.info(
-                "DIP cooldowns restored",
-                restored=restored,
-                symbols=[p.symbol for p in recent_closed],
-            )
-
-        except Exception as e:
-            logger.error("Restore dip cooldowns error", error=str(e))
-
-    async def _restore_dip_stats(self) -> None:
-        """서버 시작 시 오늘자 DIP_SCALPER 통계 복원"""
-        if not (self._is_upbit and self.dip_scalper and self.dip_scalper.is_enabled()):
-            return
-
-        try:
-            from src.models.database import async_session as _async_session, PositionLedgerModel
-            from sqlalchemy import select, and_
-            import json as _json
-
-            # 오늘 00:00 UTC
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-
-            async with _async_session() as session:
-                stmt = select(PositionLedgerModel).where(
-                    and_(
-                        PositionLedgerModel.strategy_id == "DIP_SCALPER",
-                        PositionLedgerModel.status == "CLOSED",
-                        PositionLedgerModel.last_fill_time >= today_start,
-                    )
-                )
-                result = await session.execute(stmt)
-                today_closed = result.scalars().all()
-
-            if not today_closed:
-                return
-
-            total_trades = len(today_closed)
-            winning = 0
-            losing = 0
-            total_pnl_pct = 0.0
-
-            for pos in today_closed:
-                metadata = {}
-                if pos.metadata_json:
-                    try:
-                        metadata = _json.loads(pos.metadata_json)
-                    except Exception:
-                        pass
-
-                pnl_pct = metadata.get("final_pnl_pct", 0.0)
-                total_pnl_pct += pnl_pct
-                if pnl_pct >= 0:
-                    winning += 1
-                else:
-                    losing += 1
-
-            self.dip_scalper._stats["total_trades"] += total_trades
-            self.dip_scalper._stats["winning_trades"] += winning
-            self.dip_scalper._stats["losing_trades"] += losing
-            self.dip_scalper._stats["total_pnl_pct"] += total_pnl_pct
-
-            logger.info(
-                "DIP stats restored",
-                total_trades=total_trades,
-                winning=winning,
-                losing=losing,
-                total_pnl_pct=f"{total_pnl_pct:.2%}",
-            )
-
-        except Exception as e:
-            logger.error("Restore dip stats error", error=str(e))
-
-    async def _near_trigger_monitor_loop(self) -> None:
-        """
-        v2.3: 근접 종목 1초 모니터링 루프
-
-        급락 기준 75% 이상 근접한 종목을 1초마다 체크하여
-        기준 도달 시 즉시 시그널 발생
-        """
-        logger.info("Near-trigger monitor loop started")
-
-        while self._running:
-            try:
-                await asyncio.sleep(1)  # 1초 간격
-
-                if not self.dip_scalper._enabled:
-                    continue
-
-                near_symbols = self.dip_scalper.get_near_trigger_symbols()
-                if not near_symbols:
-                    continue
-
-                # 근접 종목들의 실시간 가격 체크
-                for symbol, info in near_symbols.items():
-                    try:
-                        # 현재 시세 조회
-                        ticker = await self.exchange.get_ticker(symbol)
-                        if not ticker:
-                            continue
-
-                        current_price = ticker.get("trade_price", 0)
-                        if current_price <= 0:
-                            continue
-
-                        # 이전 가격 대비 변화율 계산 (실시간)
-                        # 캔들 대신 마지막 추적 가격 사용
-                        last_price = info.get("price", current_price)
-                        if last_price <= 0:
-                            continue
-
-                        # 실시간 변화율 (추적 시작 가격 대비)
-                        realtime_change = (current_price - last_price) / last_price
-                        threshold = info.get("threshold", -0.02)
-
-                        # 급락 기준 도달 체크
-                        total_change = info.get("change", 0) + realtime_change
-                        if total_change <= threshold:
-                            logger.info(
-                                "Near-trigger symbol crossed threshold!",
-                                symbol=symbol,
-                                total_change=f"{total_change:.2%}",
-                                threshold=f"{threshold:.2%}",
-                                realtime_change=f"{realtime_change:.2%}",
-                            )
-
-                            # 즉시 시그널 생성 및 실행
-                            md = self._market_data.get(symbol, {})
-                            atr_pct = info.get("atr_pct", 0.02)
-
-                            # 호가창 데이터 조회
-                            orderbook = await self.exchange.get_orderbook(symbol)
-                            if orderbook:
-                                ob_units = orderbook.get("orderbook_units", [])
-                                bid_volume = sum(u.get("bid_size", 0) for u in ob_units[:5])
-                                ask_volume = sum(u.get("ask_size", 0) for u in ob_units[:5])
-                            else:
-                                bid_volume = 0
-                                ask_volume = 0
-
-                            # 시그널 생성을 위한 데이터 구성
-                            market_data_item = {
-                                "symbol": symbol,
-                                "price": current_price,
-                                "change_1m": total_change if self.dip_scalper.candle_interval == 1 else md.get("change_1m", 0),
-                                "change_3m": total_change if self.dip_scalper.candle_interval == 3 else md.get("change_3m", 0),
-                                "atr_pct": atr_pct,
-                                "volume_24h_krw": md.get("volume_24h", 0),
-                                "rvol": md.get("rvol", 1.0),
-                                "bid_volume": bid_volume,
-                                "ask_volume": ask_volume,
-                            }
-
-                            # 시그널 스캔 (단일 종목)
-                            signals = self.dip_scalper.scan_for_dips([market_data_item])
-
-                            if signals:
-                                for sig in signals:
-                                    # 현재 자본금 조회
-                                    krw_balance = await self.exchange.get_balance("KRW")
-                                    current_equity = krw_balance.total if krw_balance else 0
-
-                                    await self._execute_dip_signal(sig, md, None, current_equity)
-
-                                    self.add_event(
-                                        level="INFO",
-                                        event_type="DIP_SCALPER",
-                                        message=f"Near-trigger executed: {symbol}",
-                                        details={
-                                            "total_change": total_change,
-                                            "threshold": threshold,
-                                            "trigger_mode": "1sec_monitor",
-                                        },
-                                    )
-
-                    except Exception as e:
-                        logger.debug(f"Near-trigger check error for {symbol}: {e}")
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Near-trigger monitor loop error", error=str(e))
-                await asyncio.sleep(5)  # 에러 시 5초 대기
-
-        logger.info("Near-trigger monitor loop stopped")
-
-    async def _execute_signal(self, signal, market_data: dict, risk_decision=None) -> None:
-        """시그널 실행 - 실제 주문 발행 (Risk Overlay 적용)"""
-        try:
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="STRATEGY",
-                message=f"Signal: {signal.strategy.value} {signal.signal_type.value} {signal.symbol}",
-                details={
-                    "side": signal.side.value,
-                    "reason": signal.reason,
-                    "confidence": signal.confidence,
-                },
-            )
-
-            logger.info(
-                "Signal generated",
-                strategy=signal.strategy.value,
-                signal_type=signal.signal_type.value,
-                symbol=signal.symbol,
-                side=signal.side.value,
-                reason=signal.reason,
-            )
-
-            # 잔고 확인
-            if self._is_upbit:
-                # Upbit: KRW 잔고 사용
-                krw_balance = await self.exchange.get_balance("KRW")
-                available_capital = krw_balance.free if krw_balance else 0
-            else:
-                perp_balance = await self.perp_exchange.get_balance("USDT")
-                perp_free = perp_balance.free if perp_balance else 0
-
-                # FUTURES_ONLY 모드면 Futures 잔고만 사용
-                if settings.futures_only_mode:
-                    available_capital = perp_free
-                else:
-                    spot_balance = await self.spot_exchange.get_balance("USDT")
-                    spot_free = spot_balance.free if spot_balance else 0
-                    available_capital = spot_free + perp_free
-
-            # Risk Overlay 사이징 배수 적용
-            if risk_decision:
-                available_capital *= risk_decision.sizing_multiplier
-                if risk_decision.sizing_multiplier < 1.0:
-                    logger.info(
-                        "Capital adjusted by risk overlay",
-                        original=available_capital / risk_decision.sizing_multiplier,
-                        adjusted=available_capital,
-                        multiplier=risk_decision.sizing_multiplier,
-                    )
-
-            # 최소 자본 체크
-            min_capital = 10000 if self._is_upbit else 100  # Upbit: 1만원, Binance: $100
-            if available_capital < min_capital:
-                logger.warning("Insufficient capital", available=available_capital, min_required=min_capital)
-                return
-
-            # Core 전략 잔고 체크 (Upbit은 KRW, Binance는 Spot USDT)
-            if signal.strategy == StrategyType.CORE:
-                if self._is_upbit:
-                    # Upbit: Core는 Defensive Core (현금 비중 관리)
-                    # 별도의 잔고 체크 없음 - available_capital이 KRW 잔고
-                    pass
-                elif not settings.futures_only_mode:
-                    spot_balance = await self.spot_exchange.get_balance("USDT")
-                    spot_free = spot_balance.free if spot_balance else 0
-
-                    spot_price = market_data.get("spot_price", 0)
-                    if spot_price <= 0:
-                        logger.warning("Invalid spot price", symbol=signal.symbol)
-                        return
-
-                    estimated_order_value = (available_capital * 0.1) * 1.1
-
-                    if spot_free < estimated_order_value:
-                        logger.warning(
-                            "Insufficient Spot balance for Core strategy",
-                            symbol=signal.symbol,
-                            spot_free=spot_free,
-                            estimated_needed=estimated_order_value,
-                        )
-                        self.add_event(
-                            level="WARNING",
-                            event_type="RISK",
-                            message=f"Skipped Core entry: insufficient Spot balance ({spot_free:.2f} USDT)",
-                            details={
-                                "symbol": signal.symbol,
-                                "spot_balance": spot_free,
-                                "needed": estimated_order_value,
-                            },
-                        )
-                        return
-
-            # 포지션 사이즈 계산
-            symbol = signal.symbol
-            current_price = market_data.get("perp_price") or market_data.get("price", 0)
-
-            if signal.strategy == StrategyType.CORE:
-                # Core 전략 비활성화 - Satellite 로직 사용
-                quantity = self.satellite_strategy.get_position_size(signal, available_capital)
-            else:
-                quantity = self.satellite_strategy.get_position_size(signal, available_capital)
-
-            # 최소 notional 보장
-            if self._is_upbit:
-                # Upbit: 최소 5000 KRW
-                MIN_NOTIONAL = 5500  # 5000 + 여유분
-            else:
-                # Binance Futures: 최소 100 USDT
-                MIN_NOTIONAL = 105
-
-            if current_price > 0:
-                min_quantity = MIN_NOTIONAL / current_price
-                if quantity < min_quantity:
-                    logger.info(
-                        "Adjusting quantity to meet min notional",
-                        original=quantity,
-                        min_required=min_quantity,
-                        min_notional=MIN_NOTIONAL,
-                    )
-                    quantity = min_quantity
-
-            if quantity <= 0:
-                logger.warning("Position size too small", quantity=quantity)
-                return
-
-            # 자본 대비 최대 한도 체크 (User Mode 설정 적용)
-            mode_config = self.mode_manager.get_config()
-            max_position_pct = mode_config.max_position_pct  # SAFE:3%, BALANCED:5%, AGGRESSIVE:8%
-            max_notional = available_capital * max_position_pct
-            max_quantity = max_notional / current_price if current_price > 0 else 0
-            if quantity > max_quantity and max_quantity > 0:
-                logger.info(
-                    "Capping quantity to max exposure (User Mode)",
-                    original=quantity,
-                    capped=max_quantity,
-                    mode=self.mode_manager.effective_mode.value,
-                    max_pct=max_position_pct,
-                )
-                quantity = max_quantity
-
-            # Notional 최종 체크
-            notional = quantity * current_price
-            min_notional_final = 5000 if self._is_upbit else 100
-            if notional < min_notional_final:
-                logger.warning(
-                    "Notional too small after adjustments",
-                    notional=notional,
-                    quantity=quantity,
-                    min_required=min_notional_final,
-                )
-                return
-
-            # 심볼별 최소 수량 및 정밀도 처리
-            pre_round_qty = quantity
-            quantity = self._round_quantity(symbol, quantity)
-
-            logger.info(
-                "Quantity after rounding",
-                symbol=symbol,
-                pre_round=pre_round_qty,
-                post_round=quantity,
-                current_price=current_price,
-                notional=quantity * current_price if current_price > 0 else 0,
-            )
-
-            if quantity <= 0:
-                logger.warning("Quantity is zero after rounding", symbol=symbol)
-                return
-
-            # PAPER 모드 체크 - 실제 거래 스킵
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping actual trade execution",
-                    symbol=symbol,
-                    strategy=signal.strategy.value,
-                    side=signal.side.value,
-                    quantity=quantity,
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="PAPER",
-                    message=f"[PAPER] Would have {signal.side.value}: {symbol}",
-                    details={
-                        "strategy": signal.strategy.value,
-                        "quantity": quantity,
-                        "price": current_price,
-                        "notional": quantity * current_price,
-                    },
-                )
-                return
-
-            # P0: ExposureManager 노출 체크 (Satellite/Core 포함)
-            if signal.strategy != StrategyType.ATTACK:  # Attack은 별도 처리
-                order_amount = quantity * current_price
-
-                # 잔고 조회 (Upbit)
-                if self._is_upbit:
-                    krw_bal = await self.exchange.get_balance("KRW")
-                    total_equity = krw_bal.total if krw_bal else 0
-                    available_cash = krw_bal.free if krw_bal else 0
-                else:
-                    total_equity = available_capital
-                    available_cash = available_capital
-
-                exposure_check = await self.exposure_manager.can_open_position(
-                    symbol=symbol,
-                    strategy_id=signal.strategy.value,
-                    order_amount=order_amount,
-                    total_equity=total_equity,
-                    available_cash=available_cash,
-                )
-
-                if not exposure_check.allowed:
-                    logger.warning(
-                        "Entry blocked by ExposureManager",
-                        symbol=symbol,
-                        strategy=signal.strategy.value,
-                        reason=exposure_check.reason,
-                        current_positions=exposure_check.current_positions,
-                    )
-                    self.add_event(
-                        level="WARNING",
-                        event_type="FILTER",
-                        message=f"{symbol} 진입 차단: {exposure_check.reason}",
-                        details={
-                            "symbol": symbol,
-                            "strategy": signal.strategy.value,
-                            "filter_type": "EXPOSURE_LIMIT",
-                            "order_amount": order_amount,
-                        },
-                    )
-                    self.increment_filter_stat("exposure_limit")
-                    return
-
-                # 조정된 금액으로 수량 재계산
-                if exposure_check.adjusted_amount < order_amount:
-                    logger.info(
-                        "Order amount adjusted by ExposureManager",
-                        original=order_amount,
-                        adjusted=exposure_check.adjusted_amount,
-                        reason=exposure_check.reason,
-                    )
-                    quantity = exposure_check.adjusted_amount / current_price
-                    quantity = self._round_quantity(symbol, quantity)
-                    if quantity <= 0:
-                        logger.warning("Quantity zero after exposure adjustment")
-                        return
-
-            # Core 전략
-            if signal.strategy == StrategyType.CORE:
-                if self._is_upbit:
-                    # Upbit: Defensive Core (현물 매수/매도)
-                    await self._execute_upbit_spot_entry(signal, market_data, quantity)
-                else:
-                    # Binance: 현물 매수 + 선물 매도 (캐시앤캐리)
-                    await self._execute_core_entry(signal, market_data, quantity)
-            # Satellite 전략
-            else:
-                if self._is_upbit:
-                    # Upbit: 현물 롱 only
-                    if signal.side == OrderSide.BUY:
-                        await self._execute_upbit_spot_entry(signal, market_data, quantity)
-                    else:
-                        logger.info("Upbit does not support short selling, skipping SELL signal")
-                else:
-                    # Binance: 선물 롱/숏
-                    await self._execute_satellite_entry(signal, market_data, quantity)
-
-        except Exception as e:
-            logger.error("Signal execution error", error=str(e))
-            self.add_event(
-                level="ERROR",
-                event_type="ORDER",
-                message=f"Order execution failed: {signal.symbol}",
-                details={"error": str(e)},
-            )
-
-    async def _execute_core_entry(self, signal, market_data: dict, quantity: float) -> None:
-        """Core 전략 진입
-
-        futures_only_mode:
-        - True (테스트): Futures Long + Futures Short (같은 심볼, 헤지 테스트용)
-        - False (Live): Spot Buy + Futures Short (실제 캐시앤캐리)
-        """
-        symbol = signal.symbol
-
-        # Futures-only 모드 체크
-        if settings.futures_only_mode:
-            await self._execute_core_entry_futures_only(signal, market_data, quantity)
-        else:
-            await self._execute_core_entry_spot_perp(signal, market_data, quantity)
-
-    async def _execute_core_entry_futures_only(self, signal, market_data: dict, quantity: float) -> None:
-        """Core 전략 진입 - Futures Only 모드 (테스트용)
-
-        Spot 대신 Futures Long을 사용하여 헤지 로직 테스트
-        실제로는 Long + Short = 포지션 상쇄되지만, 로직 검증용
-        """
-        symbol = signal.symbol
-        perp_qty = self._round_quantity_for_perp(symbol, quantity)
-
-        if perp_qty <= 0:
-            logger.warning("Perp quantity too small", symbol=symbol)
-            return
-
-        logger.info(
-            "Executing Core entry (FUTURES_ONLY mode)",
-            symbol=symbol,
-            quantity=perp_qty,
-        )
-
-        # 1. Futures Long (Spot 대체)
-        long_result = await self.perp_exchange.place_order(
-            symbol=symbol,
-            side=OrderSide.BUY,
-            order_type=OrderType.MARKET,
-            quantity=perp_qty,
-        )
-
-        if not long_result.success:
-            logger.error("Futures Long failed", symbol=symbol, error=long_result.error)
-            self.add_event(
-                level="ERROR",
-                event_type="ORDER",
-                message=f"Futures Long failed (FUTURES_ONLY): {symbol}",
-                details={"error": long_result.error},
-            )
-            return
-
-        logger.info(
-            "Futures Long filled",
-            symbol=symbol,
-            filled_qty=long_result.filled_qty,
-            avg_price=long_result.avg_price,
-        )
-
-        # Long 진입 주문 기록
-        self.add_order(
-            symbol=symbol,
-            strategy="CORE",
-            side="BUY",
-            order_type="MARKET",
-            quantity=perp_qty,
-            price=long_result.avg_price,
-            status="FILLED" if long_result.filled_qty > 0 else "REJECTED",
-            filled_qty=long_result.filled_qty,
-            avg_fill_price=long_result.avg_price,
-            exchange_order_id=long_result.exchange_order_id,
-        )
-
-        # 2. Futures Short (헤지)
-        short_result = await self.perp_exchange.place_order(
-            symbol=symbol,
-            side=OrderSide.SELL,
-            order_type=OrderType.MARKET,
-            quantity=perp_qty,
-        )
-
-        if not short_result.success:
-            logger.error(
-                "Futures Short hedge failed - SAFE MODE",
-                symbol=symbol,
-                error=short_result.error,
-            )
-            self.add_event(
-                level="CRITICAL",
-                event_type="RISK",
-                message=f"Hedge failed! Long opened but Short failed: {symbol}",
-                details={
-                    "long_filled": long_result.filled_qty,
-                    "error": short_result.error,
-                },
-            )
-            await self.risk_engine.pause("Hedge failure in FUTURES_ONLY mode")
-            return
-
-        logger.info(
-            "Futures Short hedge completed",
-            symbol=symbol,
-            filled_qty=short_result.filled_qty,
-            avg_price=short_result.avg_price,
-        )
-
-        # Short 헤지 주문 기록
-        self.add_order(
-            symbol=symbol,
-            strategy="CORE",
-            side="SELL",
-            order_type="MARKET",
-            quantity=perp_qty,
-            price=short_result.avg_price,
-            status="FILLED" if short_result.filled_qty > 0 else "REJECTED",
-            filled_qty=short_result.filled_qty,
-            avg_fill_price=short_result.avg_price,
-            exchange_order_id=short_result.exchange_order_id,
-        )
-
-        self.add_event(
-            level="INFO",
-            event_type="ORDER",
-            message=f"Core entry completed (FUTURES_ONLY): {symbol}",
-            details={
-                "long_qty": long_result.filled_qty,
-                "long_price": long_result.avg_price,
-                "short_qty": short_result.filled_qty,
-                "short_price": short_result.avg_price,
-                "mode": "FUTURES_ONLY",
-            },
-        )
-
-    async def _execute_core_entry_spot_perp(self, signal, market_data: dict, quantity: float) -> None:
-        """Core 전략 진입 - Spot + Perp 모드 (Live용)"""
-        symbol = signal.symbol
-
-        logger.info(
-            "Executing Core entry (SPOT+PERP mode)",
-            symbol=symbol,
-            quantity=quantity,
-        )
-
-        # 1. 현물 시장가 매수
-        spot_result = await self.spot_exchange.place_order(
-            symbol=symbol,
-            side=OrderSide.BUY,
-            order_type=OrderType.MARKET,
-            quantity=quantity,
-        )
-
-        if not spot_result.success:
-            logger.error("Spot order failed", symbol=symbol, error=spot_result.error)
-            self.add_event(
-                level="ERROR",
-                event_type="ORDER",
-                message=f"Spot buy failed: {symbol}",
-                details={"error": spot_result.error},
-            )
-            return
-
-        logger.info(
-            "Spot order filled",
-            symbol=symbol,
-            filled_qty=spot_result.filled_qty,
-            avg_price=spot_result.avg_price,
-        )
-
-        # Spot 매수 진입 주문 기록
-        self.add_order(
-            symbol=symbol,
-            strategy="CORE",
-            side="BUY",
-            order_type="MARKET",
-            quantity=quantity,
-            price=spot_result.avg_price,
-            status="FILLED" if spot_result.filled_qty > 0 else "REJECTED",
-            filled_qty=spot_result.filled_qty,
-            avg_fill_price=spot_result.avg_price,
-            exchange_order_id=spot_result.exchange_order_id,
-        )
-
-        # 2. 선물 시장가 매도 (숏)
-        perp_qty = self._round_quantity_for_perp(symbol, spot_result.filled_qty)
-
-        if perp_qty <= 0:
-            logger.error("Perp quantity too small after rounding", original=spot_result.filled_qty)
-            await self.risk_engine.pause("Hedge failed - perp quantity too small")
-            return
-
-        perp_result = await self.perp_exchange.place_order(
-            symbol=symbol,
-            side=OrderSide.SELL,
-            order_type=OrderType.MARKET,
-            quantity=perp_qty,
-        )
-
-        if not perp_result.success:
-            logger.error(
-                "Perp hedge failed - SAFE MODE TRIGGERED",
-                symbol=symbol,
-                error=perp_result.error,
-            )
-            self.add_event(
-                level="CRITICAL",
-                event_type="RISK",
-                message=f"Hedge failed! Spot bought but perp sell failed: {symbol}",
-                details={
-                    "spot_filled": spot_result.filled_qty,
-                    "error": perp_result.error,
-                },
-            )
-            await self.risk_engine.pause("Hedge failure - spot bought without perp hedge")
-            return
-
-        logger.info(
-            "Perp hedge completed",
-            symbol=symbol,
-            filled_qty=perp_result.filled_qty,
-            avg_price=perp_result.avg_price,
-        )
-
-        # Perp 매도 헤지 주문 기록
-        self.add_order(
-            symbol=symbol,
-            strategy="CORE",
-            side="SELL",
-            order_type="MARKET",
-            quantity=perp_qty,
-            price=perp_result.avg_price,
-            status="FILLED" if perp_result.filled_qty > 0 else "REJECTED",
-            filled_qty=perp_result.filled_qty,
-            avg_fill_price=perp_result.avg_price,
-            exchange_order_id=perp_result.exchange_order_id,
-        )
-
-        self.add_event(
-            level="INFO",
-            event_type="ORDER",
-            message=f"Core entry completed: {symbol}",
-            details={
-                "spot_qty": spot_result.filled_qty,
-                "spot_price": spot_result.avg_price,
-                "perp_qty": perp_result.filled_qty,
-                "perp_price": perp_result.avg_price,
-            },
-        )
-
-    async def _execute_satellite_entry(self, signal, market_data: dict, quantity: float) -> None:
-        """Satellite 전략 진입 - 선물만"""
-        symbol = signal.symbol
-        side = signal.side
-
-        logger.info(
-            "Executing Satellite entry",
-            symbol=symbol,
-            side=side.value,
-            quantity=quantity,
-        )
-
-        # 선물 시장가 주문
-        result = await self.perp_exchange.place_order(
-            symbol=symbol,
-            side=side,
-            order_type=OrderType.MARKET,
-            quantity=quantity,
-        )
-
-        if not result.success:
-            logger.error("Satellite order failed", symbol=symbol, error=result.error)
-            self.add_event(
-                level="ERROR",
-                event_type="ORDER",
-                message=f"Satellite {side.value} failed: {symbol}",
-                details={"error": result.error},
-            )
-            return
-
-        logger.info(
-            "Satellite order filled",
-            symbol=symbol,
-            side=side.value,
-            filled_qty=result.filled_qty,
-            avg_price=result.avg_price,
-        )
-
-        # Satellite 진입 주문 기록
-        self.add_order(
-            symbol=symbol,
-            strategy="SATELLITE",
-            side=side.value,
-            order_type="MARKET",
-            quantity=quantity,
-            price=result.avg_price,
-            status="FILLED" if result.filled_qty > 0 else "REJECTED",
-            filled_qty=result.filled_qty,
-            avg_fill_price=result.avg_price,
-            exchange_order_id=result.exchange_order_id,
-        )
-
-        # Position State Machine에 등록
-        atr_5m = self.candle_manager.calc_atr(symbol, "5m", 14) or 0
-        if atr_5m > 0:
-            self.position_state_machine.create_position(
-                symbol=symbol,
-                side="LONG" if side == OrderSide.BUY else "SHORT",
-                entry_price=result.avg_price,
-                quantity=result.filled_qty,
-                atr_5m=atr_5m,
-            )
-            logger.info(
-                "Position registered with PSM",
-                symbol=symbol,
-                side="LONG" if side == OrderSide.BUY else "SHORT",
-                atr=atr_5m,
-            )
-
-        self.add_event(
-            level="INFO",
-            event_type="ORDER",
-            message=f"Satellite {side.value} completed: {symbol}",
-            details={
-                "quantity": result.filled_qty,
-                "price": result.avg_price,
-            },
-        )
-
-    async def _execute_upbit_spot_entry(self, signal, market_data: dict, quantity: float) -> None:
-        """Upbit 현물 진입 (Core/Satellite 공용)"""
-        symbol = signal.symbol
-        side = signal.side
-
-        # Upbit은 롱 only - 매도는 청산용으로만
-        if side == OrderSide.SELL:
-            logger.info("Upbit SELL order - treating as position close")
-
-        logger.info(
-            "Executing Upbit spot entry",
-            symbol=symbol,
-            side=side.value,
-            quantity=quantity,
-            strategy=signal.strategy.value,
-        )
-
-        # 시장가 주문 (Upbit은 매수 시 금액 기준)
-        if side == OrderSide.BUY:
-            # 매수: 금액 기준으로 주문
-            current_price = market_data.get("price", 0)
-            order_amount = quantity * current_price  # KRW 금액
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=side,
-                order_type=OrderType.MARKET,
-                quantity=order_amount,  # KRW 금액
-            )
-        else:
-            # 매도: 수량 기준으로 주문
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=side,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-            )
-
-        if not result.success:
-            logger.error("Upbit order failed", symbol=symbol, error=result.error)
-            self.add_event(
-                level="ERROR",
-                event_type="ORDER",
-                message=f"Upbit {side.value} failed: {symbol}",
-                details={"error": result.error},
-            )
-            return
-
-        logger.info(
-            "Upbit order filled",
-            symbol=symbol,
-            side=side.value,
-            filled_qty=result.filled_qty,
-            avg_price=result.avg_price,
-        )
-
-        # 주문 기록
-        self.add_order(
-            symbol=symbol,
-            strategy=signal.strategy.value,
-            side=side.value,
-            order_type="MARKET",
-            quantity=quantity,
-            price=result.avg_price,
-            status="FILLED" if result.filled_qty > 0 else "REJECTED",
-            filled_qty=result.filled_qty,
-            avg_fill_price=result.avg_price,
-            exchange_order_id=result.exchange_order_id,
-        )
-
-        # P0: 단일 진실 원장에 체결 기록
-        if result.filled_qty > 0:
-            current_price = market_data.get("price", result.avg_price)
-            atr_5m = current_price * 0.01  # 1% as temp ATR
-            initial_stop = current_price - (atr_5m * 2.0) if side == OrderSide.BUY else None
-
-            fill_event = FillEvent(
-                order_id=result.order_id or str(result.exchange_order_id),
-                exchange_order_id=result.exchange_order_id or "",
-                position_id=None,  # 신규 포지션
-                symbol=symbol,
-                strategy_id=signal.strategy.value,
-                side="BUY" if side == OrderSide.BUY else "SELL",
-                filled_quantity=result.filled_qty,
-                fill_price=result.avg_price,
-                fee=result.commission or 0,
-                fee_asset="KRW",
-                timestamp=datetime.utcnow(),
-                requested_price=current_price,
-                spread_bps_at_fill=0,  # TODO: 호가창에서 계산
-                initial_stop_price=initial_stop,
-            )
-
-            logger.info(
-                "Created FillEvent",
-                symbol=symbol,
-                strategy_id=signal.strategy.value,
-                side=side.value,
-                qty=result.filled_qty,
-                price=result.avg_price,
-            )
-
-            try:
-                if side == OrderSide.BUY:
-                    await self.position_ledger.on_buy_fill(fill_event)
-                else:
-                    await self.position_ledger.on_sell_fill(fill_event)
-                logger.info(
-                    "Fill recorded to PositionLedger",
-                    symbol=symbol,
-                    side=side.value,
-                    qty=result.filled_qty,
-                )
-            except Exception as e:
-                logger.error("Failed to record fill to ledger", error=str(e))
-
-        # Satellite의 경우 Position State Machine에 등록
-        if signal.strategy == StrategyType.SATELLITE and side == OrderSide.BUY:
-            # Upbit용 ATR 계산 (캔들 데이터 필요)
-            atr_5m = 0  # TODO: Upbit 캔들 기반 ATR 계산
-            if result.avg_price > 0:
-                # 가격의 1%를 임시 ATR로 사용
-                atr_5m = result.avg_price * 0.01
-
-            if atr_5m > 0:
-                self.position_state_machine.create_position(
-                    symbol=symbol,
-                    side="LONG",
-                    entry_price=result.avg_price,
-                    quantity=result.filled_qty,
-                    atr_5m=atr_5m,
-                )
-                logger.info(
-                    "Upbit position registered with PSM",
-                    symbol=symbol,
-                    side="LONG",
-                    atr=atr_5m,
-                )
-
-        self.add_event(
-            level="INFO",
-            event_type="ORDER",
-            message=f"Upbit {signal.strategy.value} {side.value} completed: {symbol}",
-            details={
-                "quantity": result.filled_qty,
-                "price": result.avg_price,
-            },
-        )
-
-    async def _execute_attack_signal(self, signal, market_data: dict, risk_decision=None) -> None:
-        """Attack 시그널 실행 (Upbit 전용)"""
-        try:
-            symbol = signal.symbol
-            current_price = market_data.get("price", 0)
-            metadata = signal.metadata or {}
-
-            logger.info(
-                "Executing Attack signal",
-                symbol=symbol,
-                level=metadata.get("attack_level"),
-                score=metadata.get("attack_score"),
-                tranche=metadata.get("tranche"),
-                quantity=signal.quantity,
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="ATTACK",
-                message=f"Attack entry: {symbol} L{metadata.get('attack_level', 0)}",
-                details={
-                    "score": metadata.get("attack_score"),
-                    "tranche": metadata.get("tranche"),
-                    "quantity": signal.quantity,
-                    "stop_price": metadata.get("stop_price"),
-                },
-            )
-
-            # 매수 금액 계산 (Upbit은 금액 기준)
-            order_amount = signal.quantity * current_price
-
-            # 최소 주문 금액 체크
-            if order_amount < 5000:
-                logger.warning("Attack order too small", amount=order_amount)
-                return
-
-            # P2: ExposureManager 노출 체크
-            balance = await self.exchange.get_balance()
-            total_equity = balance.total if balance else 0
-            available_cash = balance.free if balance else 0
-
-            exposure_check = await self.exposure_manager.can_open_position(
-                symbol=symbol,
-                strategy_id="ATTACK",
-                order_amount=order_amount,
-                total_equity=total_equity,
-                available_cash=available_cash,
-            )
-
-            if not exposure_check.allowed:
-                logger.warning(
-                    "Attack entry blocked by ExposureManager",
-                    symbol=symbol,
-                    reason=exposure_check.reason,
-                    current_exposure=exposure_check.current_exposure,
-                )
-                self.add_event(
-                    level="WARNING",
-                    event_type="FILTER",
-                    message=f"{symbol} Attack 차단: {exposure_check.reason}",
-                    details={
-                        "symbol": symbol,
-                        "strategy": "ATTACK",
-                        "filter_type": "EXPOSURE_LIMIT",
-                        "order_amount": order_amount,
-                    },
-                )
-                self.increment_filter_stat("exposure_limit")
-                return
-
-            # 조정된 금액 사용
-            if exposure_check.adjusted_amount < order_amount:
-                logger.info(
-                    "Attack order amount adjusted",
-                    original=order_amount,
-                    adjusted=exposure_check.adjusted_amount,
-                    reason=exposure_check.reason,
-                )
-                order_amount = exposure_check.adjusted_amount
-
-            # 시장가 매수
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=OrderType.MARKET,
-                quantity=order_amount,  # KRW 금액
-            )
-
-            if not result.success:
-                logger.error("Attack order failed", symbol=symbol, error=result.error)
-                self.add_event(
-                    level="ERROR",
-                    event_type="ATTACK",
-                    message=f"Attack buy failed: {symbol}",
-                    details={"error": result.error},
-                )
-                return
-
-            # 체결 수량/가격이 0이면 잔고에서 확인
-            filled_qty = result.filled_qty
-            avg_price = result.avg_price
-
-            if filled_qty <= 0 or avg_price <= 0:
-                # 주문은 성공했지만 체결 정보가 없으면 잔고에서 확인
-                try:
-                    asset = symbol.replace("KRW-", "")
-                    balance = await self.exchange.get_balance(asset)
-                    if balance and balance.total > 0:
-                        ticker = await self.exchange.get_ticker(symbol)
-                        filled_qty = balance.total
-                        avg_price = ticker.get("trade_price", 0) if ticker else 0
-                        logger.info(
-                            "Attack order filled (from balance)",
-                            symbol=symbol,
-                            filled_qty=filled_qty,
-                            avg_price=avg_price,
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to get balance for {symbol}: {e}")
-
-            logger.info(
-                "Attack order filled",
-                symbol=symbol,
-                filled_qty=filled_qty,
-                avg_price=avg_price,
-            )
-
-            # 체결되지 않았으면 포지션 추적 안함
-            if filled_qty <= 0 or avg_price <= 0:
-                logger.warning("Attack order not filled, skipping position tracking", symbol=symbol)
-                return
-
-            # 주문 기록
-            self.add_order(
-                symbol=symbol,
-                strategy="ATTACK",
-                side="BUY",
-                order_type="MARKET",
-                quantity=signal.quantity,
-                price=avg_price,
-                status="FILLED",
-                filled_qty=filled_qty,
-                avg_fill_price=avg_price,
-                exchange_order_id=result.exchange_order_id,
-            )
-
-            # Attack 포지션 추적 시작
-            if metadata.get("tranche") == 1:
-                # 1차 트랜치: 새 포지션 등록
-                self.attack_strategy.track_position(
-                    symbol=symbol,
-                    entry_price=avg_price,
-                    quantity=filled_qty,
-                    stop_price=metadata.get("stop_price", 0),
-                    stop_distance_pct=metadata.get("stop_distance_pct", 0.01),
-                    attack_level=metadata.get("attack_level", 0),
-                    attack_score=metadata.get("attack_score", 0),
-                    total_target_quantity=metadata.get("target_total_quantity", 0),
-                    overheat_score=metadata.get("overheat_score", 0),  # v5.2: 동적 청산용
-                )
-            else:
-                # 2차/3차 트랜치: 기존 포지션 업데이트
-                self.attack_strategy.update_position(
-                    symbol=symbol,
-                    added_quantity=filled_qty,
-                    tranche=metadata.get("tranche", 0),
-                )
-
-            self.add_event(
-                level="INFO",
-                event_type="ATTACK",
-                message=f"Attack tranche {metadata.get('tranche', 1)} completed: {symbol}",
-                details={
-                    "quantity": filled_qty,
-                    "price": avg_price,
-                    "level": metadata.get("attack_level"),
-                },
-            )
-
-            # Slack 알림 (Attack 매수)
-            if self.slack_notifier.is_enabled:
-                notional = filled_qty * avg_price
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                except Exception:
-                    remaining_krw = 0
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-:crossed_swords: *Attack 매수 (L{metadata.get('attack_level', 1)})*
-> 심볼: `{symbol}`
-> 점수: {metadata.get('attack_score', 0):.0f}점
-> 트랜치: {metadata.get('tranche', 1)}/3
-> 수량: {filled_qty:.4f}
-> 가격: ₩{avg_price:,.0f}
-> 매수금액: ₩{notional:,.0f}
-> 손절가: ₩{metadata.get('stop_price', 0):,.0f}
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO,
-                ))
-
-        except Exception as e:
-            logger.error("Attack signal execution error", error=str(e))
-            self.add_event(
-                level="ERROR",
-                event_type="ATTACK",
-                message=f"Attack execution failed: {signal.symbol}",
-                details={"error": str(e)},
-            )
-
-    async def _execute_pullback_signal(self, signal, market_data: dict, risk_decision, current_equity: float) -> None:
-        """Pullback 시그널 실행 (Upbit 전용 - 눌림목 매수)"""
-        try:
-            symbol = signal.symbol
-            current_price = market_data.get("price", 0)
-
-            logger.info(
-                "Executing Pullback signal",
-                symbol=symbol,
-                level=signal.level,
-                score=signal.score,
-                entry_price=signal.entry_price,
-                stop_loss=signal.stop_loss,
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="PULLBACK",
-                message=f"Pullback entry: {symbol} L{signal.level}",
-                details={
-                    "score": signal.score,
-                    "target_allocation": signal.target_allocation,
-                    "entry_price": signal.entry_price,
-                    "stop_loss": signal.stop_loss,
-                },
-            )
-
-            # 매수 금액 계산 (자산의 target_allocation %)
-            order_amount = current_equity * signal.target_allocation
-
-            # 최소 주문 금액만 체크 (최대 제한 없음 - 사용자 요청)
-            MIN_ORDER = 5000  # 최소 5천원
-
-            if order_amount < MIN_ORDER:
-                logger.debug("Pullback order too small", amount=order_amount, min=MIN_ORDER)
-                return
-
-            # MAX_ORDER 제한 제거 - 잔고 전체 사용 가능
-
-            logger.info(
-                "Pullback order amount calculated",
-                symbol=symbol,
-                equity=current_equity,
-                allocation=signal.target_allocation,
-                order_amount=order_amount,
-            )
-
-            # v5.6: 가격 유효성 체크
-            if current_price <= 0:
-                logger.warning("Pullback blocked: invalid current price", symbol=symbol, price=current_price)
-                return
-
-            # v5.6: 스프레드 체크 (슬리피지 방지)
-            orderbook = await self._get_orderbook_cached(symbol)
-            if not orderbook or not orderbook.get("orderbook_units"):
-                logger.warning(
-                    "Pullback blocked: no orderbook data available",
-                    symbol=symbol,
-                )
-                self.add_event(
-                    level="WARNING",
-                    event_type="PULLBACK",
-                    message=f"Pullback blocked: no orderbook data for {symbol}",
-                    details={"symbol": symbol},
-                )
-                return
-
-            ob_units = orderbook.get("orderbook_units", [])
-            best_ask = ob_units[0].get("ask_price", 0)
-            best_bid = ob_units[0].get("bid_price", 0)
-
-            if best_bid > 0:
-                spread_bps = (best_ask - best_bid) / best_bid * 10000
-                max_spread = settings.pullback_max_spread_bps
-
-                if spread_bps > max_spread:
-                    logger.info(
-                        "Pullback blocked: spread too wide",
-                        symbol=symbol,
-                        spread_bps=round(spread_bps, 1),
-                        max_spread_bps=max_spread,
-                    )
-                    self.add_event(
-                        level="INFO",
-                        event_type="PULLBACK",
-                        message=f"Pullback blocked: spread {spread_bps:.1f}bps > {max_spread}bps",
-                        details={"symbol": symbol, "spread_bps": spread_bps},
-                    )
-                    return
-
-            # v5.6: 유동성 필터 체크
-            liquidity_filter = get_upbit_liquidity_filter()
-            volume_24h = market_data.get("volume_24h", 0)
-            liq_check = await liquidity_filter.check(
-                symbol=symbol,
-                strategy_id="PULLBACK",
-                order_size_krw=order_amount,
-                current_price=current_price,
-                orderbook=orderbook,
-                volume_24h=volume_24h,
-            )
-
-            if not liq_check.passed:
-                logger.info(
-                    "Pullback blocked by liquidity filter",
-                    symbol=symbol,
-                    reason=liq_check.reason,
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="PULLBACK",
-                    message=f"Pullback blocked by liquidity: {liq_check.reason}",
-                    details={"symbol": symbol, "reason": liq_check.reason},
-                )
-                return
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping Pullback trade execution",
-                    symbol=symbol,
-                    amount=order_amount,
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="PAPER",
-                    message=f"[PAPER] Would have bought {symbol} (Pullback)",
-                    details={
-                        "amount": order_amount,
-                        "price": current_price,
-                        "level": signal.level,
-                    },
-                )
-                return
-
-            # v5.6: 지정가 주문 지원 (체결가 개선)
-            use_limit = settings.pullback_use_limit_order
-            order_type_str = "LIMIT" if use_limit else "MARKET"
-
-            if use_limit:
-                # 지정가: 현재가 + 오프셋 틱 (즉시 체결 보장)
-                tick = self._upbit_tick_size(current_price)
-                offset_ticks = settings.pullback_limit_offset_ticks
-                limit_price = current_price + (tick * offset_ticks)
-                quantity = order_amount / limit_price
-
-                logger.info(
-                    "Pullback limit order",
-                    symbol=symbol,
-                    current_price=current_price,
-                    limit_price=limit_price,
-                    tick_size=tick,
-                    quantity=quantity,
-                )
-
-                result = await self.exchange.place_order(
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    order_type=OrderType.LIMIT,
-                    quantity=quantity,
-                    price=limit_price,
-                )
-            else:
-                # 시장가 매수
-                result = await self.exchange.place_order(
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    order_type=OrderType.MARKET,
-                    quantity=order_amount,  # KRW 금액
-                )
-
-            if not result.success:
-                logger.error("Pullback order failed", symbol=symbol, error=result.error)
-                self.add_event(
-                    level="ERROR",
-                    event_type="PULLBACK",
-                    message=f"Pullback buy failed: {symbol}",
-                    details={"error": result.error},
-                )
-                return
-
-            # 체결 수량/가격 확인
-            filled_qty = result.filled_qty
-            avg_price = result.avg_price
-
-            if filled_qty <= 0 or avg_price <= 0:
-                # 잔고에서 확인
-                try:
-                    asset = symbol.replace("KRW-", "")
-                    balance = await self.exchange.get_balance(asset)
-                    if balance and balance.total > 0:
-                        ticker = await self.exchange.get_ticker(symbol)
-                        filled_qty = balance.total
-                        avg_price = ticker.get("trade_price", 0) if ticker else 0
-                        logger.info(
-                            "Pullback order filled (from balance)",
-                            symbol=symbol,
-                            filled_qty=filled_qty,
-                            avg_price=avg_price,
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to get balance for {symbol}: {e}")
-
-            logger.info(
-                "Pullback order filled",
-                symbol=symbol,
-                filled_qty=filled_qty,
-                avg_price=avg_price,
-            )
-
-            if filled_qty <= 0 or avg_price <= 0:
-                logger.warning("Pullback order not filled", symbol=symbol)
-                return
-
-            # 주문 기록
-            self.add_order(
-                symbol=symbol,
-                strategy="PULLBACK",
-                side="BUY",
-                order_type=order_type_str,
-                quantity=filled_qty,
-                price=avg_price,
-                status="FILLED",
-                filled_qty=filled_qty,
-                avg_fill_price=avg_price,
-                exchange_order_id=result.exchange_order_id,
-            )
-
-            # Pullback 포지션 추적
-            self.pullback_strategy.track_position(
-                symbol=symbol,
-                entry_price=avg_price,
-                quantity=filled_qty,
-                stop_loss=signal.stop_loss,
-            )
-
-            self.add_event(
-                level="INFO",
-                event_type="PULLBACK",
-                message=f"Pullback entry completed: {symbol}",
-                details={
-                    "quantity": filled_qty,
-                    "price": avg_price,
-                    "level": signal.level,
-                    "score": signal.score,
-                },
-            )
-
-            # Slack 알림 (잔고 정보 포함)
-            if self.slack_notifier.is_enabled:
-                notional = filled_qty * avg_price
-                # 잔고 조회
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                except Exception:
-                    remaining_krw = 0
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-:chart_with_upwards_trend: *Pullback 매수 체결*
-> 심볼: `{symbol}`
-> 점수: {signal.score}점 (L{signal.level})
-> 수량: {filled_qty:.4f}
-> 가격: ₩{avg_price:,.0f}
-> 금액: ₩{notional:,.0f}
-> 손절가: ₩{signal.stop_loss:,.0f}
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO,
-                ))
-
-        except Exception as e:
-            logger.error("Pullback signal execution error", error=str(e))
-            self.add_event(
-                level="ERROR",
-                event_type="PULLBACK",
-                message=f"Pullback execution failed: {signal.symbol}",
-                details={"error": str(e)},
-            )
-
-    async def _execute_rebound_signal(self, signal, market_data: dict, risk_decision, current_equity: float) -> None:
-        """Rebound 시그널 실행 (v4.2 반등 스캘핑)"""
-        try:
-            symbol = signal.symbol
-            current_price = market_data.get("price", 0)
-
-            logger.info(
-                "Executing Rebound signal",
-                symbol=symbol,
-                level=signal.level,
-                score=signal.score,
-                entry_price=signal.entry_price,
-                stop_loss=signal.stop_loss,
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="REBOUND",
-                message=f"Rebound entry: {symbol} L{signal.level}",
-                details={
-                    "score": signal.score,
-                    "target_allocation": signal.target_allocation,
-                    "entry_price": signal.entry_price,
-                    "stop_loss": signal.stop_loss,
-                },
-            )
-
-            # 매수 금액 계산 (자산의 target_allocation %)
-            order_amount = current_equity * signal.target_allocation
-
-            # 최소 주문 금액만 체크
-            MIN_ORDER = 5000  # 최소 5천원
-
-            if order_amount < MIN_ORDER:
-                logger.debug("Rebound order too small", amount=order_amount, min=MIN_ORDER)
-                return
-
-            logger.info(
-                "Rebound order amount calculated",
-                symbol=symbol,
-                equity=current_equity,
-                allocation=signal.target_allocation,
-                order_amount=order_amount,
-            )
-
-            # v5.1: 가격 유효성 체크
-            if current_price <= 0:
-                logger.warning("Rebound blocked: invalid current price", symbol=symbol, price=current_price)
-                return
-
-            # v5.1: 스프레드 체크 (슬리피지 방지)
-            orderbook = await self._get_orderbook_cached(symbol)
-            if not orderbook or not orderbook.get("orderbook_units"):
-                logger.warning("Rebound blocked: no orderbook data", symbol=symbol)
-                return
-
-            ob_units = orderbook.get("orderbook_units", [])
-            best_ask = ob_units[0].get("ask_price", 0)
-            best_bid = ob_units[0].get("bid_price", 0)
-
-            if best_bid > 0:
-                spread_bps = (best_ask - best_bid) / best_bid * 10000
-                max_spread = 15.0  # 15bps
-
-                if spread_bps > max_spread:
-                    logger.info(
-                        "Rebound blocked: spread too wide",
-                        symbol=symbol,
-                        spread_bps=round(spread_bps, 1),
-                        max_spread_bps=max_spread,
-                    )
-                    return
-
-            # v5.1: 유동성 필터 체크
-            liquidity_filter = get_upbit_liquidity_filter()
-            volume_24h = market_data.get("volume_24h", 0)
-            liq_check = await liquidity_filter.check(
-                symbol=symbol,
-                strategy_id="REBOUND",
-                order_size_krw=order_amount,
-                current_price=current_price,
-                orderbook=orderbook,
-                volume_24h=volume_24h,
-            )
-
-            if not liq_check.passed:
-                logger.info("Rebound blocked by liquidity filter", symbol=symbol, reason=liq_check.reason)
-                return
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping Rebound trade execution",
-                    symbol=symbol,
-                    amount=order_amount,
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="PAPER",
-                    message=f"[PAPER] Would have bought {symbol} (Rebound)",
-                    details={
-                        "amount": order_amount,
-                        "price": current_price,
-                        "level": signal.level,
-                    },
-                )
-                return
-
-            # 시장가 매수
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=OrderType.MARKET,
-                quantity=order_amount,  # KRW 금액
-            )
-
-            if not result.success:
-                logger.error("Rebound order failed", symbol=symbol, error=result.error)
-                self.add_event(
-                    level="ERROR",
-                    event_type="REBOUND",
-                    message=f"Rebound buy failed: {symbol}",
-                    details={"error": result.error},
-                )
-                return
-
-            # 체결 수량/가격 확인
-            filled_qty = result.filled_qty
-            avg_price = result.avg_price
-
-            if filled_qty <= 0 or avg_price <= 0:
-                # 잔고에서 확인
-                try:
-                    asset = symbol.replace("KRW-", "")
-                    balance = await self.exchange.get_balance(asset)
-                    if balance and balance.total > 0:
-                        ticker = await self.exchange.get_ticker(symbol)
-                        filled_qty = balance.total
-                        avg_price = ticker.get("trade_price", 0) if ticker else 0
-                        logger.info(
-                            "Rebound order filled (from balance)",
-                            symbol=symbol,
-                            filled_qty=filled_qty,
-                            avg_price=avg_price,
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to get balance for {symbol}: {e}")
-
-            logger.info(
-                "Rebound order filled",
-                symbol=symbol,
-                filled_qty=filled_qty,
-                avg_price=avg_price,
-            )
-
-            if filled_qty <= 0 or avg_price <= 0:
-                logger.warning("Rebound order not filled", symbol=symbol)
-                return
-
-            # 주문 기록
-            self.add_order(
-                symbol=symbol,
-                strategy="REBOUND",
-                side="BUY",
-                order_type="MARKET",
-                quantity=filled_qty,
-                price=avg_price,
-                status="FILLED",
-                filled_qty=filled_qty,
-                avg_fill_price=avg_price,
-                exchange_order_id=result.exchange_order_id,
-            )
-
-            # Rebound 포지션 추적
-            self.rebound_strategy.track_position(
-                symbol=symbol,
-                entry_price=avg_price,
-                quantity=filled_qty,
-            )
-
-            # PositionLedger에 포지션 추가
-            from src.portfolio.position_ledger import FillEvent
-            fill_event = FillEvent(
-                order_id=f"REB-{symbol}-{int(datetime.utcnow().timestamp())}",
-                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
-                position_id=None,
-                symbol=symbol,
-                strategy_id="REBOUND",
-                side="BUY",
-                filled_quantity=filled_qty,
-                fill_price=avg_price,
-                fee=0.0,
-                fee_asset="KRW",
-                timestamp=datetime.utcnow(),
-            )
-            await self.position_ledger.on_buy_fill(fill_event)
-
-            self.add_event(
-                level="INFO",
-                event_type="REBOUND",
-                message=f"Rebound entry completed: {symbol}",
-                details={
-                    "quantity": filled_qty,
-                    "price": avg_price,
-                    "level": signal.level,
-                    "score": signal.score,
-                },
-            )
-
-            # Slack 알림 (잔고 정보 포함)
-            if self.slack_notifier.is_enabled:
-                notional = filled_qty * avg_price
-                # 잔고 조회
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                except Exception:
-                    remaining_krw = 0
-
-                # TP 가격 계산
-                tp1_price = avg_price * (1 + self.rebound_strategy.tp1_pct)
-                tp2_price = avg_price * (1 + self.rebound_strategy.tp2_pct)
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-:dart: *Rebound 반등 매수 체결*
-> 심볼: `{symbol}`
-> 점수: {signal.score:.0f}점 (L{signal.level})
-> 수량: {filled_qty:.4f}
-> 가격: ₩{avg_price:,.0f}
-> 금액: ₩{notional:,.0f}
-> 손절가: ₩{signal.stop_loss:,.0f}
-> TP1 (+0.8%): ₩{tp1_price:,.0f}
-> TP2 (+1.5%): ₩{tp2_price:,.0f}
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO,
-                ))
-
-        except Exception as e:
-            logger.error("Rebound signal execution error", error=str(e))
-            self.add_event(
-                level="ERROR",
-                event_type="REBOUND",
-                message=f"Rebound execution failed: {signal.symbol}",
-                details={"error": str(e)},
-            )
-
-    async def _execute_ignition_entry(self, position, market_data: dict, risk_decision) -> None:
-        """Ignition 진입 실행 (v4.0 전조 패턴 + 점화)"""
-        try:
-            symbol = position.symbol
-            sizing = position.sizings[-1]  # 최신 사이징
-            current_price = market_data.get("price", 0)
-
-            logger.info(
-                "Executing Ignition entry",
-                symbol=symbol,
-                mode=sizing.mode,
-                quantity=sizing.quantity,
-                entry_price=sizing.entry_price,
-                stop_loss=sizing.stop_loss,
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="IGNITION",
-                message=f"Ignition entry: {symbol} ({sizing.mode})",
-                details={
-                    "phase": sizing.phase.value,
-                    "risk_pct": sizing.risk_pct,
-                    "position_amount": sizing.position_amount,
-                    "stop_loss": sizing.stop_loss,
-                },
-            )
-
-            # 매수 금액
-            order_amount = sizing.position_amount
-
-            # 최소 주문 금액 체크
-            MIN_ORDER = 5000
-            if order_amount < MIN_ORDER:
-                logger.debug("Ignition order too small", amount=order_amount, min=MIN_ORDER)
-                return
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping Ignition trade execution",
-                    symbol=symbol,
-                    amount=order_amount,
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="PAPER",
-                    message=f"[PAPER] Would have bought {symbol} (Ignition)",
-                    details={
-                        "amount": order_amount,
-                        "price": current_price,
-                        "mode": sizing.mode,
-                    },
-                )
-                return
-
-            # 시장가 매수
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=OrderType.MARKET,
-                quantity=order_amount,  # KRW 금액
-            )
-
-            if not result.success:
-                logger.error("Ignition order failed", symbol=symbol, error=result.error)
-                self.add_event(
-                    level="ERROR",
-                    event_type="IGNITION",
-                    message=f"Ignition buy failed: {symbol}",
-                    details={"error": result.error},
-                )
-                return
-
-            filled_qty = result.filled_qty
-            avg_price = result.avg_price
-
-            # 체결 정보 확인
-            if filled_qty <= 0 or avg_price <= 0:
-                asset = symbol.replace("KRW-", "")
-                balance = await self.exchange.get_balance(asset)
-                if balance and balance.total > 0:
-                    ticker = await self.exchange.get_ticker(symbol)
-                    filled_qty = balance.total
-                    avg_price = ticker.get("trade_price", 0) if ticker else current_price
-
-            logger.info(
-                "Ignition entry filled",
-                symbol=symbol,
-                quantity=filled_qty,
-                price=avg_price,
-            )
-
-            self.add_event(
-                level="INFO",
-                event_type="IGNITION",
-                message=f"Ignition entry completed: {symbol}",
-                details={
-                    "quantity": filled_qty,
-                    "price": avg_price,
-                    "mode": sizing.mode,
-                    "stop_loss": sizing.stop_loss,
-                },
-            )
-
-            # Slack 알림 (잔고 정보 포함)
-            if self.slack_notifier.is_enabled:
-                notional = filled_qty * avg_price
-                # 잔고 조회
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                except Exception:
-                    remaining_krw = 0
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-:fire: *Ignition 매수 체결*
-> 심볼: `{symbol}`
-> 모드: {sizing.mode}
-> 수량: {filled_qty:.4f}
-> 가격: ₩{avg_price:,.0f}
-> 금액: ₩{notional:,.0f}
-> 손절가: ₩{sizing.stop_loss:,.0f}
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO,
-                ))
-
-        except Exception as e:
-            logger.error("Ignition entry execution error", error=str(e))
-            self.add_event(
-                level="ERROR",
-                event_type="IGNITION",
-                message=f"Ignition entry failed: {position.symbol}",
-                details={"error": str(e)},
-            )
-
-    async def _execute_ignition_exit(self, position, exit_reason, exit_pct: float, market_data: dict) -> None:
-        """Ignition 청산 실행"""
-        try:
-            symbol = position.symbol
-            current_price = market_data.get("price", 0)
-            exit_qty = position.total_quantity * exit_pct
-
-            logger.info(
-                "Executing Ignition exit",
-                symbol=symbol,
-                reason=exit_reason.value,
-                exit_pct=exit_pct,
-                exit_qty=exit_qty,
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="IGNITION",
-                message=f"Ignition exit: {symbol} ({exit_reason.value})",
-                details={
-                    "exit_pct": exit_pct,
-                    "exit_qty": exit_qty,
-                    "current_r": position.current_r,
-                },
-            )
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping Ignition exit execution",
-                    symbol=symbol,
-                    exit_qty=exit_qty,
-                )
-                return
-
-            # 시장가 매도
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                quantity=exit_qty,
-            )
-
-            if not result.success:
-                logger.error("Ignition exit failed", symbol=symbol, error=result.error)
-                return
-
-            # 포지션 업데이트
-            self.ignition_strategy.close_position(
-                symbol=symbol,
-                reason=exit_reason,
-                exit_price=result.avg_price or current_price,
-                exit_quantity=exit_qty if exit_pct < 1.0 else None,
-            )
-
-            self.add_event(
-                level="INFO",
-                event_type="IGNITION",
-                message=f"Ignition exit completed: {symbol}",
-                details={
-                    "reason": exit_reason.value,
-                    "quantity": exit_qty,
-                    "price": result.avg_price or current_price,
-                    "pnl": position.realized_pnl,
-                },
-            )
-
-            # Slack 알림 (잔고 정보 포함)
-            if self.slack_notifier.is_enabled:
-                pnl_emoji = ":moneybag:" if position.realized_pnl > 0 else ":money_with_wings:"
-                pnl_pct = ((result.avg_price or current_price) / position.entry_price - 1) * 100 if position.entry_price > 0 else 0
-                # 잔고 조회
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                except Exception:
-                    remaining_krw = 0
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-{pnl_emoji} *Ignition 청산*
-> 심볼: `{symbol}`
-> 사유: {exit_reason.value}
-> 수량: {exit_qty:.4f}
-> 가격: ₩{result.avg_price or current_price:,.0f}
-> 손익: ₩{position.realized_pnl:,.0f} ({pnl_pct:+.2f}%)
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO if position.realized_pnl >= 0 else AlertLevel.WARNING,
-                ))
-
-        except Exception as e:
-            logger.error("Ignition exit execution error", error=str(e))
-
-    async def _liquidate_satellites_for_surge(
-        self,
-        required_amount: float,
-        available_krw: float,
-    ) -> float:
-        """
-        Surge/Ignition 진입을 위해 Satellite 포지션 청산하여 자본 확보
-
-        우선순위:
-        1. 수익 포지션 (이익 큰 것부터)
-        2. 소폭 손실 포지션 (-2% 이내)
-
-        Args:
-            required_amount: 필요한 총 금액
-            available_krw: 현재 가용 현금
-
-        Returns:
-            청산 후 예상 확보 금액
-        """
-        shortage = required_amount - available_krw
-        if shortage <= 0:
-            return available_krw  # 이미 충분함
-
-        # 청산 대상 선정
-        liquidation_targets = self.satellite_strategy.get_positions_for_liquidation(
-            market_data=self._market_data,
-            required_amount=shortage * 1.05,  # 5% 버퍼
-            max_loss_pct=-0.02,  # 최대 -2% 손실까지만 청산
-        )
-
-        if not liquidation_targets:
-            logger.warning(
-                "No Satellite positions available for liquidation",
-                shortage=f"₩{shortage:,.0f}",
-            )
-            return available_krw
-
-        # 청산 실행
-        freed_capital = 0.0
-        for symbol, quantity, current_price, pnl_pct in liquidation_targets:
-            try:
-                logger.info(
-                    "Liquidating Satellite for Surge capital",
-                    symbol=symbol,
-                    quantity=quantity,
-                    pnl_pct=f"{pnl_pct:.2%}",
-                    estimated_value=f"₩{quantity * current_price:,.0f}",
-                )
-
-                # PAPER 모드 체크
-                if not self.mode_manager.should_execute_trades():
-                    logger.info(
-                        "PAPER mode - simulating Satellite liquidation",
-                        symbol=symbol,
-                    )
-                    freed_capital += quantity * current_price
-                    self.satellite_strategy.close_position(symbol)
-                    continue
-
-                # 시장가 매도
-                result = await self.exchange.place_order(
-                    symbol=symbol,
-                    side=OrderSide.SELL,
-                    order_type=OrderType.MARKET,
-                    quantity=quantity,
-                )
-
-                if result.success:
-                    entry_price = self.satellite_strategy._active_positions.get(
-                        symbol, type("obj", (), {"entry_price": current_price})()
-                    ).entry_price
-                    realized_pnl = (result.avg_price - entry_price) * result.filled_qty
-
-                    # 포지션 추적 종료
-                    self.satellite_strategy.close_position(symbol)
-                    freed_capital += result.filled_qty * result.avg_price
-
-                    # 이벤트 기록
-                    self.add_event(
-                        level="INFO",
-                        event_type="SATELLITE_EXIT",
-                        message=f"Satellite liquidated for Surge: {symbol}",
-                        details={
-                            "reason": "SURGE_CAPITAL_REALLOCATION",
-                            "quantity": result.filled_qty,
-                            "price": result.avg_price,
-                            "pnl_pct": pnl_pct,
-                            "realized_pnl": realized_pnl,
-                        },
-                    )
-
-                    # 주문 기록
-                    self.add_order(
-                        symbol=symbol,
-                        strategy="SATELLITE",
-                        side="SELL",
-                        order_type="MARKET",
-                        quantity=result.filled_qty,
-                        price=result.avg_price,
-                        status="FILLED",
-                        exchange_order_id=getattr(result, "order_id", None),
-                        realized_pnl=realized_pnl,
-                    )
-
-                    logger.info(
-                        "Satellite liquidated successfully",
-                        symbol=symbol,
-                        filled_qty=result.filled_qty,
-                        price=result.avg_price,
-                        realized_pnl=f"₩{realized_pnl:,.0f}",
-                    )
-
-                    # Slack 알림
-                    if self.slack_notifier.is_enabled:
-                        pnl_emoji = "💰" if realized_pnl >= 0 else "📉"
-                        await self.slack_notifier.send(SlackMessage(
-                            text=f"""
-{pnl_emoji} *Satellite 청산 (Surge 자본 재배분)*
-> 심볼: `{symbol}`
+                                remaining_krw = 0
+
+                            await self.slack_notifier.send(SlackMessage(
+                                text=f"""
+{pnl_emoji} *v3 청산* ({exit_type.upper()})
+> 전략: {pos.strategy}
+> 심볼: 
+> 사유: {reason}
 > 수량: {result.filled_qty:.4f}
-> 가격: ₩{result.avg_price:,.0f}
-> 수익률: {pnl_pct:.1%}
-> 손익: ₩{realized_pnl:,.0f}
-                            """.strip(),
-                            level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
-                        ))
-
-                else:
-                    logger.error(
-                        "Satellite liquidation failed",
-                        symbol=symbol,
-                        error=result.error,
-                    )
-
-            except Exception as e:
-                logger.error(
-                    "Satellite liquidation error",
-                    symbol=symbol,
-                    error=str(e),
-                )
-
-        logger.info(
-            "Satellite liquidation completed",
-            freed_capital=f"₩{freed_capital:,.0f}",
-            total_available=f"₩{available_krw + freed_capital:,.0f}",
-        )
-
-        return available_krw + freed_capital
-
-    async def _execute_surge_entry(self, surge, market_data: dict, risk_decision, current_equity: float) -> None:
-        """급등 시작 진입 실행"""
-        try:
-            symbol = surge.symbol
-            current_price = surge.current_price
-
-            logger.info(
-                "Executing Surge entry",
-                symbol=symbol,
-                change_1m=f"{surge.change_1m_pct:.2f}%",
-                change_5m=f"{surge.change_5m_pct:.2f}%",
-                volume_ratio=f"{surge.volume_ratio:.1f}x",
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="SURGE",
-                message=f"Surge detected: {symbol} +{surge.change_1m_pct:.1f}% (1m)",
-                details={
-                    "change_1m_pct": surge.change_1m_pct,
-                    "change_5m_pct": surge.change_5m_pct,
-                    "volume_ratio": surge.volume_ratio,
-                    "stop_loss": surge.stop_loss,
-                },
-            )
-
-            # 매수 금액 계산 (자산의 20%)
-            order_amount = current_equity * 0.20
-
-            # 최소 주문 금액 체크
-            MIN_ORDER = 5000
-            if order_amount < MIN_ORDER:
-                logger.debug("Surge order too small", amount=order_amount, min=MIN_ORDER)
-                return
-
-            # === 자본 확인 및 Satellite 청산 ===
-            # 가용 현금 확인
-            krw_balance = await self.exchange.get_balance("KRW")
-            available_krw = krw_balance.free if krw_balance else 0
-
-            if available_krw < order_amount:
-                logger.info(
-                    "Insufficient capital for Surge - checking Satellite positions",
-                    required=f"₩{order_amount:,.0f}",
-                    available=f"₩{available_krw:,.0f}",
-                    shortage=f"₩{order_amount - available_krw:,.0f}",
-                )
-
-                # Satellite 포지션 청산하여 자본 확보
-                available_krw = await self._liquidate_satellites_for_surge(
-                    required_amount=order_amount,
-                    available_krw=available_krw,
-                )
-
-                # 청산 후에도 자본 부족하면 가능한 만큼만 진입
-                if available_krw < order_amount:
-                    if available_krw < MIN_ORDER:
-                        logger.warning(
-                            "Cannot proceed with Surge - insufficient capital after liquidation",
-                            available=f"₩{available_krw:,.0f}",
-                            required=f"₩{order_amount:,.0f}",
-                        )
-                        self.add_event(
-                            level="WARNING",
-                            event_type="SURGE",
-                            message=f"Surge skipped - insufficient capital: {symbol}",
-                            details={
-                                "required": order_amount,
-                                "available": available_krw,
-                            },
-                        )
-                        return
-
-                    # 가능한 만큼만 진입
-                    old_amount = order_amount
-                    order_amount = available_krw * 0.95  # 5% 여유
-                    logger.info(
-                        "Adjusted Surge order amount due to capital constraints",
-                        original=f"₩{old_amount:,.0f}",
-                        adjusted=f"₩{order_amount:,.0f}",
-                    )
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping Surge trade execution",
-                    symbol=symbol,
-                    amount=order_amount,
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="PAPER",
-                    message=f"[PAPER] Would have bought {symbol} (Surge)",
-                    details={
-                        "amount": order_amount,
-                        "price": current_price,
-                        "change_1m": surge.change_1m_pct,
-                    },
-                )
-                return
-
-            # 시장가 매수
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=OrderType.MARKET,
-                quantity=order_amount,  # KRW 금액
-            )
-
-            if not result.success:
-                logger.error("Surge order failed", symbol=symbol, error=result.error)
-                self.add_event(
-                    level="ERROR",
-                    event_type="SURGE",
-                    message=f"Surge buy failed: {symbol}",
-                    details={"error": result.error},
-                )
-                return
-
-            filled_qty = result.filled_qty
-            avg_price = result.avg_price
-
-            # 체결 정보 확인
-            if filled_qty <= 0 or avg_price <= 0:
-                asset = symbol.replace("KRW-", "")
-                balance = await self.exchange.get_balance(asset)
-                if balance and balance.total > 0:
-                    ticker = await self.exchange.get_ticker(symbol)
-                    filled_qty = balance.total
-                    avg_price = ticker.get("trade_price", 0) if ticker else current_price
-
-            logger.info(
-                "Surge entry filled",
-                symbol=symbol,
-                quantity=filled_qty,
-                price=avg_price,
-            )
-
-            self.add_event(
-                level="INFO",
-                event_type="SURGE",
-                message=f"Surge entry completed: {symbol}",
-                details={
-                    "quantity": filled_qty,
-                    "price": avg_price,
-                    "change_1m": surge.change_1m_pct,
-                    "volume_ratio": surge.volume_ratio,
-                },
-            )
-
-            # 포지션 추적
-            self.surge_detector.track_position(
-                symbol=symbol,
-                entry_price=avg_price,
-                quantity=filled_qty,
-                stop_loss=surge.stop_loss,
-                take_profit=surge.take_profit_1,
-            )
-
-            # Slack 알림 (잔고 정보 포함)
-            if self.slack_notifier.is_enabled:
-                notional = filled_qty * avg_price
-                # 잔고 조회
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                except:
-                    remaining_krw = 0
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-:rocket: *급등 감지 매수*
-> 심볼: `{symbol}`
-> 1분 변화: +{surge.change_1m_pct:.1f}%
-> 거래량: {surge.volume_ratio:.1f}x
-> 수량: {filled_qty:.4f}
-> 가격: ₩{avg_price:,.0f}
-> 매수금액: ₩{notional:,.0f}
-> 손절가: ₩{surge.stop_loss:,.0f}
+> 진입가: ₩{pos.entry_price:,.0f}
+> 청산가: ₩{fill_price:,.0f}
+> 손익: {pnl_sign}₩{realized_pnl:,.0f} ({pnl_sign}{pnl_pct*100:.2f}%)
 ---
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-> 📊 총 자산: ₩{current_equity:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO,
-                ))
+> 잔여 현금: ₩{remaining_krw:,.0f}
+                                """.strip(),
+                                level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
+                            ))
+
+                    else:
+                        logger.warning("v3 exit failed", symbol=symbol, error=result.error)
 
         except Exception as e:
-            logger.error("Surge entry execution error", error=str(e))
-            self.add_event(
-                level="ERROR",
-                event_type="SURGE",
-                message=f"Surge entry failed: {surge.symbol}",
-                details={"error": str(e)},
-            )
+            logger.error("v3 exit management error", error=str(e))
 
-    async def _execute_surge_exit(self, symbol: str, position, exit_reason: str, exit_pct: float, current_price: float) -> None:
-        """Surge 청산 실행"""
-        try:
-            exit_qty = position.quantity * exit_pct
-
-            logger.info(
-                "Executing Surge exit",
-                symbol=symbol,
-                reason=exit_reason,
-                exit_pct=exit_pct,
-                exit_qty=exit_qty,
-            )
-
-            # 이벤트 기록
-            self.add_event(
-                level="INFO",
-                event_type="SURGE",
-                message=f"Surge exit: {symbol} ({exit_reason})",
-                details={
-                    "exit_pct": exit_pct,
-                    "exit_qty": exit_qty,
-                    "entry_price": position.entry_price,
-                    "current_price": current_price,
-                },
-            )
-
-            # PAPER 모드 체크
-            if not self.mode_manager.should_execute_trades():
-                logger.info(
-                    "PAPER mode - skipping Surge exit execution",
-                    symbol=symbol,
-                    exit_qty=exit_qty,
-                )
-                self.surge_detector.close_position(symbol, partial=(exit_pct < 1.0))
-                return
-
-            # 시장가 매도
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                quantity=exit_qty,
-            )
-
-            if not result.success:
-                logger.error("Surge exit failed", symbol=symbol, error=result.error)
-                return
-
-            # 포지션 업데이트
-            self.surge_detector.close_position(symbol, partial=(exit_pct < 1.0))
-
-            # 손익 계산
-            pnl = (current_price - position.entry_price) * exit_qty
-
-            self.add_event(
-                level="INFO",
-                event_type="SURGE",
-                message=f"Surge exit completed: {symbol}",
-                details={
-                    "reason": exit_reason,
-                    "quantity": exit_qty,
-                    "price": result.avg_price or current_price,
-                    "pnl": pnl,
-                },
-            )
-
-            # Slack 알림 (잔고 정보 포함)
-            if self.slack_notifier.is_enabled:
-                pnl_emoji = ":moneybag:" if pnl > 0 else ":money_with_wings:"
-                pnl_pct = ((current_price / position.entry_price) - 1) * 100
-                # 잔고 조회
-                try:
-                    krw_balance = await self.exchange.get_balance("KRW")
-                    remaining_krw = krw_balance.available if krw_balance else 0
-                    # 총 자산 계산
-                    all_balances = await self.exchange.get_all_balances()
-                    total_equity = remaining_krw
-                    for bal in all_balances:
-                        if bal.asset != "KRW" and bal.total > 0:
-                            sym = f"KRW-{bal.asset}"
-                            md = self._market_data.get(sym, {})
-                            price = md.get("price", 0)
-                            if price > 0:
-                                total_equity += bal.total * price
-                except:
-                    remaining_krw = 0
-                    total_equity = 0
-
-                await self.slack_notifier.send(SlackMessage(
-                    text=f"""
-{pnl_emoji} *급등 청산*
-> 심볼: `{symbol}`
-> 사유: {exit_reason}
-> 수량: {exit_qty:.4f}
-> 진입가: ₩{position.entry_price:,.0f}
-> 청산가: ₩{result.avg_price or current_price:,.0f}
-> 손익: ₩{pnl:,.0f} ({pnl_pct:+.2f}%)
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-> 📊 총 자산: ₩{total_equity:,.0f}
-                    """.strip(),
-                    level=AlertLevel.INFO if pnl >= 0 else AlertLevel.WARNING,
-                ))
-
-        except Exception as e:
-            logger.error("Surge exit execution error", error=str(e))
 
     def _round_quantity(self, symbol: str, quantity: float) -> float:
         """심볼별 수량 정밀도 처리 (SymbolManager 사용)"""
@@ -5195,983 +1181,37 @@ class TradingEngine:
         return self.symbol_manager.round_quantity(symbol, quantity)
 
     async def _manage_positions(self) -> None:
-        """포지션 관리"""
-        try:
-            if self._is_upbit:
-                # Upbit: 보유 자산으로 포지션 관리
-                await self._manage_upbit_positions()
-                return
-
-            # Binance: Futures 포지션 조회
-            perp_positions = await self.perp_exchange.get_positions()
-
-            for position in perp_positions:
-                symbol = position.symbol
-                market_data = self._market_data.get(symbol, {})
-
-                if not market_data:
-                    continue
-
-                current_price = market_data.get("perp_price", position.entry_price)
-
-                pos_dict = {
-                    "symbol": symbol,
-                    "side": position.side,
-                    "quantity": position.quantity,
-                    "avg_price": position.entry_price,
-                    "opened_at": datetime.utcnow(),  # TODO: 실제 진입 시간
-                }
-
-                # Satellite 포지션인지 확인
-                is_satellite = self._is_satellite_position(symbol, position)
-
-                if is_satellite:
-                    # Position State Machine으로 관리
-                    order_intent = self.position_state_machine.evaluate(symbol, current_price)
-                    if order_intent:
-                        await self._execute_order_intent(order_intent, position)
-                else:
-                    # Core Safety Guard 청산 체크 (펀딩 역전 등)
-                    should_unwind, unwind_reason = self.core_safety.should_unwind(symbol)
-                    if should_unwind:
-                        self.add_event(
-                            level="CRITICAL",
-                            event_type="RISK",
-                            message=f"Core safety unwind triggered: {symbol}",
-                            details={"reason": unwind_reason},
-                        )
-                        logger.warning(
-                            "Core safety guard triggered unwind",
-                            symbol=symbol,
-                            reason=unwind_reason,
-                        )
-                        # 실제 청산 실행
-                        await self._execute_position_close(
-                            symbol=symbol,
-                            position=position,
-                            reason=f"Core safety: {unwind_reason}",
-                            strategy="CORE",
-                        )
-                        continue  # 청산 후 다음 포지션으로
-
-                    # Core 전략 비활성화 (Upbit 현물 전용)
-                    # core_exit = await self.core_strategy.should_exit(pos_dict, market_data)
-                    # if core_exit:
-                    #     await self._execute_position_close(...)
-                    pass  # Core 전략 스킵
-
-                    # Satellite 청산 조건 체크 (fallback - PSM에 없는 포지션)
-                    sat_exit = await self.satellite_strategy.should_exit(pos_dict, market_data)
-                    if sat_exit:
-                        self.add_event(
-                            level="WARNING",
-                            event_type="STRATEGY",
-                            message=f"Satellite exit signal: {symbol}",
-                            details={"reason": sat_exit.reason},
-                        )
-                        # 실제 청산 실행
-                        await self._execute_position_close(
-                            symbol=symbol,
-                            position=position,
-                            reason=sat_exit.reason,
-                            strategy="SATELLITE",
-                        )
-
-        except Exception as e:
-            logger.error("Position management error", error=str(e))
-
-    async def _execute_position_close(
-        self,
-        symbol: str,
-        position,
-        reason: str,
-        strategy: str = "UNKNOWN",
-    ) -> bool:
-        """
-        포지션 청산 실행
-
-        Args:
-            symbol: 심볼
-            position: 포지션 객체
-            reason: 청산 사유
-            strategy: 전략 (CORE/SATELLITE)
-
-        Returns:
-            bool: 청산 성공 여부
-        """
-        # 청산 방향 결정
-        close_side = OrderSide.SELL if position.side == "LONG" else OrderSide.BUY
-        quantity = abs(position.quantity)
-
-        # 최소 수량 체크
-        quantity = self._round_quantity_for_perp(symbol, quantity)
-        if quantity <= 0:
-            logger.warning("Close quantity too small", symbol=symbol)
-            return False
-
-        logger.info(
-            "Executing position close",
-            symbol=symbol,
-            side=close_side.value,
-            quantity=quantity,
-            reason=reason,
-            strategy=strategy,
-        )
-
-        # 시장가 청산 주문
-        result = await self.perp_exchange.place_order(
-            symbol=symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            quantity=quantity,
-            reduce_only=True,  # 청산 전용
-        )
-
-        if result.success:
-            logger.info(
-                "Position closed successfully",
-                symbol=symbol,
-                filled_qty=result.filled_qty,
-                avg_price=result.avg_price,
-            )
-
-            self.add_event(
-                level="INFO",
-                event_type="ORDER",
-                message=f"Position closed: {symbol}",
-                details={
-                    "strategy": strategy,
-                    "reason": reason,
-                    "side": close_side.value,
-                    "quantity": result.filled_qty,
-                    "price": result.avg_price,
-                },
-            )
-
-            # Core 전략 상태 리셋 (비활성화됨)
-            # if strategy == "CORE" and self.core_strategy:
-            #     self.core_strategy.reset_carry(symbol)
-            pass
-
-            # PnL 계산
-            realized_pnl = 0.0
-            entry_price = getattr(position, 'entry_price', None) or getattr(position, 'avg_price', 0)
-            if entry_price and entry_price > 0 and result.avg_price:
-                if position.side == "LONG":
-                    realized_pnl = (result.avg_price - entry_price) * result.filled_qty
-                else:
-                    realized_pnl = (entry_price - result.avg_price) * result.filled_qty
-
-            # 주문 기록 (quantity는 주문 수량, filled_qty는 체결 수량)
-            self.add_order(
-                symbol=symbol,
-                strategy=strategy,
-                side=close_side.value,
-                order_type="MARKET",
-                quantity=quantity,  # 원래 주문 수량
-                price=result.avg_price,
-                status="FILLED" if result.filled_qty > 0 else "REJECTED",
-                filled_qty=result.filled_qty,
-                avg_fill_price=result.avg_price,
-                realized_pnl=realized_pnl,
-            )
-
-            return True
-        else:
-            logger.error(
-                "Position close failed",
-                symbol=symbol,
-                error=result.error,
-            )
-
-            self.add_event(
-                level="ERROR",
-                event_type="ORDER",
-                message=f"Position close failed: {symbol}",
-                details={
-                    "strategy": strategy,
-                    "reason": reason,
-                    "error": result.error,
-                },
-            )
-
-            return False
-
-    def _is_satellite_position(self, symbol: str, position) -> bool:
-        """Satellite 전략 포지션인지 확인"""
-        # Position State Machine에 등록된 포지션인지 확인
-        managed = self.position_state_machine.get_position(symbol)
-        return managed is not None
-
-    async def _manage_upbit_positions(self) -> None:
-        """Upbit 포지션 관리 (보유 자산 기반)"""
-        try:
-            # 보유 자산 조회
-            balances = await self.exchange.get_all_balances()
-
-            for balance in balances:
-                if balance.asset == "KRW" or balance.total <= 0:
-                    continue
-
-                symbol = f"KRW-{balance.asset}"
-                market_data = self._market_data.get(symbol, {})
-
-                if not market_data:
-                    continue
-
-                current_price = market_data.get("price", 0)
-                if current_price <= 0:
-                    continue
-
-                # Attack 포지션 청산 체크
-                if self.attack_strategy:
-                    attack_pos = self.attack_strategy._active_positions.get(symbol)
-                    if attack_pos:
-                        pos_dict = {
-                            "symbol": symbol,
-                            "side": "BUY",
-                            "quantity": balance.total,
-                            "avg_price": attack_pos.entry_price,
-                            "opened_at": attack_pos.entry_time.isoformat(),
-                        }
-                        attack_exit = await self.attack_strategy.should_exit(pos_dict, market_data)
-                        if attack_exit:
-                            logger.info(
-                                "Attack exit signal",
-                                symbol=symbol,
-                                reason=attack_exit.reason,
-                            )
-                            # 시장가 청산
-                            result = await self.exchange.place_order(
-                                symbol=symbol,
-                                side=OrderSide.SELL,
-                                order_type=OrderType.MARKET,
-                                quantity=balance.total,
-                            )
-                            if result.success:
-                                # 포지션 추적 종료
-                                self.attack_strategy.close_position(symbol)
-
-                                # PnL 계산
-                                realized_pnl = (result.avg_price - attack_pos.entry_price) * result.filled_qty
-
-                                self.add_event(
-                                    level="INFO",
-                                    event_type="ATTACK",
-                                    message=f"Attack exit completed: {symbol}",
-                                    details={
-                                        "reason": attack_exit.reason,
-                                        "quantity": result.filled_qty,
-                                        "price": result.avg_price,
-                                        "pnl": realized_pnl,
-                                    },
-                                )
-
-                                self.add_order(
-                                    symbol=symbol,
-                                    strategy="ATTACK",
-                                    side="SELL",
-                                    order_type="MARKET",
-                                    quantity=balance.total,
-                                    price=result.avg_price,
-                                    status="FILLED",
-                                    filled_qty=result.filled_qty,
-                                    avg_fill_price=result.avg_price,
-                                    realized_pnl=realized_pnl,
-                                )
-
-                                # Slack 알림 (Attack 청산)
-                                if self.slack_notifier.is_enabled:
-                                    pnl_emoji = "💰" if realized_pnl >= 0 else "📉"
-                                    pnl_pct = ((result.avg_price / attack_pos.entry_price) - 1) * 100 if attack_pos.entry_price > 0 else 0
-                                    try:
-                                        krw_balance = await self.exchange.get_balance("KRW")
-                                        remaining_krw = krw_balance.available if krw_balance else 0
-                                    except Exception:
-                                        remaining_krw = 0
-
-                                    await self.slack_notifier.send(SlackMessage(
-                                        text=f"""
-{pnl_emoji} *Attack 청산*
-> 심볼: `{symbol}`
-> 사유: {attack_exit.reason}
-> 수량: {result.filled_qty:.4f}
-> 진입가: ₩{attack_pos.entry_price:,.0f}
-> 청산가: ₩{result.avg_price:,.0f}
-> 수익률: {pnl_pct:+.2f}%
-> 손익: ₩{realized_pnl:,.0f}
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                                        """.strip(),
-                                        level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
-                                    ))
-
-                            continue  # Attack 청산 후 다음 자산으로
-
-                # Pullback 포지션 청산 체크
-                if self.pullback_strategy and self.pullback_strategy.is_enabled():
-                    # 업비트 실제 평균매수가 동기화 (물타기 감지)
-                    if balance.avg_buy_price > 0:
-                        self.pullback_strategy.update_avg_price(symbol, balance.avg_buy_price)
-                    pullback_exit = self.pullback_strategy.should_exit(symbol, current_price)
-                    if pullback_exit:
-                        action = pullback_exit.get("action", "FULL")
-                        reason = pullback_exit.get("reason", "Unknown")
-                        exit_qty = pullback_exit.get("quantity", balance.total)
-
-                        logger.info(
-                            "Pullback exit signal",
-                            symbol=symbol,
-                            action=action,
-                            reason=reason,
-                            quantity=exit_qty,
-                        )
-
-                        # PAPER 모드 체크
-                        if not self.mode_manager.should_execute_trades():
-                            logger.info(
-                                "PAPER mode - skipping Pullback exit",
-                                symbol=symbol,
-                                reason=reason,
-                            )
-                            continue
-
-                        # 시장가 청산
-                        result = await self.exchange.place_order(
-                            symbol=symbol,
-                            side=OrderSide.SELL,
-                            order_type=OrderType.MARKET,
-                            quantity=exit_qty,
-                        )
-
-                        if result.success:
-                            # 포지션 업데이트
-                            pullback_pos = self.pullback_strategy.get_position(symbol)
-                            entry_price = pullback_pos.entry_price if pullback_pos else current_price
-                            realized_pnl = (result.avg_price - entry_price) * result.filled_qty
-                            exit_pnl_pct = (result.avg_price - entry_price) / entry_price if entry_price > 0 else 0
-                            exit_type = pullback_exit.get("exit_type", "")
-
-                            if action == "PARTIAL":
-                                self.pullback_strategy.close_position(
-                                    symbol, partial=True, sold_qty=result.filled_qty,
-                                    exit_type=exit_type, pnl_pct=exit_pnl_pct,
-                                )
-                            else:
-                                self.pullback_strategy.close_position(
-                                    symbol, exit_type=exit_type, pnl_pct=exit_pnl_pct,
-                                )
-
-                            self.add_event(
-                                level="INFO",
-                                event_type="PULLBACK",
-                                message=f"Pullback exit completed: {symbol}",
-                                details={
-                                    "reason": reason,
-                                    "action": action,
-                                    "quantity": result.filled_qty,
-                                    "price": result.avg_price,
-                                    "pnl": realized_pnl,
-                                },
-                            )
-
-                            self.add_order(
-                                symbol=symbol,
-                                strategy="PULLBACK",
-                                side="SELL",
-                                order_type="MARKET",
-                                quantity=exit_qty,
-                                price=result.avg_price,
-                                status="FILLED",
-                                filled_qty=result.filled_qty,
-                                avg_fill_price=result.avg_price,
-                                realized_pnl=realized_pnl,
-                            )
-
-                            # Slack 알림 (청산 - 잔고 정보 포함)
-                            if self.slack_notifier.is_enabled:
-                                pnl_emoji = ":moneybag:" if realized_pnl >= 0 else ":money_with_wings:"
-                                pnl_sign = "+" if realized_pnl >= 0 else ""
-                                pnl_pct = (realized_pnl / (entry_price * result.filled_qty)) * 100 if entry_price > 0 else 0
-                                # 잔고 조회
-                                try:
-                                    krw_balance = await self.exchange.get_balance("KRW")
-                                    remaining_krw = krw_balance.available if krw_balance else 0
-                                except Exception:
-                                    remaining_krw = 0
-
-                                await self.slack_notifier.send(SlackMessage(
-                                    text=f"""
-{pnl_emoji} *Pullback 청산*
-> 심볼: `{symbol}`
-> 사유: {reason}
-> 수량: {result.filled_qty:.4f}
-> 진입가: ₩{entry_price:,.0f}
-> 청산가: ₩{result.avg_price:,.0f}
-> 손익: {pnl_sign}₩{realized_pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                                    """.strip(),
-                                    level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
-                                ))
-
-                        if action == "FULL":
-                            continue  # Pullback 전량 청산 후 다음 자산으로
-
-                # Rebound 포지션 청산 체크
-                if self.rebound_strategy and self.rebound_strategy.is_enabled():
-                    rebound_exit = self.rebound_strategy.should_exit(symbol, current_price)
-                    if rebound_exit:
-                        action = rebound_exit.get("action", "FULL")
-                        reason = rebound_exit.get("reason", "Unknown")
-                        exit_type = rebound_exit.get("exit_type", "unknown")
-                        exit_qty = rebound_exit.get("quantity", balance.total)
-
-                        logger.info(
-                            "Rebound exit signal",
-                            symbol=symbol,
-                            action=action,
-                            reason=reason,
-                            exit_type=exit_type,
-                            quantity=exit_qty,
-                        )
-
-                        # PAPER 모드 체크
-                        if not self.mode_manager.should_execute_trades():
-                            logger.info(
-                                "PAPER mode - skipping Rebound exit",
-                                symbol=symbol,
-                                reason=reason,
-                            )
-                            continue
-
-                        # 시장가 청산
-                        result = await self.exchange.place_order(
-                            symbol=symbol,
-                            side=OrderSide.SELL,
-                            order_type=OrderType.MARKET,
-                            quantity=exit_qty,
-                        )
-
-                        if result.success:
-                            # 포지션 업데이트
-                            rebound_pos = self.rebound_strategy.get_position(symbol)
-                            entry_price = rebound_pos.entry_price if rebound_pos else current_price
-                            realized_pnl = (result.avg_price - entry_price) * result.filled_qty
-                            pnl_pct = (result.avg_price - entry_price) / entry_price if entry_price > 0 else 0
-
-                            if action == "PARTIAL":
-                                self.rebound_strategy.close_position(symbol, partial=True, sold_qty=result.filled_qty, exit_type=exit_type, pnl_pct=pnl_pct)
-                            else:
-                                self.rebound_strategy.close_position(symbol, exit_type=exit_type, pnl_pct=pnl_pct)
-
-                            # PositionLedger에서 포지션 청산
-                            from src.portfolio.position_ledger import FillEvent
-                            sell_fill_event = FillEvent(
-                                order_id=f"REB-SELL-{symbol}-{int(datetime.utcnow().timestamp())}",
-                                exchange_order_id=result.exchange_order_id if hasattr(result, 'exchange_order_id') else None,
-                                position_id=None,
-                                symbol=symbol,
-                                strategy_id="REBOUND",
-                                side="SELL",
-                                filled_quantity=result.filled_qty,
-                                fill_price=result.avg_price,
-                                fee=0.0,
-                                fee_asset="KRW",
-                                timestamp=datetime.utcnow(),
-                            )
-                            await self.position_ledger.on_sell_fill(sell_fill_event)
-
-                            self.add_event(
-                                level="INFO",
-                                event_type="REBOUND",
-                                message=f"Rebound exit completed: {symbol}",
-                                details={
-                                    "reason": reason,
-                                    "exit_type": exit_type,
-                                    "action": action,
-                                    "quantity": result.filled_qty,
-                                    "price": result.avg_price,
-                                    "pnl": realized_pnl,
-                                    "pnl_pct": pnl_pct,
-                                },
-                            )
-
-                            self.add_order(
-                                symbol=symbol,
-                                strategy="REBOUND",
-                                side="SELL",
-                                order_type="MARKET",
-                                quantity=exit_qty,
-                                price=result.avg_price,
-                                status="FILLED",
-                                filled_qty=result.filled_qty,
-                                avg_fill_price=result.avg_price,
-                                realized_pnl=realized_pnl,
-                            )
-
-                            # Slack 알림 (청산 - 잔고 정보 포함)
-                            if self.slack_notifier.is_enabled:
-                                pnl_emoji = ":moneybag:" if realized_pnl >= 0 else ":money_with_wings:"
-                                pnl_sign = "+" if realized_pnl >= 0 else ""
-                                pnl_display = (realized_pnl / (entry_price * result.filled_qty)) * 100 if entry_price > 0 else 0
-                                # 잔고 조회
-                                try:
-                                    krw_balance = await self.exchange.get_balance("KRW")
-                                    remaining_krw = krw_balance.available if krw_balance else 0
-                                except Exception:
-                                    remaining_krw = 0
-
-                                exit_emoji = {
-                                    "tp1": ":dart:",
-                                    "tp2": ":bullseye:",
-                                    "trailing": ":wave:",
-                                    "stop_loss": ":stop_sign:",
-                                    "be_stop": ":shield:",
-                                    "time_stop": ":alarm_clock:",
-                                }.get(exit_type, ":chart_with_downwards_trend:")
-
-                                await self.slack_notifier.send(SlackMessage(
-                                    text=f"""
-{exit_emoji} *Rebound 청산* ({exit_type.upper()})
-> 심볼: `{symbol}`
-> 사유: {reason}
-> 수량: {result.filled_qty:.4f}
-> 진입가: ₩{entry_price:,.0f}
-> 청산가: ₩{result.avg_price:,.0f}
-> 손익: {pnl_sign}₩{realized_pnl:,.0f} ({pnl_sign}{pnl_display:.2f}%)
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                                    """.strip(),
-                                    level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
-                                ))
-
-                        if action == "FULL":
-                            continue  # Rebound 전량 청산 후 다음 자산으로
-
-                # PSM에 등록된 포지션인지 확인
-                psm_position = self.position_state_machine.get_position(symbol)
-                if psm_position:
-                    # PSM 평가
-                    order_intent = self.position_state_machine.evaluate(symbol, current_price)
-                    if order_intent:
-                        await self._execute_upbit_order_intent(order_intent, balance, current_price)
-                else:
-                    # Satellite 청산 조건 체크
-                    # Upbit API에서 가져온 실제 평균 매수가 사용
-                    entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
-                    pos_dict = {
-                        "symbol": symbol,
-                        "side": "BUY",  # Upbit은 롱만
-                        "quantity": balance.total,
-                        "avg_price": entry_price,
-                        "opened_at": datetime.utcnow(),
-                    }
-                    sat_exit = await self.satellite_strategy.should_exit(pos_dict, market_data)
-                    if sat_exit:
-                        logger.info(
-                            "Satellite exit signal (non-PSM)",
-                            symbol=symbol,
-                            reason=sat_exit.reason,
-                        )
-                        # 실제 청산 실행
-                        result = await self.exchange.place_order(
-                            symbol=symbol,
-                            side=OrderSide.SELL,
-                            order_type=OrderType.MARKET,
-                            quantity=balance.total,
-                        )
-                        if result.success:
-                            # 포지션 추적 종료
-                            self.satellite_strategy.close_position(symbol)
-
-                            # PnL 계산
-                            realized_pnl = (result.avg_price - entry_price) * result.filled_qty
-
-                            self.add_event(
-                                level="INFO",
-                                event_type="SATELLITE",
-                                message=f"Satellite exit: {symbol}",
-                                details={
-                                    "reason": sat_exit.reason,
-                                    "quantity": result.filled_qty,
-                                    "entry_price": entry_price,
-                                    "exit_price": result.avg_price,
-                                    "pnl": realized_pnl,
-                                },
-                            )
-
-                            # 주문 기록
-                            self.add_order(
-                                symbol=symbol,
-                                strategy="SATELLITE",
-                                side="SELL",
-                                order_type="MARKET",
-                                quantity=balance.total,
-                                price=result.avg_price,
-                                status="FILLED",
-                                filled_qty=result.filled_qty,
-                                avg_fill_price=result.avg_price,
-                                realized_pnl=realized_pnl,
-                            )
-
-                            logger.info(
-                                "Satellite position closed",
-                                symbol=symbol,
-                                reason=sat_exit.reason,
-                                pnl=f"₩{realized_pnl:,.0f}",
-                            )
-
-                            # Slack 알림 (Satellite 청산)
-                            if self.slack_notifier.is_enabled:
-                                pnl_emoji = "💰" if realized_pnl >= 0 else "📉"
-                                pnl_pct = ((result.avg_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-                                try:
-                                    krw_balance = await self.exchange.get_balance("KRW")
-                                    remaining_krw = krw_balance.available if krw_balance else 0
-                                except Exception:
-                                    remaining_krw = 0
-
-                                await self.slack_notifier.send(SlackMessage(
-                                    text=f"""
-{pnl_emoji} *Satellite 청산*
-> 심볼: `{symbol}`
-> 사유: {sat_exit.reason}
-> 수량: {result.filled_qty:.4f}
-> 진입가: ₩{entry_price:,.0f}
-> 청산가: ₩{result.avg_price:,.0f}
-> 수익률: {pnl_pct:+.2f}%
-> 손익: ₩{realized_pnl:,.0f}
----
-> 💰 잔여 현금: ₩{remaining_krw:,.0f}
-                                    """.strip(),
-                                    level=AlertLevel.INFO if realized_pnl >= 0 else AlertLevel.WARNING,
-                                ))
-
-        except Exception as e:
-            logger.error("Upbit position management error", error=str(e))
-
-    async def _execute_upbit_order_intent(self, intent, balance, current_price: float) -> None:
-        """Upbit용 OrderIntent 실행"""
-        from src.position.schemas import OrderIntent
-
-        if not isinstance(intent, OrderIntent):
-            return
-
-        symbol = intent.symbol
-
-        # 전량 청산
-        if intent.exit_now:
-            logger.info(
-                "Executing Upbit full exit",
-                symbol=symbol,
-                reason=intent.reason,
-            )
-
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                quantity=balance.total,
-            )
-
-            if result.success:
-                self.position_state_machine.close_position(symbol)
-                self.add_event(
-                    level="INFO",
-                    event_type="ORDER",
-                    message=f"Upbit PSM exit completed: {symbol}",
-                    details={
-                        "reason": intent.reason,
-                        "quantity": result.filled_qty,
-                        "price": result.avg_price,
-                    },
-                )
-
-                self.add_order(
-                    symbol=symbol,
-                    strategy="SATELLITE",
-                    side="SELL",
-                    order_type="MARKET",
-                    quantity=balance.total,
-                    price=result.avg_price,
-                    status="FILLED" if result.filled_qty > 0 else "REJECTED",
-                    filled_qty=result.filled_qty,
-                    avg_fill_price=result.avg_price,
-                )
-            else:
-                logger.error("Upbit PSM exit failed", symbol=symbol, error=result.error)
-            return
-
-        # 부분 익절
-        for tp in intent.take_profit_orders:
-            tp_pct = tp.get("pct", 0)
-            if tp_pct <= 0:
-                continue
-
-            tp_qty = balance.total * tp_pct
-
-            if tp_qty <= 0:
-                continue
-
-            logger.info(
-                "Executing Upbit partial TP",
-                symbol=symbol,
-                pct=tp_pct,
-                quantity=tp_qty,
-            )
-
-            result = await self.exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                quantity=tp_qty,
-            )
-
-            if result.success:
-                new_qty = balance.total - result.filled_qty
-                self.position_state_machine.update_quantity(symbol, new_qty)
-
-                if tp_pct >= 0.25 and tp_pct <= 0.35:
-                    self.position_state_machine.update_tp_status(symbol, tp_30_triggered=True)
-                elif tp_pct >= 0.55 and tp_pct <= 0.65:
-                    self.position_state_machine.update_tp_status(symbol, tp_60_triggered=True)
-
-                self.add_event(
-                    level="INFO",
-                    event_type="ORDER",
-                    message=f"Upbit partial TP: {symbol} ({tp_pct*100:.0f}%)",
-                    details={
-                        "quantity": result.filled_qty,
-                        "price": result.avg_price,
-                        "remaining": new_qty,
-                    },
-                )
-
-                self.add_order(
-                    symbol=symbol,
-                    strategy="SATELLITE",
-                    side="SELL",
-                    order_type="MARKET",
-                    quantity=tp_qty,
-                    price=result.avg_price,
-                    status="FILLED" if result.filled_qty > 0 else "REJECTED",
-                    filled_qty=result.filled_qty,
-                    avg_fill_price=result.avg_price,
-                )
-            else:
-                logger.error("Upbit partial TP failed", symbol=symbol, error=result.error)
-
-    async def _execute_order_intent(self, intent, position) -> None:
-        """OrderIntent 실행"""
-        from src.position.schemas import OrderIntent
-
-        if not isinstance(intent, OrderIntent):
-            return
-
-        symbol = intent.symbol
-        close_side = OrderSide.SELL if position.side == "LONG" else OrderSide.BUY
-
-        # 전량 청산
-        if intent.exit_now:
-            logger.info(
-                "Executing full exit",
-                symbol=symbol,
-                reason=intent.reason,
-            )
-
-            result = await self.perp_exchange.place_order(
-                symbol=symbol,
-                side=close_side,
-                order_type=OrderType.MARKET,
-                quantity=position.quantity,
-                reduce_only=True,
-            )
-
-            if result.success:
-                self.position_state_machine.close_position(symbol)
-                self.add_event(
-                    level="INFO",
-                    event_type="ORDER",
-                    message=f"PSM exit completed: {symbol}",
-                    details={
-                        "reason": intent.reason,
-                        "quantity": result.filled_qty,
-                        "price": result.avg_price,
-                    },
-                )
-
-                # PnL 계산
-                realized_pnl = 0.0
-                if position.entry_price and position.entry_price > 0 and result.avg_price:
-                    if position.side == "LONG":
-                        realized_pnl = (result.avg_price - position.entry_price) * result.filled_qty
-                    else:
-                        realized_pnl = (position.entry_price - result.avg_price) * result.filled_qty
-
-                # DB 기록 (quantity는 주문 수량, filled_qty는 체결 수량)
-                order_id = self.add_order(
-                    symbol=symbol,
-                    strategy="SATELLITE",
-                    side=close_side.value,
-                    order_type="MARKET",
-                    quantity=position.quantity,  # 원래 주문 수량
-                    price=result.avg_price,
-                    status="FILLED" if result.filled_qty > 0 else "REJECTED",
-                    filled_qty=result.filled_qty,
-                    avg_fill_price=result.avg_price,
-                    realized_pnl=realized_pnl,
-                )
-            else:
-                logger.error("PSM exit failed", symbol=symbol, error=result.error)
-            return
-
-        # 부분 익절
-        for tp in intent.take_profit_orders:
-            tp_pct = tp.get("pct", 0)
-            if tp_pct <= 0:
-                continue
-
-            tp_qty = position.quantity * tp_pct
-            tp_qty = self._round_quantity_for_perp(symbol, tp_qty)
-
-            if tp_qty <= 0:
-                continue
-
-            logger.info(
-                "Executing partial TP",
-                symbol=symbol,
-                pct=tp_pct,
-                quantity=tp_qty,
-                reason=intent.reason,
-            )
-
-            result = await self.perp_exchange.place_order(
-                symbol=symbol,
-                side=close_side,
-                order_type=OrderType.MARKET,
-                quantity=tp_qty,
-                reduce_only=True,
-            )
-
-            if result.success:
-                # 수량 업데이트
-                new_qty = position.quantity - result.filled_qty
-                self.position_state_machine.update_quantity(symbol, new_qty)
-
-                # TP 트리거 상태 업데이트
-                if tp_pct >= 0.25 and tp_pct <= 0.35:
-                    self.position_state_machine.update_tp_status(symbol, tp_30_triggered=True)
-                elif tp_pct >= 0.55 and tp_pct <= 0.65:
-                    self.position_state_machine.update_tp_status(symbol, tp_60_triggered=True)
-
-                self.add_event(
-                    level="INFO",
-                    event_type="ORDER",
-                    message=f"PSM partial TP: {symbol} ({tp_pct*100:.0f}%)",
-                    details={
-                        "reason": intent.reason,
-                        "quantity": result.filled_qty,
-                        "price": result.avg_price,
-                        "remaining": new_qty,
-                    },
-                )
-
-                # PnL 계산
-                realized_pnl = 0.0
-                if position.entry_price and position.entry_price > 0 and result.avg_price:
-                    if position.side == "LONG":
-                        realized_pnl = (result.avg_price - position.entry_price) * result.filled_qty
-                    else:
-                        realized_pnl = (position.entry_price - result.avg_price) * result.filled_qty
-
-                # DB 기록 (quantity는 주문 수량, filled_qty는 체결 수량)
-                self.add_order(
-                    symbol=symbol,
-                    strategy="SATELLITE",
-                    side=close_side.value,
-                    order_type="MARKET",
-                    quantity=tp_qty,  # 원래 주문 수량
-                    price=result.avg_price,
-                    status="FILLED" if result.filled_qty > 0 else "REJECTED",
-                    filled_qty=result.filled_qty,
-                    avg_fill_price=result.avg_price,
-                    realized_pnl=realized_pnl,
-                )
-            else:
-                logger.error("PSM partial TP failed", symbol=symbol, error=result.error)
-
-        # 스탑 가격 업데이트 (TODO: 실제 스탑 주문 수정)
-        if intent.desired_stop_price != position.entry_price:
-            # 현재는 로깅만 (실제 스탑 주문 수정은 별도 구현 필요)
-            logger.debug(
-                "Stop price update suggested",
-                symbol=symbol,
-                new_stop=intent.desired_stop_price,
-            )
+        """포지션 관리 (v3 전략 - exits handled by _manage_v3_exits)"""
+        pass  # v3 exits are handled by _manage_v3_exits in main loop
 
     async def _update_cached_state(self) -> None:
         """상태 캐시 업데이트"""
         try:
-            if self._is_upbit:
-                await self._update_cached_state_upbit()
-            else:
-                await self._update_cached_state_binance()
-
+            await self._update_cached_state_upbit()
         except Exception as e:
             logger.error("Failed to update cached state", error=str(e))
 
     async def _get_symbol_strategy_map(self) -> dict[str, str]:
-        """PositionLedger + DipScalper에서 심볼별 전략 매핑 조회"""
+        """PositionLedger + v3 전략에서 심볼별 전략 매핑 조회"""
         strategy_map: dict[str, str] = {}
-        strategy_priority = {
-            "DIP_SCALPER": 0,
-            "ATTACK": 1,
-            "IGNITION": 2,
-            "SURGE": 3,
-            "PULLBACK": 4,
-            "REBOUND": 4,
-            "SATELLITE": 5,
-            "CORE": 6,
-        }
 
-        # DipScalper active positions 먼저 반영
-        if self.dip_scalper:
-            for symbol in self.dip_scalper.get_all_positions():
-                strategy_map[symbol] = "DIP_SCALPER"
+        # v3 전략 active positions 먼저 반영
+        for strat in self.v3_strategies:
+            for symbol in strat.get_all_positions():
+                strategy_map[symbol] = strat.name
 
         try:
             open_positions = await self.position_ledger.get_open_positions()
-            logger.info(
-                "Building strategy map from ledger",
-                open_position_count=len(open_positions),
-            )
 
             for pos in open_positions:
                 symbol = pos.symbol
                 strategy = pos.strategy_id
-                existing = strategy_map.get(symbol)
 
-                logger.debug(
-                    "Processing ledger position",
-                    symbol=symbol,
-                    strategy=strategy,
-                    existing=existing,
-                )
-
-                if existing is None:
+                if symbol not in strategy_map:
                     strategy_map[symbol] = strategy
-                elif strategy_priority.get(strategy, 99) < strategy_priority.get(existing, 99):
-                    strategy_map[symbol] = strategy
-
-            logger.info(
-                "Strategy map built",
-                symbols=list(strategy_map.keys()),
-                strategies=list(strategy_map.values()),
-            )
 
         except Exception as e:
-            logger.warning("Failed to build strategy map from ledger", error=str(e), exc_info=True)
+            logger.warning("Failed to build strategy map from ledger", error=str(e))
 
         return strategy_map
 
@@ -6205,28 +1245,14 @@ class TradingEngine:
                 positions_value += position_value
                 current_equity += position_value
 
-                # DipScalper 포지션이면 dip_scalper의 entry_price 사용
-                dip_pos = None
-                if self.dip_scalper:
-                    dip_pos = self.dip_scalper.get_all_positions().get(symbol)
-
-                if dip_pos:
-                    entry_price = dip_pos.get("entry_price", balance.avg_buy_price or current_price)
-                else:
-                    # Upbit API에서 직접 가져온 평균 매수가 사용
-                    entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
+                # Upbit API에서 직접 가져온 평균 매수가 사용
+                entry_price = balance.avg_buy_price if balance.avg_buy_price > 0 else current_price
 
                 position_pnl = (current_price - entry_price) * balance.total
                 unrealized_pnl += position_pnl
 
-                # 실제 전략 조회 (Ledger에 없으면 SATELLITE 기본값)
-                strategy = symbol_strategy_map.get(symbol, "SATELLITE")
-                if symbol not in symbol_strategy_map:
-                    logger.warning(
-                        "Symbol not in strategy map, defaulting to SATELLITE",
-                        symbol=symbol,
-                        available_symbols=list(symbol_strategy_map.keys()),
-                    )
+                # 실제 전략 조회
+                strategy = symbol_strategy_map.get(symbol, "UNKNOWN")
 
                 self._cached_positions.append({
                     "symbol": symbol,
@@ -6273,74 +1299,6 @@ class TradingEngine:
                 pnl_today=pnl_today,
             )
 
-    async def _update_cached_state_binance(self) -> None:
-        """Binance 상태 캐시 업데이트 (기존 로직)"""
-        # 잔고 조회
-        spot_balance = await self.spot_exchange.get_balance("USDT")
-        perp_balance = await self.perp_exchange.get_balance("USDT")
-
-        spot_total = spot_balance.total if spot_balance else 0
-        perp_total = perp_balance.total if perp_balance else 0
-        current_equity = spot_total + perp_total
-
-        # 포지션 조회
-        perp_positions = await self.perp_exchange.get_positions()
-
-        # 오늘 시작 자산 설정 (첫 조회 시)
-        if self._starting_equity is None:
-            self._starting_equity = current_equity
-
-        # PnL 계산
-        pnl_today = current_equity - self._starting_equity
-        pnl_today_pct = pnl_today / self._starting_equity if self._starting_equity > 0 else 0
-
-        # 미실현 손익 합계
-        unrealized_pnl = sum(p.unrealized_pnl for p in perp_positions)
-
-        # Summary 업데이트
-        self._cached_summary = {
-            "equity": current_equity,
-            "pnl_today": pnl_today,
-            "pnl_today_pct": pnl_today_pct,
-            "drawdown": 0.0,
-            "exposure": sum(p.quantity * p.entry_price for p in perp_positions),
-            "cash": spot_total + (perp_balance.free if perp_balance else 0),
-            "margin_used": perp_total - (perp_balance.free if perp_balance else 0),
-            "mode": self.mode.value,
-            "is_paper": settings.is_paper_mode,
-            "updated_at": _utc_iso(),
-        }
-
-        # 포지션 캐시
-        self._cached_positions = []
-        for p in perp_positions:
-            # 현재가는 market_data에서 가져오기
-            market_data = self._market_data.get(p.symbol, {})
-            current_price = market_data.get("perp_price", p.entry_price)
-
-            self._cached_positions.append({
-                "symbol": p.symbol,
-                "strategy": "CORE",
-                "side": p.side,
-                "quantity": p.quantity,
-                "avg_price": p.entry_price,
-                "current_price": current_price,
-                "unrealized_pnl": p.unrealized_pnl,
-                "realized_pnl": 0.0,
-                "notional": p.quantity * current_price,
-                "leverage": p.leverage,
-            })
-
-        # 60초마다 자산 스냅샷 DB 기록
-        self._snapshot_counter += 1
-        if self._snapshot_counter >= 60:
-            self._snapshot_counter = 0
-            await self._record_equity_snapshot(
-                equity=current_equity,
-                unrealized_pnl=unrealized_pnl,
-                pnl_today=pnl_today,
-            )
-
     async def _record_equity_snapshot(
         self,
         equity: float,
@@ -6376,63 +1334,8 @@ class TradingEngine:
         """이벤트 목록 조회"""
         return self._cached_events[-limit:]
 
-    async def _sync_satellite_positions(self) -> None:
-        """서버 시작 시 Upbit 기존 포지션을 Satellite 전략에 동기화"""
-        if not self._is_upbit:
-            return
-
-        try:
-            # 1. 시장 데이터 먼저 업데이트 (현재가 필요)
-            watch_symbols = self.symbol_manager.get_qualified_symbols()
-            await self._update_market_data_upbit(watch_symbols)
-
-            # 2. Upbit 잔고 조회
-            all_balances = await self.exchange.get_all_balances()
-
-            # 3. Satellite 전략에 포지션 동기화 + 매수 주문 기록
-            synced_positions = self.satellite_strategy.sync_positions_from_balances(
-                balances=all_balances,
-                market_data=self._market_data,
-                return_details=True,  # 상세 정보 반환
-            )
-
-            # 4. 동기화된 포지션에 대해 매수 주문 기록 추가
-            for pos_info in synced_positions:
-                self.add_order(
-                    symbol=pos_info["symbol"],
-                    strategy="SATELLITE",
-                    side="BUY",
-                    quantity=pos_info["quantity"],
-                    price=pos_info["entry_price"],
-                    status="SYNCED",  # 동기화된 포지션 표시
-                )
-                self.add_event(
-                    level="INFO",
-                    event_type="SATELLITE",
-                    message=f"Satellite position synced: {pos_info['symbol']}",
-                    details={
-                        "source": "UPBIT_BALANCE",
-                        "entry_price": pos_info["entry_price"],
-                        "quantity": pos_info["quantity"],
-                        "current_price": pos_info.get("current_price", 0),
-                        "pnl_pct": pos_info.get("pnl_pct", 0),
-                    },
-                )
-
-            logger.info(
-                "Satellite positions synced from Upbit",
-                synced_count=len(synced_positions),
-                total_balances=len(all_balances),
-            )
-
-        except Exception as e:
-            logger.error("Failed to sync satellite positions", error=str(e))
-
     async def _restore_positions_from_db(self) -> None:
-        """서버 시작 시 DB에서 오픈 포지션을 복구하고 각 전략에 재등록"""
-        if not self._is_upbit:
-            return
-
+        """서버 시작 시 DB에서 오픈 포지션을 복구하고 v3 전략에 재등록"""
         try:
             # 1. 시장 데이터 먼저 업데이트 (현재가 필요)
             watch_symbols = self.symbol_manager.get_qualified_symbols()
@@ -6452,6 +1355,9 @@ class TradingEngine:
             all_balances = await self.exchange.get_all_balances()
             balance_map = {f"KRW-{bal.asset}": bal for bal in all_balances if bal.asset != "KRW"}
 
+            # v3 전략 이름→인스턴스 매핑
+            v3_strategy_map = {s.name: s for s in self.v3_strategies}
+
             restored_count = 0
             skipped_count = 0
 
@@ -6463,7 +1369,8 @@ class TradingEngine:
                 # Upbit 잔고 확인
                 if symbol not in balance_map:
                     logger.warning(
-                        f"Position {symbol} in DB but no balance on Upbit - skipping",
+                        "Position in DB but no balance on Upbit - skipping",
+                        symbol=symbol,
                         strategy=strategy.value,
                     )
                     skipped_count += 1
@@ -6471,156 +1378,50 @@ class TradingEngine:
 
                 balance = balance_map[symbol]
                 if balance.total <= 0:
-                    logger.warning(
-                        f"Position {symbol} has zero balance - skipping",
-                        strategy=strategy.value,
-                    )
                     skipped_count += 1
                     continue
 
                 # 현재가 조회
                 market_data = self._market_data.get(symbol)
                 if not market_data:
-                    logger.warning(f"No market data for {symbol} - skipping")
                     skipped_count += 1
                     continue
 
                 current_price = market_data.get("price", 0)
                 if current_price <= 0:
-                    logger.warning(f"Invalid price for {symbol} - skipping")
                     skipped_count += 1
                     continue
 
-                # 전략별 포지션 복구
+                # v3 전략 복구
                 try:
-                    if strategy == StrategyType.DIP_SCALPER and self.dip_scalper:
-                        # DIP_SCALPER 포지션 복구 (metadata 기반 완전 복원)
-                        from src.strategies.dip_scalper import DipPosition as _DipPos
-                        ledger_entry = await self.position_ledger.get_position_by_symbol(
-                            symbol, "DIP_SCALPER"
-                        )
-                        restored_from_meta = False
-                        if ledger_entry and ledger_entry.metadata:
-                            dip_pos = _DipPos.from_metadata(symbol, ledger_entry.metadata)
-                            if dip_pos:
-                                # Upbit 실제 잔고로 수량 보정
-                                dip_pos.quantity = balance.total
-                                self.dip_scalper.restore_position(dip_pos)
-                                restored_from_meta = True
-                                logger.info(
-                                    "DIP_SCALPER position restored (full state from metadata)",
-                                    symbol=symbol,
-                                    quantity=balance.total,
-                                    highest_price=dip_pos.highest_price,
-                                    tp_reached=dip_pos.tp_reached_time is not None,
-                                    hold_seconds=(datetime.utcnow() - dip_pos.entry_time).total_seconds(),
-                                )
-
-                        if not restored_from_meta:
-                            # fallback: 기존 방식 (SL/TP 재계산)
-                            logger.info(
-                                "Restoring DIP_SCALPER position (fallback, no metadata)",
-                                symbol=symbol,
-                                entry_price=position.avg_price,
-                            )
-                            self.dip_scalper.track_position(
-                                symbol=symbol,
-                                entry_price=position.avg_price,
-                                quantity=balance.total,
-                                bid_ratio=0.5,
-                            )
-
-                    elif strategy == StrategyType.SATELLITE and self.satellite_strategy:
-                        # SATELLITE 포지션 복구
-                        synced = self.satellite_strategy.sync_positions_from_balances(
-                            balances=[balance],
-                            market_data=self._market_data,
-                            return_details=True,
-                        )
-                        if synced:
-                            logger.info(f"Restored SATELLITE position: {symbol}")
-
-                    elif strategy == StrategyType.ATTACK and self.attack_strategy:
-                        # ATTACK 포지션 복구
-                        logger.info(
-                            "🔄 Restoring ATTACK position",
+                    v3_strat = v3_strategy_map.get(strategy.value)
+                    if v3_strat:
+                        v3_pos = V3Position(
                             symbol=symbol,
-                            db_quantity=position.quantity,
-                            upbit_quantity=balance.total,
-                            entry_price=position.avg_price,
-                        )
-                        # DB에 stop_price 저장되어 있으면 사용, 없으면 기본 3% 손절
-                        stop_price = position.stop_price if position.stop_price else position.avg_price * 0.97
-                        stop_distance_pct = abs((stop_price - position.avg_price) / position.avg_price)
-
-                        self.attack_strategy.track_position(
-                            symbol=symbol,
-                            entry_price=position.avg_price,
-                            quantity=balance.total,  # Upbit 실제 잔고 사용
-                            stop_price=stop_price,
-                            stop_distance_pct=stop_distance_pct,
-                        )
-                        logger.info(
-                            "✅ ATTACK position restored",
-                            symbol=symbol,
-                            quantity=balance.total,
-                            stop_price=stop_price,
-                        )
-
-                    elif strategy == StrategyType.PULLBACK and self.pullback_strategy:
-                        # PULLBACK 포지션 복구
-                        logger.info(
-                            "🔄 Restoring PULLBACK position",
-                            symbol=symbol,
-                            db_quantity=position.quantity,
-                            upbit_quantity=balance.total,
-                            entry_price=position.avg_price,
-                        )
-                        self.pullback_strategy.track_position(
-                            symbol=symbol,
-                            entry_price=position.avg_price,
-                            quantity=balance.total,  # Upbit 실제 잔고 사용
-                        )
-                        logger.info(
-                            "✅ PULLBACK position restored",
-                            symbol=symbol,
-                            quantity=balance.total,
-                        )
-
-                    elif strategy == StrategyType.REBOUND and self.rebound_strategy:
-                        # REBOUND 포지션 복구
-                        logger.info(
-                            "🔄 Restoring REBOUND position",
-                            symbol=symbol,
-                            db_quantity=position.quantity,
-                            upbit_quantity=balance.total,
-                            entry_price=position.avg_price,
-                            current_price=current_price,
-                        )
-                        self.rebound_strategy.track_position(
-                            symbol=symbol,
-                            entry_price=position.avg_price,
-                            quantity=balance.total,  # Upbit 실제 잔고 사용
-                        )
-                        logger.info(
-                            "✅ REBOUND position restored",
-                            symbol=symbol,
-                            quantity=balance.total,
-                        )
-
-                    elif strategy == StrategyType.IGNITION:
-                        # IGNITION 포지션 로깅
-                        logger.info(
-                            f"IGNITION position detected: {symbol} - manual monitoring required",
+                            strategy=strategy.value,
                             entry_price=position.avg_price,
                             quantity=balance.total,
+                            entry_time=position.opened_at or datetime.utcnow(),
+                            stop_loss_pct=v3_strat.SL_PCT,
+                            take_profit_pct=v3_strat.TP_PCT,
+                            trail_trigger_pct=v3_strat.TRAIL_TRIGGER,
+                            trail_stop_pct=v3_strat.TRAIL_STOP,
+                            time_stop_minutes=v3_strat.TIME_STOP_MIN,
+                            highest_price=current_price,
                         )
-
+                        v3_strat.track_position(v3_pos)
+                        logger.info(
+                            "v3 position restored",
+                            symbol=symbol,
+                            strategy=strategy.value,
+                            quantity=balance.total,
+                            entry_price=position.avg_price,
+                        )
                     else:
                         logger.warning(
-                            f"Unknown strategy type for position {symbol}: {strategy}",
-                            entry_price=position.avg_price,
-                            quantity=balance.total,
+                            "Unknown strategy for position - skipping",
+                            symbol=symbol,
+                            strategy=strategy.value,
                         )
                         skipped_count += 1
                         continue
@@ -6636,26 +1437,12 @@ class TradingEngine:
                         status="SYNCED",
                     )
 
-                    # 이벤트 기록
-                    self.add_event(
-                        level="INFO",
-                        event_type=strategy.value,
-                        message=f"Position restored from DB: {symbol}",
-                        details={
-                            "source": "DATABASE",
-                            "strategy": strategy.value,
-                            "entry_price": position.avg_price,
-                            "quantity": balance.total,
-                            "current_price": current_price,
-                            "pnl_pct": ((current_price - position.avg_price) / position.avg_price * 100),
-                        },
-                    )
-
                     restored_count += 1
 
                 except Exception as e:
                     logger.error(
-                        f"Failed to restore position {symbol}",
+                        "Failed to restore position",
+                        symbol=symbol,
                         strategy=strategy.value,
                         error=str(e),
                     )
@@ -6820,10 +1607,8 @@ class TradingEngine:
                 )
 
                 # 일일 통계 업데이트
-                pnl_field = "core_pnl" if strategy == "CORE" else "satellite_pnl"
                 await trade_recorder.update_daily_stats(
                     trades_count=1,
-                    **{pnl_field: 0.0},  # TODO: 실제 PnL
                 )
 
                 # 포지션 상태 업데이트 (BUY는 포지션 오픈, SELL은 포지션 종료)

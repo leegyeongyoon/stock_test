@@ -8,34 +8,10 @@ import ModeSelector from '@/components/ModeSelector'
 import SummaryCards from '@/components/SummaryCards'
 import PositionsTable from '@/components/PositionsTable'
 import EventsTimeline from '@/components/EventsTimeline'
-import SurgeCandidates from '@/components/SurgeCandidates'
-import AlgorithmMonitor from '@/components/AlgorithmMonitor'
-import ReboundMonitor from '@/components/ReboundMonitor'
-import PullbackMonitor from '@/components/PullbackMonitor'
-import DipScalperMonitor from '@/components/DipScalperMonitor'
 import { formatKRW } from '@/lib/currency'
-
-interface SurgeStatus {
-  active_signals: number
-  active_positions: number
-  signals: Array<{
-    symbol: string
-    change_1m_pct: number
-    volume_ratio: number
-  }>
-}
-
-interface SatelliteStatus {
-  enabled: boolean
-  btc_regime: string
-  btc_is_volatile: boolean
-  pending_signals: Record<string, { side: string; status: string; detected_at: string }>
-  active_positions: number
-}
 
 interface RiskStatus {
   mode: string
-  satellite_enabled: boolean
   exposure: {
     gross_exposure: number
     equity: number
@@ -43,15 +19,31 @@ interface RiskStatus {
   }
 }
 
+interface V3StrategyStatus {
+  v3_enabled: boolean
+  total_positions: number
+  strategies: Array<{
+    name: string
+    positions_count: number
+    positions: Array<{
+      symbol: string
+      entry_price: number
+      current_price: number
+      pnl_pct: number
+      hold_minutes: number
+      trailing_active: boolean
+    }>
+  }>
+}
+
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [positions, setPositions] = useState<Position[]>([])
   const [events, setEvents] = useState<Event[]>([])
-  const [satelliteStatus, setSatelliteStatus] = useState<SatelliteStatus | null>(null)
   const [riskStatus, setRiskStatus] = useState<RiskStatus | null>(null)
-  const [surgeStatus, setSurgeStatus] = useState<SurgeStatus | null>(null)
   const [capitalProfile, setCapitalProfile] = useState<CapitalProfileStatus | null>(null)
   const [realtimeSummary, setRealtimeSummary] = useState<RealtimeSummary | null>(null)
+  const [v3Status, setV3Status] = useState<V3StrategyStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,23 +57,15 @@ export default function Dashboard() {
 
       // 추가 데이터 조회
       try {
-        const [satData, riskData] = await Promise.all([
-          fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'}/api/satellite-status`).then(r => r.json()),
-          fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'}/api/risk/status`).then(r => r.json()),
+        const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'
+        const [riskData, v3Data] = await Promise.all([
+          fetch(`${baseUrl}/api/risk/status`).then(r => r.json()),
+          fetch(`${baseUrl}/api/monitoring/v3/strategies`).then(r => r.json()),
         ])
-        setSatelliteStatus(satData)
         setRiskStatus(riskData)
+        setV3Status(v3Data)
       } catch {
         // 추가 데이터 실패해도 무시
-      }
-
-      // SurgeDetector 데이터 조회
-      try {
-        const surgeResponse = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8086'}/api/surge/status`)
-        const surgeData = await surgeResponse.json() as SurgeStatus
-        setSurgeStatus(surgeData)
-      } catch {
-        // SurgeDetector 미설치 시 무시
       }
 
       // Capital Profile 조회
@@ -135,6 +119,18 @@ export default function Dashboard() {
     }
   }
 
+  const strategyColors: Record<string, string> = {
+    VOLATILE_OVERSOLD_BOUNCE: 'text-blue-400',
+    CRASH_RECOVERY: 'text-orange-400',
+    TRIPLE_BEARISH_REVERSAL: 'text-purple-400',
+  }
+
+  const strategyLabels: Record<string, string> = {
+    VOLATILE_OVERSOLD_BOUNCE: 'VOB (과매도 반등)',
+    CRASH_RECOVERY: 'CR (급락 회복)',
+    TRIPLE_BEARISH_REVERSAL: 'TBR (3연음봉 반전)',
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -142,7 +138,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-bold">실시간 현황</h1>
           <p className="text-slate-400 text-sm">
-            {summary?.is_paper ? '📝 테스트 모드' : '🔴 실거래 모드'}
+            {summary?.is_paper ? '테스트 모드' : '실거래 모드'}
           </p>
         </div>
         <div className="flex items-center gap-6">
@@ -176,56 +172,46 @@ export default function Dashboard() {
       {/* Error Banner */}
       {error && (
         <div className="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded">
-          ⚠️ {error}
+          {error}
         </div>
       )}
 
-      {/* 전략 상태 카드 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* BTC 레짐 */}
+      {/* v3 전략 상태 + 리스크 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* v3 전략 활성 상태 */}
         <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
-          <h3 className="text-slate-400 text-sm mb-2">BTC 시장 상태</h3>
-          <div className="flex items-center gap-2">
-            <span className={`text-2xl font-bold ${
-              satelliteStatus?.btc_regime === 'BULLISH' ? 'text-green-400' :
-              satelliteStatus?.btc_regime === 'BEARISH' ? 'text-red-400' :
-              satelliteStatus?.btc_regime === 'VOLATILE' ? 'text-yellow-400' :
-              'text-slate-300'
-            }`}>
-              {satelliteStatus?.btc_regime === 'BULLISH' ? '📈 상승장' :
-               satelliteStatus?.btc_regime === 'BEARISH' ? '📉 하락장' :
-               satelliteStatus?.btc_regime === 'VOLATILE' ? '⚡ 변동장' :
-               '➡️ 중립'}
-            </span>
-            {satelliteStatus?.btc_is_volatile && (
-              <span className="text-xs bg-yellow-600 px-2 py-1 rounded">변동성 높음</span>
-            )}
+          <h3 className="text-slate-400 text-sm mb-2">v3 전략</h3>
+          <div className={`text-2xl font-bold ${v3Status?.v3_enabled ? 'text-green-400' : 'text-red-400'}`}>
+            {v3Status?.v3_enabled ? 'ON' : 'OFF'}
+          </div>
+          <div className="text-sm text-slate-400 mt-1">
+            포지션: {v3Status?.total_positions || 0}개
           </div>
         </div>
 
-        {/* 급등 시작 감지 (SurgeDetector) */}
-        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
-          <h3 className="text-slate-400 text-sm mb-2">급등 시작 감지</h3>
-          {surgeStatus && surgeStatus.active_signals > 0 ? (
-            <div className="space-y-1">
-              {surgeStatus.signals.map((signal) => (
-                <div key={signal.symbol} className="flex items-center justify-between">
-                  <span className="text-green-400 font-mono">{signal.symbol}</span>
-                  <span className="text-xs text-slate-300">
-                    +{(signal.change_1m_pct ?? 0).toFixed(1)}% (1m)
-                  </span>
-                </div>
-              ))}
+        {/* 전략별 포지션 */}
+        {v3Status?.strategies?.map((strat) => (
+          <div key={strat.name} className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+            <h3 className="text-slate-400 text-sm mb-2">
+              {strategyLabels[strat.name] || strat.name}
+            </h3>
+            <div className={`text-2xl font-bold ${strategyColors[strat.name] || 'text-slate-300'}`}>
+              {strat.positions_count}개
             </div>
-          ) : (
-            <p className="text-slate-500">감지된 신호 없음</p>
-          )}
-          {surgeStatus && surgeStatus.active_positions > 0 && (
-            <div className="mt-2 text-xs text-slate-400">
-              활성 포지션: {surgeStatus.active_positions}개
-            </div>
-          )}
-        </div>
+            {strat.positions.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {strat.positions.slice(0, 3).map((pos) => (
+                  <div key={pos.symbol} className="flex items-center justify-between text-xs">
+                    <span className="font-mono">{pos.symbol.replace('KRW-', '')}</span>
+                    <span className={pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      {pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(2)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
 
         {/* 리스크 상태 */}
         <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
@@ -262,20 +248,14 @@ export default function Dashboard() {
                 ? 'bg-green-600 text-white'
                 : 'bg-blue-600 text-white'
             }`}>
-              {capitalProfile.current_mode === 'GROWTH' ? '🚀 GROWTH' : '🛡️ PRESERVE'}
+              {capitalProfile.current_mode === 'GROWTH' ? 'GROWTH' : 'PRESERVE'}
             </span>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
             <div>
               <span className="text-slate-400">리스크/트레이드</span>
               <p className="font-mono text-white">
                 {((capitalProfile.config?.risk_per_trade_min ?? 0) * 100).toFixed(2)}% ~ {((capitalProfile.config?.risk_per_trade_max ?? 0) * 100).toFixed(2)}%
-              </p>
-            </div>
-            <div>
-              <span className="text-slate-400">허용 Attack Level</span>
-              <p className="font-mono text-white">
-                L{(capitalProfile.config?.allowed_attack_levels ?? []).join(', L')}
               </p>
             </div>
             <div>
@@ -331,32 +311,6 @@ export default function Dashboard() {
           </div>
         </div>
       )}
-
-      {/* Attack 후보 (가로 스크롤 카드) */}
-      <SurgeCandidates refreshInterval={3000} />
-
-      {/* 급락 스캘퍼 + Rebound 후보 */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Dip Scalper - 1/3 width */}
-        <div>
-          <DipScalperMonitor />
-        </div>
-
-        {/* Rebound Monitor - 2/3 width */}
-        <div className="lg:col-span-2">
-          <ReboundMonitor refreshInterval={3000} />
-        </div>
-      </div>
-
-      {/* 눌림목 매수 + Algorithm Monitor */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
-          <PullbackMonitor refreshInterval={3000} />
-        </div>
-        <div>
-          <AlgorithmMonitor refreshInterval={3000} />
-        </div>
-      </div>
 
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -219,7 +219,7 @@ class AnalyticsService:
             }
 
         strategies = []
-        for strategy_name in ["CORE", "SATELLITE"]:
+        for strategy_name in ["VOLATILE_OVERSOLD_BOUNCE", "CRASH_RECOVERY", "TRIPLE_BEARISH_REVERSAL"]:
             data = strategy_data.get(strategy_name, {"realized_pnl": 0.0, "count": 0, "wins": 0})
             win_rate = data["wins"] / data["count"] if data["count"] > 0 else 0.0
             strategies.append(

@@ -4,7 +4,6 @@ from fastapi import APIRouter, HTTPException
 
 from src.risk.config import get_risk_config
 from src.risk.risk_overlay import RiskMode
-from src.strategies.core_safety import get_core_safety_guard
 
 router = APIRouter(prefix="/risk", tags=["Risk Management"])
 
@@ -27,14 +26,7 @@ def get_engine():
 
 @router.get("/overlay")
 async def get_risk_overlay_status():
-    """
-    Risk Overlay 상태 조회
-
-    우선순위 체인:
-    1. SYSTEM SAFETY
-    2. TAIL RISK
-    3. MARKET REGIME
-    """
+    """Risk Overlay 상태 조회"""
     engine = get_engine()
     overlay = engine.risk_overlay
 
@@ -46,9 +38,7 @@ async def get_risk_overlay_status():
 
 @router.get("/decision")
 async def get_risk_decision():
-    """
-    현재 리스크 의사결정 조회
-    """
+    """현재 리스크 의사결정 조회"""
     engine = get_engine()
     overlay = engine.risk_overlay
 
@@ -68,9 +58,7 @@ async def get_risk_decision():
 
 @router.get("/exec-health")
 async def get_exec_health():
-    """
-    실행 건강도 조회
-    """
+    """실행 건강도 조회"""
     engine = get_engine()
     health = engine.exec_health.get_health()
 
@@ -82,9 +70,7 @@ async def get_exec_health():
 
 @router.get("/drawdown")
 async def get_drawdown_state():
-    """
-    드로우다운 상태 조회
-    """
+    """드로우다운 상태 조회"""
     engine = get_engine()
     dd_state = engine.risk_overlay.dd_tracker.get_state()
 
@@ -103,9 +89,7 @@ async def get_drawdown_state():
 
 @router.get("/correlation")
 async def get_correlation_state():
-    """
-    상관관계 상태 조회
-    """
+    """상관관계 상태 조회"""
     engine = get_engine()
     corr_guard = engine.risk_overlay.correlation_guard
 
@@ -125,9 +109,7 @@ async def get_correlation_state():
 
 @router.get("/config")
 async def get_risk_config_values():
-    """
-    리스크 설정값 조회
-    """
+    """리스크 설정값 조회"""
     config = get_risk_config()
 
     return {
@@ -167,13 +149,7 @@ async def get_risk_config_values():
 
 @router.post("/mode/{mode}")
 async def force_risk_mode(mode: str, reason: str = "Manual override"):
-    """
-    리스크 모드 강제 설정 (주의: 수동 오버라이드)
-
-    Args:
-        mode: NORMAL, SAFE, or HALT
-        reason: 변경 사유
-    """
+    """리스크 모드 강제 설정"""
     engine = get_engine()
     overlay = engine.risk_overlay
 
@@ -196,74 +172,14 @@ async def force_risk_mode(mode: str, reason: str = "Manual override"):
 
 @router.get("/can-trade")
 async def check_can_trade():
-    """
-    거래 가능 여부 체크
-    """
+    """거래 가능 여부 체크"""
     engine = get_engine()
     overlay = engine.risk_overlay
 
-    sat_allowed, sat_reason = overlay.can_open_satellite()
-    core_allowed, core_reason = overlay.can_open_core()
-
     return {
         "success": True,
-        "satellite": {
-            "allowed": sat_allowed,
-            "reason": sat_reason if not sat_allowed else "OK",
-        },
-        "core": {
-            "allowed": core_allowed,
-            "reason": core_reason if not core_allowed else "OK",
-        },
+        "v3_enabled": engine.v3_enabled,
+        "v3_max_positions": engine.v3_max_positions,
         "sizing_multiplier": overlay.get_sizing_multiplier(),
         "max_exposure": overlay.get_max_exposure(),
-        "hedge_required": overlay.is_hedge_required(),
-    }
-
-
-@router.get("/core-safety")
-async def get_core_safety_status():
-    """
-    Core 전략 안전장치 상태 조회
-
-    펀딩 역전, Edge 충분성 등 모니터링
-    """
-    core_safety = get_core_safety_guard()
-    all_states = core_safety.get_all_states()
-
-    return {
-        "success": True,
-        "allowed_symbols": core_safety.get_allowed_symbols(),
-        "states": {
-            symbol: state.to_dict()
-            for symbol, state in all_states.items()
-        },
-    }
-
-
-@router.get("/core-safety/{symbol}")
-async def get_core_safety_for_symbol(symbol: str):
-    """
-    특정 심볼의 Core 안전장치 상태 조회
-    """
-    core_safety = get_core_safety_guard()
-
-    if not core_safety.is_allowed_symbol(symbol):
-        return {
-            "success": True,
-            "symbol": symbol,
-            "allowed": False,
-            "reason": f"Symbol {symbol} not in allowed list",
-            "state": None,
-        }
-
-    state = core_safety.get_safety_state(symbol)
-    can_open, reason = core_safety.can_open_core(symbol)
-
-    return {
-        "success": True,
-        "symbol": symbol,
-        "allowed": can_open,
-        "reason": reason,
-        "state": state.to_dict(),
     }

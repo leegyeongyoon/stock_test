@@ -252,7 +252,7 @@ class TradeDetailModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     trade_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
-    strategy: Mapped[str] = mapped_column(String(20), index=True)  # PULLBACK, REBOUND, DIP_SCALPER, ATTACK
+    strategy: Mapped[str] = mapped_column(String(30), index=True)  # VOLATILE_OVERSOLD_BOUNCE, CRASH_RECOVERY, TRIPLE_BEARISH_REVERSAL
 
     # 진입/청산 정보
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

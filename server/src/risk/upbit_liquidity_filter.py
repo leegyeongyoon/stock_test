@@ -251,20 +251,12 @@ class UpbitLiquidityFilter:
     def _get_min_volume(self, strategy_id: str) -> float:
         """전략별 최소 거래대금"""
         cfg = self._config
-        if strategy_id in ("IGNITION", "SURGE"):
-            return cfg.min_volume_24h_ignition
-        elif strategy_id == "ATTACK":
-            return cfg.min_volume_24h_attack
-        else:
-            return cfg.min_volume_24h_default
+        return cfg.min_volume_24h_default
 
     def _get_max_spread(self, strategy_id: str) -> float:
         """전략별 최대 스프레드"""
         cfg = self._config
-        if strategy_id in ("ATTACK", "SURGE"):
-            return cfg.max_spread_bps_aggressive
-        else:
-            return cfg.max_spread_bps_default
+        return cfg.max_spread_bps_default
 
     def _calc_spread_bps(self, orderbook: dict, current_price: float) -> float:
         """스프레드 계산 (bps)"""

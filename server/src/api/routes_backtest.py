@@ -47,7 +47,7 @@ class CandleFetchResponse(BaseModel):
 class BacktestRunRequest(BaseModel):
     """백테스트 실행 요청"""
 
-    strategy: str = Field(description="전략명 (PULLBACK, REBOUND, DIP_SCALPER)")
+    strategy: str = Field(description="전략명 (VOLATILE_OVERSOLD_BOUNCE, CRASH_RECOVERY, TRIPLE_BEARISH_REVERSAL)")
     symbols: list[str] = Field(description="테스트할 심볼 리스트")
     start_date: datetime = Field(description="시작 일시")
     end_date: datetime = Field(description="종료 일시")

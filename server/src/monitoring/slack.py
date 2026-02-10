@@ -470,7 +470,4 @@ class SlackNotifier:
         self, strategy: str, pnl: float
     ) -> None:
         """전략별 PnL 업데이트"""
-        if strategy == "CORE":
-            self._daily_stats["core_pnl"] = pnl
-        elif strategy == "SATELLITE":
-            self._daily_stats["satellite_pnl"] = pnl
+        self._daily_stats[f"{strategy.lower()}_pnl"] = pnl

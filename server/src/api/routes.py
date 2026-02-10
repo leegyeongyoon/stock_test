@@ -51,11 +51,7 @@ async def health_check():
     engine = get_engine()
     settings = get_settings()
 
-    # Upbit: 단일 거래소, Binance: spot + perp
-    if settings.is_upbit:
-        ws_connected = engine.exchange.is_connected
-    else:
-        ws_connected = engine.spot_exchange.is_connected and engine.perp_exchange.is_connected
+    ws_connected = engine.exchange.is_connected
 
     return HealthSchema(
         status="healthy" if engine.is_running else "degraded",
@@ -206,31 +202,10 @@ async def get_config():
         "daily_loss_limit_safe": settings.daily_loss_limit_safe,
         "daily_loss_limit_halt": settings.daily_loss_limit_halt,
         "reconcile_interval_sec": settings.reconcile_interval_sec,
-        "satellite_enabled": settings.satellite_enabled,
-        "satellite_max_position_usd": settings.satellite_max_position_usd,
-        "satellite_hard_stop_pct": settings.satellite_hard_stop_pct,
-        "satellite_trailing_stop_pct": settings.satellite_trailing_stop_pct,
-        "satellite_time_stop_minutes": settings.satellite_time_stop_minutes,
+        "v3_enabled": settings.v3_enabled,
+        "v3_max_positions": settings.v3_max_positions,
+        "min_liquidity_krw": settings.min_liquidity_krw,
     }
-
-    if settings.is_upbit:
-        # Upbit 전용 설정
-        config.update({
-            "min_liquidity_krw": settings.min_liquidity_krw,
-            "core_cash_ratio_risk_on": settings.core_cash_ratio_risk_on,
-            "core_cash_ratio_neutral": settings.core_cash_ratio_neutral,
-            "core_cash_ratio_risk_off": settings.core_cash_ratio_risk_off,
-            "core_cash_ratio_volatile": settings.core_cash_ratio_volatile,
-            "core_rebalance_interval_min": settings.core_rebalance_interval_min,
-            "core_rebalance_threshold": settings.core_rebalance_threshold,
-        })
-    else:
-        # Binance 전용 설정
-        config.update({
-            "futures_only_mode": settings.futures_only_mode,
-            "core_min_edge_pct": settings.core_min_edge_pct,
-            "core_max_position_usd": settings.core_max_position_usd,
-        })
 
     return config
 
@@ -393,97 +368,59 @@ async def get_market_data():
     engine = get_engine()
     settings = get_settings()
 
-    if settings.is_upbit:
-        # Upbit 형식
-        return {
-            "exchange": "upbit",
-            "btc_regime": engine._btc_regime,
-            "symbols": list(engine._market_data.keys()),
-            "data": {
-                symbol: {
-                    "price": data.get("price"),
-                    "change_rate": data.get("change_rate"),
-                    "volume_24h": data.get("volume_24h"),
-                    # Satellite 디버그용 필드
-                    "rvol": data.get("rvol", 0),
-                    "close_pos": data.get("close_pos", 0),
-                    "highest_12_5m": data.get("highest_12_5m", 0),
-                    "lowest_12_5m": data.get("lowest_12_5m", 0),
-                    "vwap": data.get("vwap", 0),
-                }
-                for symbol, data in engine._market_data.items()
-            },
-            "core_strategy_enabled": engine.core_strategy._enabled if hasattr(engine, "core_strategy") and engine.core_strategy else False,
-            "satellite_strategy_enabled": engine.satellite_strategy._enabled if engine.satellite_strategy else False,
-        }
-    else:
-        # Binance 형식
-        return {
-            "exchange": "binance",
-            "btc_regime": engine._btc_regime,
-            "symbols": list(engine._market_data.keys()),
-            "data": {
-                symbol: {
-                    "spot_price": data.get("spot_price"),
-                    "perp_price": data.get("perp_price"),
-                    "funding_rate": data.get("funding_rate"),
-                    "edge_pct": (data.get("spot_price", 0) - data.get("perp_price", 0)) / data.get("spot_price", 1) if data.get("spot_price") else 0,
-                    # Satellite 디버그용 필드
-                    "rvol": data.get("rvol", 0),
-                    "close_pos": data.get("close_pos", 0),
-                    "highest_12_5m": data.get("highest_12_5m", 0),
-                    "lowest_12_5m": data.get("lowest_12_5m", 0),
-                    "vwap": data.get("vwap", 0),
-                    "price_change_pct": data.get("price_change_pct", 0),
-                }
-                for symbol, data in engine._market_data.items()
-            },
-            "core_strategy_enabled": engine.core_strategy._enabled if engine.core_strategy else False,
-            "satellite_strategy_enabled": engine.satellite_strategy._enabled if engine.satellite_strategy else False,
-        }
+    return {
+        "exchange": "upbit",
+        "btc_regime": engine._btc_regime,
+        "v3_enabled": engine.v3_enabled,
+        "symbols": list(engine._market_data.keys()),
+        "data": {
+            symbol: {
+                "price": data.get("price"),
+                "volume_24h": data.get("volume_24h"),
+                "rvol": data.get("rvol", 0),
+                "price_change_pct": data.get("price_change_pct", 0),
+            }
+            for symbol, data in engine._market_data.items()
+        },
+    }
 
 
-@router.get("/satellite-status")
-async def get_satellite_status():
-    """Satellite 전략 상세 상태 조회 (디버그용)"""
+@router.get("/v3/status")
+async def get_v3_status():
+    """v3 전략 상태 조회"""
     engine = get_engine()
-    sat = engine.satellite_strategy
 
-    # 현재가로 수익률 계산
-    active_positions_detail = {}
-    for sym, pos in sat._active_positions.items():
-        market_data = engine._market_data.get(sym, {})
-        current_price = market_data.get("price", pos.entry_price)
-        pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+    strategies_info = []
+    for strat in engine.v3_strategies:
+        positions = strat.get_all_positions()
+        pos_details = {}
+        for sym, pos in positions.items():
+            market_data = engine._market_data.get(sym, {})
+            current_price = market_data.get("price", pos.entry_price)
+            pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
 
-        active_positions_detail[sym] = {
-            "entry_price": pos.entry_price,
-            "current_price": current_price,
-            "quantity": pos.quantity,
-            "pnl_pct": f"{pnl_pct:.2%}",
-            "highest_price": pos.highest_price,
-            "trailing_active": pos.trailing_active,
-        }
+            pos_details[sym] = {
+                "entry_price": pos.entry_price,
+                "current_price": current_price,
+                "quantity": pos.quantity,
+                "pnl_pct": f"{pnl_pct:.2%}",
+                "highest_price": pos.highest_price,
+                "trailing_active": pos.trailing_active,
+            }
+
+        strategies_info.append({
+            "name": strat.name,
+            "positions_count": len(positions),
+            "positions": pos_details,
+        })
+
+    total_positions = sum(s["positions_count"] for s in strategies_info)
 
     return {
-        "enabled": sat._enabled,
-        "long_only_mode": sat._long_only_mode,
-        "overheat_threshold": sat.overheat_threshold,
-        "btc_regime": sat._btc_regime.value,
-        "btc_is_volatile": sat._btc_is_volatile,
-        "confirmation_enabled": sat.confirmation_enabled,
-        "rvol_threshold": sat.rvol_threshold,
-        "close_pos_threshold": sat.close_pos_threshold,
-        "pending_signals": {
-            sym: {
-                "side": sig.side.value,
-                "status": sig.status.value,
-                "detected_at": sig.detected_at.isoformat(),
-            }
-            for sym, sig in sat._pending_signals.items()
-        },
-        "active_positions_count": len(sat._active_positions),
-        "active_positions": active_positions_detail,
+        "v3_enabled": engine.v3_enabled,
+        "v3_max_positions": engine.v3_max_positions,
+        "total_positions": total_positions,
+        "strategies": strategies_info,
     }
 
 
@@ -512,265 +449,72 @@ async def get_balance():
     engine = get_engine()
     settings = get_settings()
 
-    if settings.is_upbit:
-        # Upbit: KRW 잔고 + 보유 자산
-        krw_balance = await engine.exchange.get_balance("KRW")
-        all_balances = await engine.exchange.get_all_balances()
-
-        return {
-            "exchange": "upbit",
-            "currency": "KRW",
-            "cash": {
-                "total": krw_balance.total if krw_balance else 0,
-                "free": krw_balance.free if krw_balance else 0,
-                "locked": krw_balance.locked if krw_balance else 0,
-            },
-            "assets": [
-                {
-                    "currency": b.asset,
-                    "balance": b.total,
-                    "locked": b.locked,
-                    "avg_buy_price": b.avg_buy_price,
-                }
-                for b in all_balances
-                if b.asset != "KRW" and b.total > 0
-            ],
-        }
-    else:
-        # Binance: Spot + Perp USDT
-        spot_balance = await engine.spot_exchange.get_balance("USDT")
-        perp_balance = await engine.perp_exchange.get_balance("USDT")
-
-        return {
-            "exchange": "binance",
-            "currency": "USDT",
-            "spot": {
-                "total": spot_balance.total if spot_balance else 0,
-                "free": spot_balance.free if spot_balance else 0,
-                "locked": spot_balance.locked if spot_balance else 0,
-            },
-            "perp": {
-                "total": perp_balance.total if perp_balance else 0,
-                "free": perp_balance.free if perp_balance else 0,
-                "locked": perp_balance.locked if perp_balance else 0,
-            },
-        }
-
-
-@router.post("/bot/close-unhedged")
-async def close_unhedged_positions(confirm: bool = False):
-    """헤지되지 않은 Perp 포지션 청산 (Binance 전용)
-
-    이 엔드포인트는 Spot 잔고 부족 등으로 인해 헤지되지 않은
-    Perp 포지션만 있는 경우에 사용합니다.
-    """
-    settings = get_settings()
-    engine = get_engine()
-
-    # Upbit은 Futures 없음
-    if settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Upbit does not support futures - this endpoint is not available",
-        )
-
-    if not settings.is_paper_mode and not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail="Live mode requires confirm=true to close positions",
-        )
-
-    # Perp 포지션 조회
-    perp_positions = await engine.perp_exchange.get_positions()
-
-    if not perp_positions:
-        return {
-            "success": True,
-            "message": "No positions to close",
-            "closed": [],
-        }
-
-    closed_positions = []
-    errors = []
-
-    for position in perp_positions:
-        symbol = position.symbol
-        side = position.side  # LONG or SHORT
-        quantity = position.quantity
-
-        # 포지션 청산을 위한 반대 주문
-        close_side = OrderSide.SELL if side == "LONG" else OrderSide.BUY
-
-        result = await engine.perp_exchange.place_order(
-            symbol=symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            quantity=abs(quantity),
-            reduce_only=True,
-        )
-
-        if result.success:
-            closed_positions.append({
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-                "close_price": result.avg_price,
-            })
-            engine.add_event(
-                level="INFO",
-                event_type="ORDER",
-                message=f"Closed unhedged position: {symbol} {side} {quantity}",
-                details={
-                    "symbol": symbol,
-                    "side": side,
-                    "quantity": quantity,
-                    "price": result.avg_price,
-                },
-            )
-        else:
-            errors.append({
-                "symbol": symbol,
-                "error": result.error,
-            })
+    krw_balance = await engine.exchange.get_balance("KRW")
+    all_balances = await engine.exchange.get_all_balances()
 
     return {
-        "success": len(errors) == 0,
-        "message": f"Closed {len(closed_positions)} positions" if closed_positions else "No positions closed",
-        "closed": closed_positions,
-        "errors": errors if errors else None,
+        "exchange": "upbit",
+        "currency": "KRW",
+        "cash": {
+            "total": krw_balance.total if krw_balance else 0,
+            "free": krw_balance.free if krw_balance else 0,
+            "locked": krw_balance.locked if krw_balance else 0,
+        },
+        "assets": [
+            {
+                "currency": b.asset,
+                "balance": b.total,
+                "locked": b.locked,
+                "avg_buy_price": b.avg_buy_price,
+            }
+            for b in all_balances
+            if b.asset != "KRW" and b.total > 0
+        ],
     }
 
 
 @router.post("/test/buy")
-async def test_buy(symbol: str = "BTCUSDT", amount: float = 10000):
-    """테스트 매수
-
-    Upbit: KRW 금액으로 매수
-    Binance: FUTURES_ONLY 모드에서 Long + Short 헤지
+async def test_buy(symbol: str = "KRW-BTC", amount: float = 10000):
+    """테스트 매수 (Upbit KRW)
 
     Args:
-        symbol: 심볼 (Upbit: KRW-BTC, Binance: BTCUSDT)
-        amount: 금액 (Upbit: KRW, Binance: quantity)
+        symbol: 심볼 (KRW-BTC)
+        amount: KRW 금액
     """
-    settings = get_settings()
     engine = get_engine()
 
-    if settings.is_upbit:
-        # Upbit 테스트 매수 (KRW 금액으로)
-        results = {"buy": None, "errors": []}
+    results = {"buy": None, "errors": []}
 
-        # KRW 금액으로 시장가 매수
-        buy_result = await engine.exchange.place_order(
-            symbol=symbol if symbol.startswith("KRW-") else f"KRW-{symbol.replace('USDT', '')}",
-            side=OrderSide.BUY,
-            order_type=OrderType.MARKET,
-            quantity=None,  # 수량 대신
-            price=amount,  # KRW 금액 사용
-        )
+    buy_result = await engine.exchange.place_order(
+        symbol=symbol if symbol.startswith("KRW-") else f"KRW-{symbol}",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=None,
+        price=amount,
+    )
 
-        if buy_result.success:
-            results["buy"] = {
-                "filled_qty": buy_result.filled_qty,
-                "avg_price": buy_result.avg_price,
-                "amount_krw": amount,
-            }
-            engine.add_event(
-                level="INFO",
-                event_type="ORDER",
-                message=f"Test buy executed: {symbol} {amount:,.0f} KRW",
-                details=results,
-            )
-        else:
-            results["errors"].append(f"Buy failed: {buy_result.error}")
-
-        return {
-            "success": len(results["errors"]) == 0,
-            "exchange": "upbit",
-            "symbol": symbol,
+    if buy_result.success:
+        results["buy"] = {
+            "filled_qty": buy_result.filled_qty,
+            "avg_price": buy_result.avg_price,
             "amount_krw": amount,
-            "results": results,
         }
-
-    else:
-        # Binance 테스트 (기존 로직)
-        if not settings.is_paper_mode:
-            raise HTTPException(status_code=400, detail="Only available in paper mode")
-
-        quantity = amount  # Binance는 수량 사용
-        results = {"long": None, "short": None, "errors": []}
-
-        if settings.futures_only_mode:
-            # Futures Long
-            long_result = await engine.perp_exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-            )
-
-            engine.add_order(
-                symbol=symbol,
-                strategy="CORE",
-                side="BUY",
-                order_type="MARKET",
-                quantity=quantity,
-                status="FILLED" if long_result.success else "REJECTED",
-                filled_qty=long_result.filled_qty if long_result.success else 0,
-                avg_fill_price=long_result.avg_price if long_result.success else None,
-            )
-
-            if long_result.success:
-                results["long"] = {
-                    "filled_qty": long_result.filled_qty,
-                    "avg_price": long_result.avg_price,
-                }
-            else:
-                results["errors"].append(f"Long failed: {long_result.error}")
-                return results
-
-            # Futures Short (헤지)
-            short_result = await engine.perp_exchange.place_order(
-                symbol=symbol,
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-            )
-
-            engine.add_order(
-                symbol=symbol,
-                strategy="CORE",
-                side="SELL",
-                order_type="MARKET",
-                quantity=quantity,
-                status="FILLED" if short_result.success else "REJECTED",
-                filled_qty=short_result.filled_qty if short_result.success else 0,
-                avg_fill_price=short_result.avg_price if short_result.success else None,
-            )
-
-            if short_result.success:
-                results["short"] = {
-                    "filled_qty": short_result.filled_qty,
-                    "avg_price": short_result.avg_price,
-                }
-            else:
-                results["errors"].append(f"Short failed: {short_result.error}")
-        else:
-            results["errors"].append("Spot+Perp mode requires Spot balance")
-
         engine.add_event(
             level="INFO",
             event_type="ORDER",
-            message=f"Test buy executed: {symbol}",
+            message=f"Test buy executed: {symbol} {amount:,.0f} KRW",
             details=results,
         )
+    else:
+        results["errors"].append(f"Buy failed: {buy_result.error}")
 
-        return {
-            "success": len(results["errors"]) == 0,
-            "exchange": "binance",
-            "symbol": symbol,
-            "quantity": quantity,
-            "results": results,
-        }
+    return {
+        "success": len(results["errors"]) == 0,
+        "exchange": "upbit",
+        "symbol": symbol,
+        "amount_krw": amount,
+        "results": results,
+    }
 
 
 @router.post("/close-all")
@@ -903,871 +647,3 @@ async def set_user_mode(request: UserModeRequest):
 
     return mode_manager.get_status_dict()
 
-
-# ============================================================
-# Attack Module API
-# ============================================================
-
-
-class AttackModeRequest(BaseModel):
-    """Attack 모드 변경 요청"""
-
-    mode: str  # OFF, NORMAL, PLUS, MAX
-
-
-@router.get("/attack/status")
-async def get_attack_status():
-    """Attack 전략 상태 조회
-
-    Returns:
-        mode: 현재 Attack 모드
-        enabled: 활성화 여부
-        active_positions: 활성 Attack 포지션 수
-        pending_signals: 대기 중인 시그널 수
-        gate_status: 리스크 게이트 상태
-        stats: 통계
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Attack module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "attack_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Attack strategy not initialized",
-        )
-
-    return engine.attack_strategy.get_status()
-
-
-@router.post("/attack/set-mode")
-async def set_attack_mode(request: AttackModeRequest):
-    """Attack 모드 변경
-
-    Args:
-        mode: OFF, NORMAL, PLUS, MAX 중 하나
-
-    OFF: Attack 비활성화
-    NORMAL: 기본 모드 (리스크 0.5%/트레이드)
-    PLUS: 공격적 모드 (리스크 0.6%/트레이드)
-    MAX: 최대 공격 모드 (리스크 0.7%/트레이드)
-
-    Returns:
-        변경 후 Attack 상태
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Attack module is only available for Upbit",
-        )
-
-    mode_upper = request.mode.upper()
-    if mode_upper not in ["OFF", "NORMAL", "PLUS", "MAX"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid mode: {request.mode}. Must be one of: OFF, NORMAL, PLUS, MAX",
-        )
-
-    if not hasattr(engine, "attack_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Attack strategy not initialized",
-        )
-
-    # 모드 변경
-    engine.attack_strategy.set_attack_mode(mode_upper)
-
-    # 이벤트 기록
-    engine.add_event(
-        level="INFO",
-        event_type="ATTACK_MODE_CHANGE",
-        message=f"Attack mode changed to {mode_upper}",
-        details={"mode": mode_upper},
-    )
-
-    return {
-        "success": True,
-        "mode": mode_upper,
-        "status": engine.attack_strategy.get_status(),
-    }
-
-
-@router.get("/attack/score/{symbol}")
-async def get_attack_score(symbol: str):
-    """특정 심볼의 Attack Score 조회
-
-    Args:
-        symbol: 심볼 (예: KRW-BTC)
-
-    Returns:
-        Attack Score 상세 정보
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Attack module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "attack_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Attack strategy not initialized",
-        )
-
-    # 심볼 형식 변환
-    if not symbol.startswith("KRW-"):
-        symbol = f"KRW-{symbol.replace('USDT', '').upper()}"
-
-    # 시장 데이터 가져오기
-    market_data = engine._market_data.get(symbol, {})
-    if not market_data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Market data not found for {symbol}",
-        )
-
-    # Attack Score 계산
-    score_result = engine.attack_strategy.get_attack_score(market_data)
-
-    return {
-        "symbol": symbol,
-        "total_score": score_result.total_score,
-        "level": score_result.level,
-        "target_allocation": score_result.target_allocation,
-        "components": [c.to_dict() for c in score_result.components],
-        "timestamp": score_result.timestamp.isoformat(),
-    }
-
-
-@router.get("/attack/positions")
-async def get_attack_positions():
-    """활성 Attack 포지션 조회
-
-    Returns:
-        active_positions: 활성 포지션 목록
-        pending_signals: 대기 중인 시그널 목록
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Attack module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "attack_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Attack strategy not initialized",
-        )
-
-    return {
-        "active_positions": engine.attack_strategy.get_active_positions(),
-        "pending_signals": engine.attack_strategy.get_pending_signals(),
-    }
-
-
-@router.get("/attack/gate-check/{symbol}")
-async def check_attack_gate(symbol: str):
-    """Attack Gate 체크 (진입 가능 여부 확인)
-
-    Args:
-        symbol: 심볼 (예: KRW-BTC)
-
-    Returns:
-        Gate 체크 결과 및 허용 여부
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Attack module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "attack_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Attack strategy not initialized",
-        )
-
-    # 심볼 형식 변환
-    if not symbol.startswith("KRW-"):
-        symbol = f"KRW-{symbol.replace('USDT', '').upper()}"
-
-    # 시장 데이터 가져오기
-    market_data = engine._market_data.get(symbol, {})
-    if not market_data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Market data not found for {symbol}",
-        )
-
-    # Attack Score 계산
-    score_result = engine.attack_strategy.get_attack_score(market_data)
-
-    # Attack Gate 체크
-    from src.risk.attack_gate import get_attack_gate
-
-    attack_gate = get_attack_gate()
-    gate_result = attack_gate.check(
-        attack_level=score_result.level,
-        dd_tier=engine.attack_strategy._dd_tier,
-        regime=engine.attack_strategy._btc_regime,
-        daily_loss=engine.attack_strategy._daily_loss,
-        is_volatile=engine.attack_strategy._btc_is_volatile,
-        change_rate=market_data.get("change_rate", 0),
-        attack_mode=engine.attack_strategy.attack_mode,
-    )
-
-    return {
-        "symbol": symbol,
-        "score": {
-            "total": score_result.total_score,
-            "level": score_result.level,
-        },
-        "gate_result": gate_result.to_dict(),
-    }
-
-
-# ===== Pullback 전략 API (눌림목 매수) =====
-
-
-class PullbackModeRequest(BaseModel):
-    """Pullback 모드 변경 요청"""
-
-    mode: str  # OFF, SAFE, NORMAL, AGGRESSIVE
-
-
-@router.get("/pullback/status")
-async def get_pullback_status():
-    """Pullback 전략 상태 조회
-
-    Returns:
-        mode: 현재 Pullback 모드
-        enabled: 활성화 여부
-        active_positions: 활성 포지션 수
-        pending_signals: 대기 중인 시그널 수
-        positions: 포지션 상세
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Pullback module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "pullback_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Pullback strategy not initialized",
-        )
-
-    return engine.pullback_strategy.get_status()
-
-
-@router.post("/pullback/set-mode")
-async def set_pullback_mode(request: PullbackModeRequest):
-    """Pullback 모드 변경
-
-    Args:
-        mode: OFF, SAFE, NORMAL, AGGRESSIVE 중 하나
-
-    OFF: Pullback 비활성화
-    SAFE: 안전 모드 (Level 3만 진입)
-    NORMAL: 일반 모드 (Level 2+ 진입)
-    AGGRESSIVE: 공격 모드 (Level 1+ 진입)
-
-    Returns:
-        변경 후 Pullback 상태
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Pullback module is only available for Upbit",
-        )
-
-    mode_upper = request.mode.upper()
-    if mode_upper not in ["OFF", "SAFE", "NORMAL", "AGGRESSIVE"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid mode: {request.mode}. Must be one of: OFF, SAFE, NORMAL, AGGRESSIVE",
-        )
-
-    if not hasattr(engine, "pullback_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Pullback strategy not initialized",
-        )
-
-    # 모드 변경
-    engine.pullback_strategy.set_mode(mode_upper)
-
-    # 이벤트 기록
-    engine.add_event(
-        level="INFO",
-        event_type="PULLBACK_MODE_CHANGE",
-        message=f"Pullback mode changed to {mode_upper}",
-        details={"mode": mode_upper},
-    )
-
-    return {
-        "success": True,
-        "mode": mode_upper,
-        "status": engine.pullback_strategy.get_status(),
-    }
-
-
-@router.get("/pullback/positions")
-async def get_pullback_positions():
-    """활성 Pullback 포지션 조회
-
-    Returns:
-        active_positions: 활성 포지션 목록
-        pending_signals: 대기 중인 시그널 목록
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Pullback module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "pullback_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Pullback strategy not initialized",
-        )
-
-    all_positions = engine.pullback_strategy.get_all_positions()
-    status = engine.pullback_strategy.get_status()
-
-    return {
-        "active_positions": {sym: pos.to_dict() for sym, pos in all_positions.items()},
-        "pending_signals": status.get("signals", {}),
-    }
-
-
-@router.get("/pullback/score/{symbol}")
-async def get_pullback_score(symbol: str):
-    """특정 심볼의 Pullback Score 조회
-
-    Args:
-        symbol: 심볼 (예: KRW-BTC)
-
-    Returns:
-        Pullback Score 상세 정보
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Pullback module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "pullback_strategy"):
-        raise HTTPException(
-            status_code=503,
-            detail="Pullback strategy not initialized",
-        )
-
-    # 심볼 형식 변환
-    if not symbol.startswith("KRW-"):
-        symbol = f"KRW-{symbol.replace('USDT', '').upper()}"
-
-    # 시장 데이터 가져오기
-    market_data = engine._market_data.get(symbol, {})
-    if not market_data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Market data not found for {symbol}",
-        )
-
-    # 호가창 정보 추가 (실시간은 아님)
-    enhanced_market_data = {
-        **market_data,
-        "highest_24h": market_data.get("high_20", market_data.get("price", 0) * 1.01),
-        "lowest_24h": market_data.get("low_20", market_data.get("price", 0) * 0.99),
-        "change_rate": market_data.get("price_change_pct", 0) / 100,
-        "change_1h": market_data.get("price_change_pct", 0) / 100 / 24,
-        "sma_20": market_data.get("vwap", 0),
-        "bid_volume": 0,
-        "ask_volume": 0,
-    }
-
-    # Pullback Score 계산
-    from src.strategies.pullback_score import get_pullback_score_calculator
-
-    calculator = get_pullback_score_calculator()
-    score_result = calculator.calculate(enhanced_market_data)
-
-    return score_result.to_dict()
-
-
-# ===== SurgeDetector 급등 시작 감지 API =====
-
-
-@router.get("/surge/status")
-async def get_surge_status():
-    """SurgeDetector 상태 조회
-
-    Returns:
-        enabled: 활성화 여부
-        active_signals: 활성 신호 수
-        active_positions: 활성 포지션 수
-        cooldown_count: 쿨다운 중인 심볼 수
-        signals: 활성 신호 목록
-        positions: 활성 포지션 목록
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="SurgeDetector is only available for Upbit",
-        )
-
-    # SurgeDetector는 ignition_strategy 내부에 있거나 별도 싱글톤
-    from src.strategies.ignition import get_surge_detector
-
-    surge_detector = get_surge_detector()
-    return {
-        "enabled": True,
-        **surge_detector.get_status(),
-    }
-
-
-@router.get("/surge/diagnostic")
-async def get_surge_diagnostic():
-    """SurgeDetector 진단 정보 조회 (1분봉 데이터 상태 등)"""
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="SurgeDetector is only available for Upbit",
-        )
-
-    from src.data.candle_manager import get_candle_manager
-    cm = get_candle_manager()
-
-    # 주요 심볼들의 1분봉 상태 확인
-    test_symbols = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ZIL", "KRW-SOL"]
-    candle_status = {}
-
-    for symbol in test_symbols:
-        candles_1m = cm.get_candles(symbol, "1m", 10)
-        candles_5m = cm.get_candles(symbol, "5m", 5)
-        candle_status[symbol] = {
-            "candles_1m": len(candles_1m) if candles_1m else 0,
-            "candles_5m": len(candles_5m) if candles_5m else 0,
-        }
-        if candles_1m:
-            last = candles_1m[-1]
-            candle_status[symbol]["last_1m_close"] = last.close
-            candle_status[symbol]["last_1m_time"] = str(last.open_time) if hasattr(last, "open_time") else "N/A"
-
-    # 엔진 상태
-    return {
-        "candle_manager_status": candle_status,
-        "engine_running": engine._running if hasattr(engine, "_running") else False,
-        "is_upbit": settings.is_upbit,
-        "candle_update_counter": getattr(engine, "_candle_update_counter", -1),
-    }
-
-
-@router.get("/surge/signals")
-async def get_surge_signals():
-    """활성 급등 신호 조회
-
-    Returns:
-        signals: 급등 신호 목록 (만료되지 않은 것만)
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="SurgeDetector is only available for Upbit",
-        )
-
-    from src.strategies.ignition import get_surge_detector
-
-    surge_detector = get_surge_detector()
-    signals = surge_detector.get_active_signals()
-
-    return {"signals": [s.to_dict() for s in signals]}
-
-
-@router.get("/surge/positions")
-async def get_surge_positions():
-    """급등 포지션 조회
-
-    Returns:
-        positions: 급등 전략으로 진입한 포지션 목록
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="SurgeDetector is only available for Upbit",
-        )
-
-    from src.strategies.ignition import get_surge_detector
-
-    surge_detector = get_surge_detector()
-    positions = surge_detector.get_positions()
-
-    return {
-        "positions": [
-            {
-                "symbol": p.symbol,
-                "entry_price": p.entry_price,
-                "quantity": p.quantity,
-                "stop_loss": p.stop_loss,
-                "take_profit": p.take_profit,
-                "highest_price": p.highest_price,
-                "trailing_stop": p.trailing_stop,
-            }
-            for p in positions
-        ]
-    }
-
-
-@router.get("/surge/candidates")
-async def get_surge_candidates(
-    min_score: float = Query(70.0, description="최소 점수 (0-100)"),
-    limit: int = Query(20, description="최대 반환 개수"),
-):
-    """급등 조건 근접 종목 조회
-
-    각 조건별 달성률(%)을 계산하여 급등 임박 종목 반환
-
-    조건 및 가중치:
-    - 1분 변화율 (30%): 목표 1.5%
-    - 거래량 배수 (30%): 목표 3배 (전일급등주는 3.75배)
-    - VolOverheat (15%): 8배 초과 차단
-    - Anti-Chase (25%): 구조적 거리 기반
-
-    Returns:
-        candidates: 점수순으로 정렬된 근접 종목 목록
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="SurgeDetector is only available for Upbit",
-        )
-
-    from src.strategies.ignition import get_surge_detector
-    from src.data.candle_manager import get_candle_manager
-
-    surge_detector = get_surge_detector()
-    cm = get_candle_manager()
-
-    # 심볼 및 시장 데이터 수집
-    symbols = engine.symbol_manager.get_all_symbols()
-    market_data_map = {}
-
-    for symbol in symbols:
-        # 1분봉에서 현재가 가져오기
-        candles = cm.get_candles(symbol, "1m", 1)
-        if candles and len(candles) > 0:
-            price = candles[-1].close
-            if price and price > 0:
-                # 한글명/영문명 조회
-                names = engine.symbol_manager.get_symbol_names(symbol)
-                market_data_map[symbol] = {
-                    "price": price,
-                    "signed_change_rate": 0,
-                    "korean_name": names.get("korean_name", ""),
-                    "english_name": names.get("english_name", ""),
-                }
-
-    candidates = surge_detector.get_surge_candidates(
-        symbols=symbols,
-        market_data_map=market_data_map,
-        min_score=min_score,
-        limit=limit,
-    )
-
-    return {
-        "candidates": [c.to_dict() for c in candidates],
-        "total_scanned": len(symbols),
-        "filtered_count": len(candidates),
-    }
-
-
-# ===== Ignition Watchlist API =====
-
-
-@router.get("/ignition/watchlist")
-async def get_ignition_watchlist():
-    """Ignition Watchlist 조회 - 현재 감시 중인 종목
-
-    Returns:
-        watchlist: 감시 중인 종목 목록 (Setup 통과)
-        count: 종목 수
-        mode: 현재 Ignition 모드
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Ignition module is only available for Upbit",
-        )
-
-    if not hasattr(engine, "ignition_strategy") or engine.ignition_strategy is None:
-        return {
-            "watchlist": [],
-            "count": 0,
-            "mode": settings.ignition_mode,
-            "message": "Ignition strategy not initialized",
-        }
-
-    watchlist = engine.ignition_strategy.get_watchlist()
-
-    return {
-        "watchlist": [
-            {
-                "symbol": c.symbol,
-                "score": c.total_score,
-                "added_at": c.added_at.isoformat() if hasattr(c, "added_at") else None,
-                "setup_scores": c.scores if hasattr(c, "scores") else {},
-            }
-            for c in watchlist
-        ],
-        "count": len(watchlist),
-        "mode": settings.ignition_mode,
-    }
-
-
-@router.post("/ignition/scan")
-async def trigger_ignition_scan():
-    """Ignition Setup 스캔 수동 트리거 (테스트용)"""
-    engine = get_engine()
-    settings = get_settings()
-
-    if not hasattr(engine, "ignition_strategy") or engine.ignition_strategy is None:
-        return {"error": "Ignition strategy not initialized"}
-
-    # 심볼 가져오기
-    qualified_symbols = engine.symbol_manager.get_qualified_symbols()
-
-    if not qualified_symbols:
-        return {
-            "error": "No qualified symbols",
-            "all_symbols_count": len(engine.symbol_manager.get_all_symbols()),
-        }
-
-    # 스캔 실행
-    import asyncio
-    candidates = await engine.ignition_strategy.scan_setups(
-        symbols=qualified_symbols,
-        market_data_map=engine._market_data,
-    )
-
-    return {
-        "scanned": len(qualified_symbols),
-        "candidates": len(candidates) if candidates else 0,
-        "watchlist": len(engine.ignition_strategy.get_watchlist()),
-        "symbols_sample": qualified_symbols[:5],
-    }
-
-
-@router.get("/ignition/status")
-async def get_ignition_status():
-    """Ignition 전략 전체 상태 조회
-
-    Returns:
-        mode: Ignition 모드
-        watchlist_count: Watchlist 종목 수
-        active_positions: 활성 포지션 수
-        settings: 주요 설정값
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Ignition module is only available for Upbit",
-        )
-
-    watchlist_count = 0
-    active_positions = 0
-
-    if hasattr(engine, "ignition_strategy") and engine.ignition_strategy is not None:
-        watchlist_count = len(engine.ignition_strategy.get_watchlist())
-        active_positions = len(engine.ignition_strategy.get_all_positions())
-
-    return {
-        "mode": settings.ignition_mode,
-        "watchlist_count": watchlist_count,
-        "active_positions": active_positions,
-        "settings": {
-            "setup_scan_interval_min": settings.ignition_setup_scan_interval_min,
-            "watchlist_max": settings.ignition_watchlist_max,
-            "setup_min_score": settings.ignition_setup_min_score,
-            "min_position_pct_l3": getattr(settings, "ignition_min_position_pct_l3", 0.50),
-            "max_position_pct_l3": getattr(settings, "ignition_max_position_pct_l3", 0.60),
-        },
-    }
-
-
-# ===== Dip Scalper (급락 스캘퍼) API =====
-
-
-@router.get("/dip-scalper/status")
-async def get_dip_scalper_status():
-    """Dip Scalper 상태 조회
-
-    Returns:
-        enabled: 활성화 여부
-        active_positions: 활성 포지션 수
-        settings: 설정 정보
-        stats: 통계 정보
-        positions: 포지션 목록
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Dip Scalper is only available for Upbit",
-        )
-
-    from src.strategies.dip_scalper import get_dip_scalper
-
-    dip_scalper = get_dip_scalper()
-    return dip_scalper.get_status()
-
-
-@router.post("/dip-scalper/enable")
-async def enable_dip_scalper(enabled: bool = True):
-    """Dip Scalper 활성화/비활성화"""
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Dip Scalper is only available for Upbit",
-        )
-
-    from src.strategies.dip_scalper import get_dip_scalper
-
-    dip_scalper = get_dip_scalper()
-    dip_scalper.set_enabled(enabled)
-
-    return {"success": True, "enabled": enabled}
-
-
-@router.get("/dip-scalper/candidates")
-async def get_dip_scalper_candidates(limit: int = 5):
-    """Dip Scalper 후보 종목 조회 (급락 근접 종목)
-
-    Returns:
-        candidates: 급락 근접 종목 리스트 (1분 변화율 기준 정렬)
-    """
-    engine = get_engine()
-    settings = get_settings()
-
-    if not settings.is_upbit:
-        raise HTTPException(
-            status_code=400,
-            detail="Dip Scalper is only available for Upbit",
-        )
-
-    from src.strategies.dip_scalper import get_dip_scalper
-
-    dip_scalper = get_dip_scalper()
-    candidates = []
-
-    # 엔진의 market_data에서 1분 변화율 기준으로 급락 종목 찾기
-    market_data = getattr(engine, "_market_data", {})
-
-    for symbol, md in market_data.items():
-        if not md or md.get("price", 0) <= 0:
-            continue
-
-        price = md.get("price", 0)
-        change_1m = md.get("change_1m", 0)
-        atr = md.get("atr", 0)
-        atr_pct = atr / price if price > 0 and atr > 0 else 0.02
-        volume_24h = md.get("volume_24h", 0)
-
-        # 거래대금 필터
-        if volume_24h < dip_scalper.min_volume_krw:
-            continue
-
-        # 급락 기준 계산
-        threshold = dip_scalper.calc_drop_threshold(atr_pct)
-
-        # 급락 근접도 계산 (threshold 대비 현재 변화율)
-        # change_1m이 음수이고 threshold도 음수이므로, 둘 다 음수일 때 proximity 계산
-        if threshold < 0 and change_1m < 0:
-            proximity = change_1m / threshold  # 1.0이면 정확히 기준 도달
-        elif change_1m < 0:
-            proximity = abs(change_1m) / abs(threshold) if threshold != 0 else 0
-        else:
-            proximity = 0  # 상승 중이면 proximity = 0
-
-        candidates.append({
-            "symbol": symbol,
-            "price": price,
-            "change_1m": change_1m,
-            "change_1m_pct": f"{change_1m * 100:.2f}%",
-            "atr_pct": atr_pct,
-            "threshold": threshold,
-            "threshold_pct": f"{threshold * 100:.1f}%",
-            "proximity": proximity,
-            "proximity_pct": f"{proximity * 100:.0f}%",
-            "volume_24h_krw": volume_24h,
-            "triggered": change_1m <= threshold,
-        })
-
-    # 1분 변화율 기준 정렬 (가장 많이 떨어진 것 먼저)
-    candidates.sort(key=lambda x: x["change_1m"])
-
-    return {
-        "candidates": candidates[:limit],
-        "total_scanned": len(market_data),
-        "settings": {
-            "min_drop_pct": f"{dip_scalper.min_drop_pct * 100:.1f}%",
-            "max_drop_pct": f"{dip_scalper.max_drop_pct * 100:.1f}%",
-            "atr_multiplier": dip_scalper.atr_multiplier,
-        }
-    }
