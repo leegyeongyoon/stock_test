@@ -26,10 +26,10 @@ export function formatKRWCompact(value: number): string {
 
   if (absValue >= 100_000_000) {
     // 억 단위 (100M+)
-    return `${sign}₩${(absValue / 100_000_000).toFixed(1)}억`
+    return `${sign}₩${Math.round(absValue / 100_000_000).toLocaleString('ko-KR')}억`
   } else if (absValue >= 10_000) {
     // 만 단위 (10K+)
-    return `${sign}₩${(absValue / 10_000).toFixed(1)}만`
+    return `${sign}₩${Math.round(absValue / 10_000).toLocaleString('ko-KR')}만`
   }
   return formatKRW(value)
 }
@@ -39,22 +39,7 @@ export function formatKRWCompact(value: number): string {
  * Handles different precision based on price range
  */
 export function formatUpbitPrice(price: number): string {
-  if (price >= 1_000_000) {
-    // 100만원 이상: 정수
-    return `₩${Math.round(price).toLocaleString('ko-KR')}`
-  } else if (price >= 1_000) {
-    // 1000원 이상: 정수
-    return `₩${Math.round(price).toLocaleString('ko-KR')}`
-  } else if (price >= 100) {
-    // 100원 이상: 소수점 1자리
-    return `₩${price.toFixed(1)}`
-  } else if (price >= 1) {
-    // 1원 이상: 소수점 2자리
-    return `₩${price.toFixed(2)}`
-  } else {
-    // 1원 미만: 소수점 4자리
-    return `₩${price.toFixed(4)}`
-  }
+  return `₩${Math.round(price).toLocaleString('ko-KR')}`
 }
 
 /**

@@ -608,7 +608,7 @@ export default function BacktestPage() {
                 <div className="bg-slate-800 rounded-lg p-4">
                   <div className="text-sm text-slate-400">최종 자산</div>
                   <div className="text-2xl font-bold">
-                    {result.final_equity.toLocaleString()}원
+                    {Math.round(result.final_equity).toLocaleString()}원
                   </div>
                 </div>
                 <div className="bg-slate-800 rounded-lg p-4">
@@ -686,10 +686,10 @@ export default function BacktestPage() {
                           <td className="py-2">{trade.symbol}</td>
                           <td className="py-2">{new Date(trade.entry_time).toLocaleString('ko-KR')}</td>
                           <td className="py-2">{trade.exit_time ? new Date(trade.exit_time).toLocaleString('ko-KR') : '-'}</td>
-                          <td className="py-2 text-right">{trade.entry_price.toLocaleString()}</td>
-                          <td className="py-2 text-right">{trade.exit_price?.toLocaleString() || '-'}</td>
+                          <td className="py-2 text-right">{Math.round(trade.entry_price).toLocaleString()}</td>
+                          <td className="py-2 text-right">{trade.exit_price ? Math.round(trade.exit_price).toLocaleString() : '-'}</td>
                           <td className={`py-2 text-right font-medium ${trade.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toLocaleString()}원
+                            {trade.pnl >= 0 ? '+' : ''}{Math.round(trade.pnl).toLocaleString()}원
                             <span className="text-xs ml-1">({(trade.pnl_pct * 100).toFixed(2)}%)</span>
                           </td>
                           <td className="py-2">
