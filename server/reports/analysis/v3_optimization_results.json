@@ -1,0 +1,305 @@
+{
+  "timestamp": "2026-02-25T02:42:16.137550",
+  "model": "gpt-4o",
+  "rounds": 5,
+  "results": [
+    {
+      "strategy": "VOLATILE_OVERSOLD_BOUNCE",
+      "best_return": 5.7,
+      "best_params": {
+        "stop_loss_pct": -0.02,
+        "take_profit_pct": 0.02,
+        "trailing_trigger_pct": 0.015,
+        "trailing_stop_pct": 0.01,
+        "time_stop_minutes": 180,
+        "min_atr_pct": 1.0,
+        "max_rsi": 30,
+        "min_rvol": 2.5,
+        "cooldown_minutes": 90
+      },
+      "original_params": {
+        "stop_loss_pct": -0.02,
+        "take_profit_pct": 0.02,
+        "trailing_trigger_pct": 0.02,
+        "trailing_stop_pct": 0.01,
+        "time_stop_minutes": 180,
+        "min_atr_pct": 1.0,
+        "max_rsi": 30,
+        "min_rvol": 2.0,
+        "cooldown_minutes": 60
+      },
+      "history": [
+        {
+          "round": 1,
+          "return_pct": 5.29,
+          "win_rate": 80.7,
+          "trades": 140,
+          "pf": 2.41,
+          "changes": "trailing_trigger_pct: 0.02 → 0.015 | cooldown_minutes: 60 → 90",
+          "applied": true
+        },
+        {
+          "round": 2,
+          "return_pct": 5.29,
+          "win_rate": 80.7,
+          "trades": 140,
+          "pf": 2.41,
+          "changes": "변경 없음"
+        },
+        {
+          "round": 3,
+          "return_pct": 5.7,
+          "win_rate": 84.2,
+          "trades": 101,
+          "pf": 3.53,
+          "changes": "min_rvol: 2.0 → 2.5",
+          "applied": true
+        },
+        {
+          "round": 4,
+          "return_pct": 5.67,
+          "win_rate": 86.1,
+          "trades": 101,
+          "pf": 3.83,
+          "changes": "trailing_trigger_pct: 0.015 → 0.01 | trailing_stop_pct: 0.01 → 0.005",
+          "reverted": true,
+          "revert_reason": "수익률 +5.70%→+5.67%, 승률 84.2%→86.1%, 거래 101→101"
+        },
+        {
+          "round": 5,
+          "return_pct": 5.7,
+          "win_rate": 84.2,
+          "trades": 101,
+          "pf": 3.53,
+          "changes": "cooldown_minutes: 90 → 120",
+          "reverted": true,
+          "revert_reason": "수익률 +5.70%→+5.70%, 승률 84.2%→84.2%, 거래 101→101"
+        }
+      ]
+    },
+    {
+      "strategy": "CRASH_RECOVERY",
+      "best_return": 4.67,
+      "best_params": {
+        "stop_loss_pct": -0.015,
+        "take_profit_pct": 0.02,
+        "trailing_trigger_pct": 0.015,
+        "trailing_stop_pct": 0.01,
+        "time_stop_minutes": 120,
+        "min_drop_pct": 0.02,
+        "max_rsi": 35,
+        "min_rvol": 2.5,
+        "cooldown_minutes": 60
+      },
+      "original_params": {
+        "stop_loss_pct": -0.015,
+        "take_profit_pct": 0.02,
+        "trailing_trigger_pct": 0.02,
+        "trailing_stop_pct": 0.01,
+        "time_stop_minutes": 120,
+        "min_drop_pct": 0.02,
+        "max_rsi": 35,
+        "min_rvol": 2.5,
+        "cooldown_minutes": 45
+      },
+      "history": [
+        {
+          "round": 1,
+          "return_pct": 4.67,
+          "win_rate": 62.5,
+          "trades": 240,
+          "pf": 1.61,
+          "changes": "trailing_trigger_pct: 0.02 → 0.015 | cooldown_minutes: 45 → 60",
+          "applied": true
+        },
+        {
+          "round": 2,
+          "return_pct": 4.67,
+          "win_rate": 62.5,
+          "trades": 240,
+          "pf": 1.61,
+          "changes": "변경 없음"
+        },
+        {
+          "round": 3,
+          "return_pct": 4.67,
+          "win_rate": 62.5,
+          "trades": 240,
+          "pf": 1.61,
+          "changes": "변경 없음"
+        },
+        {
+          "round": 4,
+          "return_pct": 4.67,
+          "win_rate": 62.5,
+          "trades": 240,
+          "pf": 1.61,
+          "changes": "변경 없음"
+        },
+        {
+          "round": 5,
+          "return_pct": 4.13,
+          "win_rate": 61.1,
+          "trades": 180,
+          "pf": 1.67,
+          "changes": "min_rvol: 2.5 → 3.0",
+          "reverted": true,
+          "revert_reason": "수익률 +4.67%→+4.13%, 승률 62.5%→61.1%, 거래 240→180"
+        }
+      ]
+    },
+    {
+      "strategy": "TRIPLE_BEARISH_REVERSAL",
+      "best_return": 5.02,
+      "best_params": {
+        "stop_loss_pct": -0.02,
+        "take_profit_pct": 0.02,
+        "trailing_trigger_pct": 0.015,
+        "trailing_stop_pct": 0.01,
+        "time_stop_minutes": 180,
+        "max_rsi": 30,
+        "min_atr_pct": 1.0,
+        "min_bearish": 3,
+        "cooldown_minutes": 45
+      },
+      "original_params": {
+        "stop_loss_pct": -0.02,
+        "take_profit_pct": 0.02,
+        "trailing_trigger_pct": 0.02,
+        "trailing_stop_pct": 0.01,
+        "time_stop_minutes": 180,
+        "max_rsi": 30,
+        "min_atr_pct": 1.0,
+        "min_bearish": 3,
+        "cooldown_minutes": 30
+      },
+      "history": [
+        {
+          "round": 1,
+          "return_pct": 4.86,
+          "win_rate": 61.3,
+          "trades": 377,
+          "pf": 1.24,
+          "changes": "trailing_trigger_pct: 0.02 → 0.015 | cooldown_minutes: 30 → 60",
+          "reverted": true,
+          "revert_reason": "수익률 +4.87%→+4.86%, 승률 59.2%→61.3%, 거래 400→377"
+        },
+        {
+          "round": 2,
+          "return_pct": 4.86,
+          "win_rate": 61.3,
+          "trades": 377,
+          "pf": 1.24,
+          "changes": "trailing_trigger_pct: 0.02 → 0.015 | cooldown_minutes: 30 → 60",
+          "reverted": true,
+          "revert_reason": "수익률 +4.87%→+4.86%, 승률 59.2%→61.3%, 거래 400→377"
+        },
+        {
+          "round": 3,
+          "return_pct": 5.02,
+          "win_rate": 60.8,
+          "trades": 388,
+          "pf": 1.25,
+          "changes": "trailing_trigger_pct: 0.02 → 0.015 | cooldown_minutes: 30 → 45",
+          "applied": true
+        },
+        {
+          "round": 4,
+          "return_pct": 4.86,
+          "win_rate": 61.3,
+          "trades": 377,
+          "pf": 1.24,
+          "changes": "cooldown_minutes: 45 → 60",
+          "reverted": true,
+          "revert_reason": "수익률 +5.02%→+4.86%, 승률 60.8%→61.3%, 거래 388→377"
+        },
+        {
+          "round": 5,
+          "return_pct": 4.86,
+          "win_rate": 61.3,
+          "trades": 377,
+          "pf": 1.24,
+          "changes": "cooldown_minutes: 45 → 60",
+          "reverted": true,
+          "revert_reason": "수익률 +5.02%→+4.86%, 승률 60.8%→61.3%, 거래 388→377"
+        }
+      ]
+    }
+  ],
+  "validation_90d": {
+    "VOLATILE_OVERSOLD_BOUNCE": {
+      "original": {
+        "return_pct": 4.9,
+        "win_rate": 74.3,
+        "trades": 175,
+        "pf": 1.73,
+        "sharpe": 15.48,
+        "mdd": 1.36,
+        "avg_win": 2.9,
+        "avg_loss": -1.77
+      },
+      "optimized": {
+        "return_pct": 5.74,
+        "win_rate": 80.0,
+        "trades": 120,
+        "pf": 2.57,
+        "sharpe": 16.54,
+        "mdd": 1.01,
+        "avg_win": 3.01,
+        "avg_loss": -1.65
+      }
+    },
+    "CRASH_RECOVERY": {
+      "original": {
+        "return_pct": 4.01,
+        "win_rate": 57.8,
+        "trades": 294,
+        "pf": 1.34,
+        "sharpe": 10.44,
+        "mdd": 2.47,
+        "avg_win": 2.38,
+        "avg_loss": -1.36
+      },
+      "optimized": {
+        "return_pct": 4.27,
+        "win_rate": 58.5,
+        "trades": 294,
+        "pf": 1.37,
+        "sharpe": 10.65,
+        "mdd": 2.19,
+        "avg_win": 2.34,
+        "avg_loss": -1.34
+      }
+    },
+    "TRIPLE_BEARISH_REVERSAL": {
+      "original": {
+        "return_pct": 3.2,
+        "win_rate": 55.5,
+        "trades": 650,
+        "pf": 1.08,
+        "sharpe": 4.47,
+        "mdd": 6.5,
+        "avg_win": 1.93,
+        "avg_loss": -1.9
+      },
+      "optimized": {
+        "return_pct": 3.03,
+        "win_rate": 56.7,
+        "trades": 631,
+        "pf": 1.08,
+        "sharpe": 4.46,
+        "mdd": 5.81,
+        "avg_win": 1.84,
+        "avg_loss": -1.88
+      }
+    }
+  },
+  "summary": {
+    "before_30d": 11.200000000000001,
+    "after_30d": 15.39,
+    "diff_30d": 4.1899999999999995,
+    "original_90d": 12.11,
+    "optimized_90d": 13.04,
+    "diff_90d": 0.9299999999999997
+  }
+}

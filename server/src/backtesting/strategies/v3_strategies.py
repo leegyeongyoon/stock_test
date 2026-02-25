@@ -1,6 +1,7 @@
-"""v3 데이터 기반 전략 (DB 역분석 결과)
+"""v3 데이터 기반 전략 (v3.3 최적화 파라미터)
 
-30일 5분봉 데이터 245,656건 역분석 → 수수료 포함 기대수익 양수인 패턴만 전략화.
+30일 5분봉 데이터 역분석 → v3.2 OpenAI 최적화 → v3.3 90일 검증 완료.
+30일: +11.20% → +15.39% (+4.19%p), 90일: +12.11% → +13.04% (+0.93%p)
 
 핵심 발견:
 - TP/SL 1:1 (2%/2%) 또는 4:3 (2%/1.5%) + 긴 보유시간(120~180분)이 최적
@@ -28,11 +29,12 @@ class VolatileOversoldBounceSignalGenerator:
     def __init__(self, params: dict = None):
         self.params = params or {}
         self.min_atr_pct = self.params.get("min_atr_pct", 1.0)
-        self.max_rsi = self.params.get("max_rsi", 35)
-        self.min_rvol = self.params.get("min_rvol", 1.5)
+        self.max_rsi = self.params.get("max_rsi", 30)
+        self.min_rvol = self.params.get("min_rvol", 2.5)
         self.position_pct = self.params.get("position_pct", 0.10)
         self._last_entry: dict[str, datetime] = {}
-        self._cooldown_minutes = self.params.get("cooldown_minutes", 60)
+        self._cooldown_minutes = self.params.get("cooldown_minutes", 90)
+        self._blocked_hours_kst = self.params.get("blocked_hours_kst", [])
 
     def __call__(self, timestamp, history, symbols):
         signals = []
@@ -43,6 +45,12 @@ class VolatileOversoldBounceSignalGenerator:
         return signals
 
     def _evaluate(self, timestamp, history, symbol) -> Optional[dict]:
+        # 시간대 필터 (KST = UTC+9)
+        if self._blocked_hours_kst:
+            kst_hour = (timestamp.hour + 9) % 24
+            if kst_hour in self._blocked_hours_kst:
+                return None
+
         if symbol in self._last_entry:
             elapsed = (timestamp - self._last_entry[symbol]).total_seconds() / 60
             if elapsed < self._cooldown_minutes:
@@ -61,18 +69,18 @@ class VolatileOversoldBounceSignalGenerator:
         if current.close <= current.open:
             return None
 
-        # 2. RSI < 35
+        # 2. RSI < max_rsi
         closes = [c.close for c in candles]
         rsi = self._calc_rsi(closes, 14)
         if rsi is None or rsi >= self.max_rsi:
             return None
 
-        # 3. ATR% >= 1.0%
+        # 3. ATR% >= min_atr_pct
         atr_pct = self._calc_atr_pct(candles, 14, price)
         if atr_pct is None or atr_pct < self.min_atr_pct:
             return None
 
-        # 4. RVOL >= 1.5
+        # 4. RVOL >= min_rvol
         rvol = history.calc_rvol(symbol, "5m", 20)
         if not rvol or rvol < self.min_rvol:
             return None
@@ -131,11 +139,12 @@ class CrashRecoverySignalGenerator:
     def __init__(self, params: dict = None):
         self.params = params or {}
         self.min_drop_pct = self.params.get("min_drop_pct", 0.02)
-        self.max_rsi = self.params.get("max_rsi", 40)
-        self.min_rvol = self.params.get("min_rvol", 2.0)
+        self.max_rsi = self.params.get("max_rsi", 35)
+        self.min_rvol = self.params.get("min_rvol", 2.5)
         self.position_pct = self.params.get("position_pct", 0.10)
         self._last_entry: dict[str, datetime] = {}
-        self._cooldown_minutes = self.params.get("cooldown_minutes", 45)
+        self._cooldown_minutes = self.params.get("cooldown_minutes", 60)
+        self._blocked_hours_kst = self.params.get("blocked_hours_kst", [])
 
     def __call__(self, timestamp, history, symbols):
         signals = []
@@ -146,6 +155,12 @@ class CrashRecoverySignalGenerator:
         return signals
 
     def _evaluate(self, timestamp, history, symbol) -> Optional[dict]:
+        # 시간대 필터 (KST = UTC+9)
+        if self._blocked_hours_kst:
+            kst_hour = (timestamp.hour + 9) % 24
+            if kst_hour in self._blocked_hours_kst:
+                return None
+
         if symbol in self._last_entry:
             elapsed = (timestamp - self._last_entry[symbol]).total_seconds() / 60
             if elapsed < self._cooldown_minutes:
@@ -231,6 +246,7 @@ class TripleBearishReversalSignalGenerator:
         self.position_pct = self.params.get("position_pct", 0.10)
         self._last_entry: dict[str, datetime] = {}
         self._cooldown_minutes = self.params.get("cooldown_minutes", 30)
+        self._blocked_hours_kst = self.params.get("blocked_hours_kst", [])
 
     def __call__(self, timestamp, history, symbols):
         signals = []
@@ -241,6 +257,12 @@ class TripleBearishReversalSignalGenerator:
         return signals
 
     def _evaluate(self, timestamp, history, symbol) -> Optional[dict]:
+        # 시간대 필터 (KST = UTC+9)
+        if self._blocked_hours_kst:
+            kst_hour = (timestamp.hour + 9) % 24
+            if kst_hour in self._blocked_hours_kst:
+                return None
+
         if symbol in self._last_entry:
             elapsed = (timestamp - self._last_entry[symbol]).total_seconds() / 60
             if elapsed < self._cooldown_minutes:

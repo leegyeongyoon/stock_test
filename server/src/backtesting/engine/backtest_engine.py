@@ -233,8 +233,8 @@ class BacktestEngine:
         """청산 조건 체크"""
         positions_to_close = []
 
-        for symbol, position in self._account.positions.items():
-            price = current_prices.get(symbol)
+        for pos_key, position in self._account.positions.items():
+            price = current_prices.get(position.symbol)
             if price is None:
                 continue
 
@@ -246,11 +246,11 @@ class BacktestEngine:
             # 청산 체크
             exit_reason = exit_checker(position, price, self._history_provider)
             if exit_reason:
-                positions_to_close.append((symbol, exit_reason, price))
+                positions_to_close.append((pos_key, exit_reason, price))
 
         # 청산 실행
-        for symbol, reason, price in positions_to_close:
-            await self._close_position(symbol, price, reason)
+        for pos_key, reason, price in positions_to_close:
+            await self._close_position(pos_key, price, reason)
 
     async def _process_signal(
         self,
@@ -281,15 +281,30 @@ class BacktestEngine:
         signal: dict,
     ) -> None:
         """포지션 진입"""
+        strategy = signal.get("strategy", self._config.strategy)
+        # 복합 전략: strategy:symbol 키로 전략별 독립 포지션 허용
+        position_key = f"{strategy}:{symbol}" if self._config.parameters.get("multi_strategy") else symbol
+
         # 이미 포지션 있으면 스킵
-        if symbol in self._account.positions:
+        if position_key in self._account.positions:
             return
 
-        # 포지션 사이즈 계산 (자본의 일정 비율)
-        position_pct = signal.get("position_pct", 0.1)  # 기본 10%
-        position_value = self._account.cash * position_pct
+        # 최대 동시 포지션 제한
+        max_positions = self._config.parameters.get("max_positions", 50)
+        if len(self._account.positions) >= max_positions:
+            return
 
-        if not self._account.can_buy(position_value):
+        # 포지션 사이즈 계산 (equity 기반 복리 성장)
+        position_pct = signal.get("position_pct", 0.1)  # 기본 10%
+        use_margin = self._config.parameters.get("margin_mode", False)
+        if use_margin:
+            # 마진 모드: 초기 자본 기준 고정 (전략별 독립 운용)
+            position_value = self._account.initial_capital * position_pct
+        else:
+            position_value = self._account.equity * position_pct
+            position_value = min(position_value, self._account.cash * 0.95)
+
+        if not use_margin and not self._account.can_buy(position_value):
             return
 
         # 슬리피지 적용
@@ -306,7 +321,7 @@ class BacktestEngine:
         position = SimulatedPosition(
             trade_id=str(uuid.uuid4())[:8],
             symbol=symbol,
-            strategy=self._config.strategy,
+            strategy=strategy,
             entry_time=self._current_time,
             entry_price=exec_price,
             quantity=quantity,
@@ -314,7 +329,7 @@ class BacktestEngine:
             entry_indicators=signal.get("indicators", {}),
         )
 
-        self._account.positions[symbol] = position
+        self._account.positions[position_key] = position
 
         logger.debug(
             "Opened position",
@@ -326,12 +341,12 @@ class BacktestEngine:
 
     async def _close_position(
         self,
-        symbol: str,
+        pos_key: str,
         price: float,
         reason: str,
     ) -> None:
         """포지션 청산"""
-        position = self._account.positions.get(symbol)
+        position = self._account.positions.get(pos_key)
         if not position:
             return
 
@@ -354,7 +369,7 @@ class BacktestEngine:
         # 거래 기록
         trade = BacktestTrade(
             trade_id=position.trade_id,
-            symbol=symbol,
+            symbol=position.symbol,
             strategy=position.strategy,
             entry_time=position.entry_time,
             entry_price=position.entry_price,
@@ -368,18 +383,18 @@ class BacktestEngine:
             holding_minutes=holding_minutes,
             max_profit_pct=position.max_profit_pct,
             max_drawdown_pct=position.max_drawdown_pct,
-            entry_indicators=position.entry_indicators,  # v28: 진입 시점 지표
+            entry_indicators=position.entry_indicators,
         )
 
         self._account.closed_trades.append(trade)
 
         # 계좌 업데이트
         self._account.cash += exit_value - commission
-        del self._account.positions[symbol]
+        del self._account.positions[pos_key]
 
         logger.debug(
             "Closed position",
-            symbol=symbol,
+            symbol=position.symbol,
             price=exec_price,
             pnl=pnl,
             pnl_pct=f"{pnl_pct*100:.2f}%",
@@ -394,12 +409,13 @@ class BacktestEngine:
         """모든 포지션 청산 (백테스트 종료 시)"""
         self._current_time = timestamp
 
-        for symbol in list(self._account.positions.keys()):
+        for pos_key in list(self._account.positions.keys()):
+            position = self._account.positions[pos_key]
             # 마지막 가격 찾기
-            candles = all_candles.get(symbol, [])
+            candles = all_candles.get(position.symbol, [])
             if candles:
                 price = candles[-1].close
-                await self._close_position(symbol, price, "backtest_end")
+                await self._close_position(pos_key, price, "backtest_end")
 
     def _record_equity(self, timestamp: datetime) -> None:
         """에쿼티 기록"""

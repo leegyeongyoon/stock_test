@@ -31,7 +31,7 @@ from src.backtesting.strategies.strategy_adapters import get_signal_generator, g
 from src.models.database import async_session
 
 OPENAI_MODEL = "gpt-4o"
-MAX_ROUNDS = 3
+MAX_ROUNDS = 5
 
 SYMBOLS = [
     "KRW-ETH", "KRW-IP", "KRW-DOGE", "KRW-USDT", "KRW-SHIB",
@@ -729,7 +729,8 @@ async def optimize_single_strategy(
         print(f"  변경: {openai_response.get('changes', 'N/A')}")
         print(f"  이유: {openai_response.get('reasoning', 'N/A')}")
         if openai_response.get("code_changes"):
-            print(f"  코드변경 제안: {openai_response['code_changes'][:200]}...")
+            code_changes_str = str(openai_response['code_changes'])
+            print(f"  코드변경 제안: {code_changes_str[:200]}...")
 
         new_params = openai_response.get("params", {})
         if not new_params:
@@ -824,6 +825,37 @@ async def optimize_single_strategy(
     }
 
 
+async def run_90d_validation(strategy_name: str, params: dict) -> dict:
+    """90일 전체 데이터 검증 백테스트"""
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=90)
+
+    config = BacktestConfig(
+        strategy=strategy_name, symbols=SYMBOLS,
+        start_date=start_date, end_date=end_date,
+        interval="5m", initial_capital=1_000_000,
+        parameters=params,
+    )
+
+    async with async_session() as db:
+        loader = BacktestDataLoader(db)
+        engine = BacktestEngine(config, loader)
+        signal_gen = get_signal_generator(strategy_name, params)
+        exit_chk = get_exit_checker(strategy_name, params)
+        result = await engine.run(signal_gen, exit_chk)
+
+        return {
+            "return_pct": result.metrics.total_return_pct,
+            "win_rate": result.metrics.win_rate,
+            "trades": result.metrics.total_trades,
+            "pf": result.metrics.profit_factor or 0,
+            "sharpe": result.metrics.sharpe_ratio or 0,
+            "mdd": result.metrics.max_drawdown_pct,
+            "avg_win": result.metrics.avg_win_pct or 0,
+            "avg_loss": result.metrics.avg_loss_pct or 0,
+        }
+
+
 async def main():
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -833,10 +865,10 @@ async def main():
     client = AsyncOpenAI(api_key=api_key)
 
     print("\n" + "=" * 100)
-    print("  v3.2 전략 OpenAI 심층 최적화")
+    print("  v3.3 전략 OpenAI 심층 최적화")
     print("  소스코드 + 전체거래내역 + 심볼별/시간대별 분석 제공")
     print("=" * 100)
-    print(f"  모델: {OPENAI_MODEL} | 라운드: {MAX_ROUNDS}회 | 30일 백테스트")
+    print(f"  모델: {OPENAI_MODEL} | 라운드: {MAX_ROUNDS}회 | 30일 최적화 + 90일 검증")
     print(f"  심볼: {len(SYMBOLS)}개 | 수수료: 0.05%×2 | 슬리피지: 5bps")
     print("=" * 100)
 
@@ -847,22 +879,66 @@ async def main():
         result = await optimize_single_strategy(client, strategy_name, strategy_info)
         all_results.append(result)
 
+    # ─── 90일 검증 ───
+    print(f"\n\n{'=' * 100}")
+    print("  90일 전체 데이터 검증")
+    print(f"{'=' * 100}")
+
+    validation_results = {}
+    for r in all_results:
+        strategy_name = r['strategy']
+        print(f"\n  {strategy_name} 90일 검증 중...")
+
+        # 최적화된 파라미터로 90일 백테스트
+        optimized_90d = await run_90d_validation(strategy_name, r['best_params'])
+        # 원본 파라미터로 90일 백테스트 (비교용)
+        original_90d = await run_90d_validation(strategy_name, r['original_params'])
+
+        validation_results[strategy_name] = {
+            "original_90d": original_90d,
+            "optimized_90d": optimized_90d,
+        }
+
+        print(
+            f"    원본 90일: {original_90d['return_pct']:+.2f}% | "
+            f"WR {original_90d['win_rate']:.1f}% | "
+            f"{original_90d['trades']}건 | PF {original_90d['pf']:.2f}"
+        )
+        print(
+            f"    최적화 90일: {optimized_90d['return_pct']:+.2f}% | "
+            f"WR {optimized_90d['win_rate']:.1f}% | "
+            f"{optimized_90d['trades']}건 | PF {optimized_90d['pf']:.2f}"
+        )
+
+        diff = optimized_90d['return_pct'] - original_90d['return_pct']
+        status = "IMPROVED" if diff > 0 else "WORSE"
+        print(f"    → {status}: {diff:+.2f}%p 차이")
+
     # ─── 전체 요약 ───
     print(f"\n\n{'=' * 100}")
     print("  전체 최적화 결과 요약")
     print(f"{'=' * 100}")
 
     total_before = sum(baseline.values())
-    total_after = 0.0
+    total_after_30d = 0.0
+    total_after_90d_orig = 0.0
+    total_after_90d_opt = 0.0
 
     for r in all_results:
-        total_after += r['best_return']
+        total_after_30d += r['best_return']
         before = baseline.get(r['strategy'], 0)
         diff = r['best_return'] - before
         improved_rounds = len([h for h in r['history'] if h.get('applied')])
 
+        v90 = validation_results.get(r['strategy'], {})
+        orig_90d = v90.get("original_90d", {}).get("return_pct", 0)
+        opt_90d = v90.get("optimized_90d", {}).get("return_pct", 0)
+        total_after_90d_orig += orig_90d
+        total_after_90d_opt += opt_90d
+
         print(f"\n  {r['strategy']}:")
-        print(f"    v3.1: {before:+.2f}% → 최적화 후: {r['best_return']:+.2f}% ({diff:+.2f}%p)")
+        print(f"    30일: v3.2 {before:+.2f}% → 최적화 {r['best_return']:+.2f}% ({diff:+.2f}%p)")
+        print(f"    90일: 원본 {orig_90d:+.2f}% → 최적화 {opt_90d:+.2f}% ({opt_90d-orig_90d:+.2f}%p)")
         print(f"    개선 적용: {improved_rounds}/{MAX_ROUNDS} 라운드")
 
         # 변경된 파라미터 표시
@@ -876,8 +952,8 @@ async def main():
             print(f"    변경 없음 (기존 파라미터 최적)")
 
     print(f"\n  {'─' * 90}")
-    print(f"  v3.1 합산: {total_before:+.2f}% → 최적화 후: {total_after:+.2f}% ({total_after - total_before:+.2f}%p)")
-    print(f"  진행: v27(-258%) → v2.1(-49.65%) → v3.0(-5.47%) → v3.1(+11.20%) → v3.2({total_after:+.2f}%)")
+    print(f"  30일 합산: v3.2 {total_before:+.2f}% → v3.3 {total_after_30d:+.2f}% ({total_after_30d - total_before:+.2f}%p)")
+    print(f"  90일 합산: 원본 {total_after_90d_orig:+.2f}% → 최적화 {total_after_90d_opt:+.2f}% ({total_after_90d_opt - total_after_90d_orig:+.2f}%p)")
 
     # 결과 저장
     output = {
@@ -885,10 +961,20 @@ async def main():
         "model": OPENAI_MODEL,
         "rounds": MAX_ROUNDS,
         "results": all_results,
+        "validation_90d": {
+            strategy_name: {
+                "original": v.get("original_90d", {}),
+                "optimized": v.get("optimized_90d", {}),
+            }
+            for strategy_name, v in validation_results.items()
+        },
         "summary": {
-            "before": total_before,
-            "after": total_after,
-            "diff": total_after - total_before,
+            "before_30d": total_before,
+            "after_30d": total_after_30d,
+            "diff_30d": total_after_30d - total_before,
+            "original_90d": total_after_90d_orig,
+            "optimized_90d": total_after_90d_opt,
+            "diff_90d": total_after_90d_opt - total_after_90d_orig,
         },
     }
     output_path = "reports/analysis/v3_optimization_results.json"

@@ -1,6 +1,6 @@
-"""v3 라이브 전략 모듈 (v3.2 OpenAI 최적화 파라미터)
+"""v3 라이브 전략 모듈 (v3.3 최적화 파라미터, 90일 검증 완료)
 
-백테스트 +12.49%/30일 달성 3개 전략을 라이브 엔진용으로 변환.
+v3.2 → v3.3: 30일 +15.39%, 90일 +13.04% (검증 통과)
 candle_manager 기반 실시간 지표 계산.
 
 전략:
@@ -159,7 +159,7 @@ class V3BaseStrategy:
 class VolatileOversoldBounce(V3BaseStrategy):
     """ATR>1% + RSI<30 + RVOL>2.5 + 양봉"""
 
-    # v3.2 최적화 파라미터
+    # v3.3 최적화 파라미터 (90일 검증: +5.74%, PF 2.57)
     SL_PCT = float(os.environ.get("V3_VOB_SL_PCT", "-0.02"))
     TP_PCT = float(os.environ.get("V3_VOB_TP_PCT", "0.02"))
     TRAIL_TRIGGER = 0.015

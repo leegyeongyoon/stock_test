@@ -1,0 +1,204 @@
+{
+  "session_id": "opt_ff6cfb4a",
+  "timestamp": "2026-02-24T07:12:17.602234",
+  "config": {
+    "total_rounds": 15,
+    "symbols_count": 70,
+    "initial_capital": 1000000
+  },
+  "statistics": {
+    "total_backtests": 29,
+    "total_openai_calls": 19,
+    "total_cost_usd": 0.21,
+    "total_candidates_created": 9,
+    "candidates_selected": 0,
+    "candidates_rejected": 9,
+    "duration_minutes": 94.4
+  },
+  "selected_strategies": [],
+  "rejected_strategies": [
+    {
+      "name": "BTC Correlation Dip Buy",
+      "type": "btc_correlation",
+      "return_pct": 0.0,
+      "reason": "Return 0.00% < 2.0%"
+    },
+    {
+      "name": "BTC Lagged Recovery",
+      "type": "btc_correlation",
+      "return_pct": 0.0,
+      "reason": "Return 0.00% < 2.0%"
+    },
+    {
+      "name": "Triple Bearish Volume Reversal",
+      "type": "mean_reversion",
+      "return_pct": -13.55,
+      "reason": "Return -13.55% < 2.0%"
+    },
+    {
+      "name": "Oversold Volume Spike Reversal",
+      "type": "mean_reversion",
+      "return_pct": -25.73,
+      "reason": "Return -25.73% < 2.0%"
+    },
+    {
+      "name": "RSI Volume Dip Buy",
+      "type": "mean_reversion",
+      "return_pct": -25.73,
+      "reason": "Return -25.73% < 2.0%"
+    },
+    {
+      "name": "ATR Volatility Rebound",
+      "type": "volume",
+      "return_pct": -28.43,
+      "reason": "Return -28.43% < 2.0%"
+    },
+    {
+      "name": "ATR Crash Recovery",
+      "type": "volume",
+      "return_pct": -34.53,
+      "reason": "Return -34.53% < 2.0%"
+    },
+    {
+      "name": "Momentum Volume Confirmation",
+      "type": "momentum",
+      "return_pct": -45.91,
+      "reason": "Return -45.91% < 2.0%"
+    },
+    {
+      "name": "Breakout Volume Surge",
+      "type": "breakout",
+      "return_pct": -28.01,
+      "reason": "Return -28.01% < 2.0%"
+    }
+  ],
+  "ensemble": {
+    "members": [],
+    "type_diversity": 0,
+    "max_correlation": 0.0,
+    "expected_return_pct": 0.0,
+    "expected_sharpe": 0.0
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "phase": "discovery",
+      "best_return_pct": 0.0,
+      "candidates_created": 3,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 2,
+      "phase": "discovery",
+      "best_return_pct": 0.0,
+      "candidates_created": 3,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 3,
+      "phase": "discovery",
+      "best_return_pct": 0.0,
+      "candidates_created": 3,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 4,
+      "phase": "generation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 2,
+      "errors": []
+    },
+    {
+      "round": 5,
+      "phase": "generation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 2,
+      "errors": []
+    },
+    {
+      "round": 6,
+      "phase": "generation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 2,
+      "errors": []
+    },
+    {
+      "round": 7,
+      "phase": "generation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 2,
+      "errors": []
+    },
+    {
+      "round": 8,
+      "phase": "generation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 1,
+      "errors": []
+    },
+    {
+      "round": 9,
+      "phase": "optimization",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 10,
+      "phase": "optimization",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 11,
+      "phase": "optimization",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 12,
+      "phase": "optimization",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 13,
+      "phase": "validation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 14,
+      "phase": "validation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    },
+    {
+      "round": 15,
+      "phase": "validation",
+      "best_return_pct": 0.0,
+      "candidates_created": 0,
+      "candidates_modified": 0,
+      "errors": []
+    }
+  ]
+}

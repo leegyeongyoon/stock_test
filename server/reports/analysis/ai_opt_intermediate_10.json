@@ -1,0 +1,80 @@
+{
+  "session_id": "opt_ff6cfb4a",
+  "current_round": 10,
+  "candidates": {
+    "c_4263801b": {
+      "name": "Oversold Volume Spike Reversal",
+      "type": "mean_reversion",
+      "return_pct": -25.73,
+      "sharpe": -12.73,
+      "trades": 5446,
+      "active": true
+    },
+    "c_f9464275": {
+      "name": "ATR Crash Recovery",
+      "type": "volume",
+      "return_pct": -34.53,
+      "sharpe": -17.31,
+      "trades": 1532,
+      "active": true
+    },
+    "c_c64f075a": {
+      "name": "Triple Bearish Volume Reversal",
+      "type": "mean_reversion",
+      "return_pct": -13.55,
+      "sharpe": -8.4,
+      "trades": 1288,
+      "active": true
+    },
+    "c_a3f3f42f": {
+      "name": "Momentum Volume Confirmation",
+      "type": "momentum",
+      "return_pct": -23.3,
+      "sharpe": -27.4,
+      "trades": 1348,
+      "active": true
+    },
+    "c_3f053243": {
+      "name": "Breakout Volume Surge",
+      "type": "breakout",
+      "return_pct": -28.01,
+      "sharpe": -34.12,
+      "trades": 1288,
+      "active": true
+    },
+    "c_fa925a99": {
+      "name": "BTC Correlation Dip Buy",
+      "type": "btc_correlation",
+      "return_pct": 0.0,
+      "sharpe": 0,
+      "trades": 0,
+      "active": true
+    },
+    "c_9e4d5b17": {
+      "name": "RSI Volume Dip Buy",
+      "type": "mean_reversion",
+      "return_pct": -25.73,
+      "sharpe": -12.73,
+      "trades": 5446,
+      "active": true
+    },
+    "c_0e2bd0a8": {
+      "name": "ATR Volatility Rebound",
+      "type": "volume",
+      "return_pct": -28.43,
+      "sharpe": -15.02,
+      "trades": 8287,
+      "active": true
+    },
+    "c_a1024269": {
+      "name": "BTC Lagged Recovery",
+      "type": "btc_correlation",
+      "return_pct": 0.0,
+      "sharpe": 0,
+      "trades": 0,
+      "active": true
+    }
+  },
+  "total_backtests": 19,
+  "total_cost_usd": 0.2
+}
